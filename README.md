@@ -40,6 +40,26 @@ gpt --prompt='create documentation for this JavaScript function' --input=functio
 gpt --prompt='summarize this article' --input=article.txt | grep 'keyword' > summarized_with_keyword.txt
 ```
 
+4. **Combine Text from Multiple Files and Summarize:*
+```bash
+cat file1.txt file2.txt | gpt --prompt='combine and summarize the information from these two texts' > summarized_information.txt
+```
+
+5. **Generate a List of Ideas and Sort by Relevance:**
+```bash
+gpt --prompt='generate a list of 10 innovative AI project ideas' | sort -R | gpt --prompt='rank these AI project ideas by their potential impact' > sorted_AI_project_ideas.txt
+```
+
+6. **Extract Quotes from a Text and Generate a Motivational Poster:**
+```bash
+grep -o '".*"' input_text.txt | gpt --prompt='create a motivational poster using one of these quotes' > motivational_poster.txt
+```
+
+7. **Filter Log File and Generate a Report:**
+```bash
+grep 'ERROR' log_file.txt | gpt --prompt='analyze these error logs and generate a brief report on the most common issues' > error_report.txt
+```
+
 With GPT-CLI, the possibilities are limited only by your imagination and ability to prompt and string together commands.
 
 I hope this tool will empower you to integrate GPT into your workflow, streamline your tasks, and unleash your creativity.
