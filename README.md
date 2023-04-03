@@ -16,21 +16,29 @@ GPT, or Generative Pre-trained Transformer, is known for its remarkable language
 
 The primary goal of this project is to create a command line interface (CLI) for GPT, allowing you to access its incredible capabilities right from your terminal. This CLI will enable you to perform tasks like generating code, writing content, and more, all by simply running commands.
 
-For example, you could generate a bash script for "Hello, World!" with the following command: <br />
-```gpt --prompt='refactor this Python function for better readability' --input=original_code.py > refactored_code.py```
+For example, you could generate a bash script for "Hello, World!" with the following command:
+```bash
+gpt --prompt='refactor this Python function for better readability' --input=original_code.py > refactored_code.py
+```
 
 But GPT-CLI's potential doesn't stop there. You can even pipe GPT commands to other commands, or back to GPT itself, creating powerful and dynamic workflows.
 
 Here are some additional ideas for GPT-CLI functionalities:
 
-1. **Code Refactoring:** Use GPT-CLI to refactor your code by providing a prompt and outputting the result to the desired file. <br />
-```gpt --prompt='refactor this Python function for better readability' --input=original_code.py > refactored_code.py```
+1. **Code Refactoring:** Use GPT-CLI to refactor your code by providing a prompt and outputting the result to the desired file.
+```bash
+gpt --prompt='refactor this Python function for better readability' --input=original_code.py > refactored_code.py
+```
 
-2. **Automated Documentation:** Generate documentation for your code by providing relevant prompts and file paths. <br />
-```gpt --prompt='create documentation for this JavaScript function' --input=function.js > documentation.md```
+2. **Automated Documentation:** Generate documentation for your code by providing relevant prompts and file paths.
+```bash
+gpt --prompt='create documentation for this JavaScript function' --input=function.js > documentation.md
+```
 
-3. **Text Processing:** Use GPT-CLI in conjunction with other command line tools to process and manipulate text, such as grep, awk, or sed. <br />
-```gpt --prompt='summarize this article' --input=article.txt | grep 'keyword' > summarized_with_keyword.txt```
+3. **Text Processing:** Use GPT-CLI in conjunction with other command line tools to process and manipulate text, such as grep, awk, or sed.
+```bash
+gpt --prompt='summarize this article' --input=article.txt | grep 'keyword' > summarized_with_keyword.txt
+```
 
 With GPT-CLI, the possibilities are limited only by your imagination and ability to prompt and string together commands.
 
