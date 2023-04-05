@@ -1,7 +1,6 @@
 ﻿using GptConsoleApp;
 using System.CommandLine.Binding;
 using System.CommandLine;
-using System.CommandLine.Parsing;
 
 public class GptParametersBinder : BinderBase<GptParameters>
 {
@@ -75,7 +74,7 @@ public class GptParametersBinder : BinderBase<GptParameters>
         GptParameters = new GptParameters
         {
             ApiKey = bindingContext.ParseResult.GetValueForOption(_apiKeyOption),
-            BaseUrl = bindingContext.ParseResult.GetValueForOption(_baseUrlOption),
+            BaseDomain = bindingContext.ParseResult.GetValueForOption(_baseUrlOption),
             Prompt = bindingContext.ParseResult.GetValueForOption(_promptOption),
             Input = bindingContext.ParseResult.GetValueForOption(_inputOption),
             Config = bindingContext.ParseResult.GetValueForOption(_configOption),

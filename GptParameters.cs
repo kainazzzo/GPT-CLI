@@ -3,7 +3,7 @@
 public class GptParameters
 {
     public string ApiKey { get; set; }
-    public string BaseUrl { get; set; }
+    public string BaseDomain { get; set; }
     public string Prompt { get; set; }
     public string Input { get; set; }
     public string Config { get; set; }
