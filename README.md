@@ -40,7 +40,7 @@ gpt --prompt='create documentation for this JavaScript function' --input=functio
 gpt --prompt='summarize this article' --input=article.txt | grep 'keyword' > summarized_with_keyword.txt
 ```
 
-4. **Combine Text from Multiple Files and Summarize:*
+4. **Combine Text from Multiple Files and Summarize:**
 ```bash
 cat file1.txt file2.txt | gpt --prompt='combine and summarize the information from these two texts' > summarized_information.txt
 ```
