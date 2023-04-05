@@ -72,11 +72,14 @@ class Program
 
         if (response.Successful == true)
         {
-            await Console.Out.WriteAsync(response.Choices.First().Text);
+            foreach (var choice in response.Choices)
+            {
+                await Console.Out.WriteAsync(choice.Text.Trim());
+            }
         }
         else
         {
-            await Console.Out.WriteAsync(response.Error.Message);
+            await Console.Out.WriteAsync(response.Error.Message.Trim());
         }
     }
 
