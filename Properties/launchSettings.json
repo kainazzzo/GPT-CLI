@@ -1,0 +1,8 @@
+{
+  "profiles": {
+    "GPT-CLI": {
+      "commandName": "Project",
+      "commandLineArgs": "prompt \"hello world\" api-key \"test\" base-url \"https://www.datti.net\""
+    }
+  }
+}

@@ -1,6 +1,7 @@
 ﻿using GptConsoleApp;
 using System.CommandLine.Binding;
 using System.CommandLine;
+using System.CommandLine.Parsing;
 
 public class GptParametersBinder : BinderBase<GptParameters>
 {
@@ -71,7 +72,7 @@ public class GptParametersBinder : BinderBase<GptParameters>
 
     protected override GptParameters GetBoundValue(BindingContext bindingContext)
     {
-        return new GptParameters
+        GptParameters = new GptParameters
         {
             ApiKey = bindingContext.ParseResult.GetValueForOption(_apiKeyOption),
             BaseUrl = bindingContext.ParseResult.GetValueForOption(_baseUrlOption),
@@ -94,5 +95,10 @@ public class GptParametersBinder : BinderBase<GptParameters>
             LogitBias = bindingContext.ParseResult.GetValueForOption(_logitBiasOption),
             User = bindingContext.ParseResult.GetValueForOption(_userOption)
         };
+ 
+
+        return GptParameters;
     }
+
+    public GptParameters GptParameters { get; private set; }
 }
