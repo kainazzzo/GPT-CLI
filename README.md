@@ -22,7 +22,7 @@ Alternatively, you can also use the api-key command line parameter:
 gpt api-key "sk-your-api-key-here" prompt "generate a hello world python script" > hello.py
 ```
 
-Since this is a .NET 7 standalone console application, you won't need to worry about installing the .net cli in your environment.
+Since this is a .NET 7 standalone console application, you won't need to worry about installing the .NET CLI or runtime in your environment.
 
 ## Features
 
