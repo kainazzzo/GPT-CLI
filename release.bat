@@ -18,7 +18,7 @@ if not "%SUFFIX%"=="" (
 )
 
 echo Updating project file...
-powershell -Command "(Get-Content .\gpt.csproj) -replace '(<FileVersion>)[\d\.]+(</FileVersion>)', '`${1}%FILE_VERSION%`${2}' -replace '(<AssemblyVersion>)[\d\.]+(</AssemblyVersion>)', '`${1}%ASSEMBLY_VERSION%`${2}' -replace '(<Version>)[\d\.\-a-zA-Z]+(</Version>)', '`${1}%FILE_VERSION%%SUFFIX%`${2}' | Set-Content .\gpt.csproj"
+powershell -Command "$xml = [xml](Get-Content .\gpt.csproj); $xml.Project.PropertyGroup.FileVersion = '%FILE_VERSION%'; $xml.Project.PropertyGroup.AssemblyVersion = '%ASSEMBLY_VERSION%'; $xml.Project.PropertyGroup.Version = '%FILE_VERSION%%SUFFIX%'; $xml.Save('.\gpt.csproj')"
 
 echo Committing the changes...
 echo git add .\gpt.csproj
