@@ -22,19 +22,19 @@ class Program
         var configOption = new Option<string>("config", () => "appSettings.json", "The path to the appSettings.json config file");
 
         // Add the rest of the available fields as command line parameters
-        var modelOption = new Option<string>("model", () => "text-davinci-003", "The model ID to use. Defaults to text-davinci-003");
+        var modelOption = new Option<string>("model", () => "text-davinci-003", "The model ID to use.");
         var suffixOption = new Option<string>("suffix", "The suffix that comes after a completion of inserted text");
-        var maxTokensOption = new Option<int>("max-tokens", () => 50, "The maximum number of tokens to generate in the completion. Defaults to 50.");
+        var maxTokensOption = new Option<int>("max-tokens", () => 50, "The maximum number of tokens to generate in the completion.");
         var temperatureOption = new Option<double>("temperature", "The sampling temperature to use, between 0 and 2");
         var topPOption = new Option<double>("top-p", "The value for nucleus sampling");
-        var nOption = new Option<int>("n", () => 1, "The number of completions to generate for each prompt. Defaults to 1");
+        var nOption = new Option<int>("n", () => 1, "The number of completions to generate for each prompt.");
         var streamOption = new Option<bool>("stream", "Whether to stream back partial progress");
         var logprobsOption = new Option<int>("logprobs", "Include the log probabilities on the most likely tokens");
         var echoOption = new Option<bool>("echo", "Echo back the prompt in addition to the completion");
         var stopOption = new Option<string>("stop", "Up to 4 sequences where the API will stop generating further tokens");
         var presencePenaltyOption = new Option<double>("presence-penalty", "Penalty for new tokens based on their presence in the text so far");
         var frequencyPenaltyOption = new Option<double>("frequency-penalty", "Penalty for new tokens based on their frequency in the text so far");
-        var bestOfOption = new Option<int>("best-of", () => 1, "Generates best_of completions server-side and returns the best one. Defaults to 1.");
+        var bestOfOption = new Option<int>("best-of", () => 1, "Generates best_of completions server-side and returns the best one.");
         var logitBiasOption = new Option<string>("logit-bias", "Modify the likelihood of specified tokens appearing in the completion");
         var userOption = new Option<string>("user", "A unique identifier representing your end-user");
 
