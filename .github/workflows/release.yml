@@ -78,19 +78,20 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         for artifact_name in GPT-CLI-win-x64 GPT-CLI-linux-x64 GPT-CLI-osx-x64; do
-          asset_path="./artifacts/$artifact_name.zip"
+          asset_path="./artifacts/$artifact_name"
           if [ -f "$asset_path" ]; then
+            echo "Compressing $artifact_name"
+            7z a -tzip "./artifacts/$artifact_name.zip" "$asset_path"
+            asset_path="./artifacts/$artifact_name.zip"
             echo "Uploading $artifact_name.zip"
+    
             curl \
-              --progress-bar \
-              --location \
               --request POST \
-              --header "Accept: application/vnd.github.v3+json" \
-              --header "Content-Type: application/zip" \
               --header "Authorization: token $GITHUB_TOKEN" \
-              --upload-file "$asset_path" \
-              "${{ steps.create_release.outputs.upload_url }}?name=$artifact_name.zip"
+              --header "Content-Type: application/zip" \
+              --data-binary "@$asset_path" \
+              --url "https://uploads.github.com/repos/${{ github.repository }}/${{ steps.create_release.outputs.id }}/releases/$release_id/assets?name=$artifact_name.zip"
           else
-            echo "Skipping $artifact_name.zip (file not found)"
+            echo "Artifact $artifact_name not found."
           fi
         done
