@@ -62,7 +62,7 @@ class Program
             .Build()
             .InvokeAsync(args);
 
-        if (retValue == 0)
+        if (retValue == 0 && binder.GPTParameters != null && !string.IsNullOrWhiteSpace(binder.GPTParameters.ApiKey) && !string.IsNullOrEmpty(binder.GPTParameters.Prompt))
         {
             // Set up dependency injection
             var services = new ServiceCollection();
