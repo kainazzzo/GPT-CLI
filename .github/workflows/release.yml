@@ -79,7 +79,8 @@ jobs:
       run: |
         for artifact_name in GPT-CLI-win-x64 GPT-CLI-linux-x64 GPT-CLI-osx-x64; do
           asset_path="./artifacts/$artifact_name"
-          if [ -f "$asset_path" ]; then
+          pwd
+          if [ -f "$asset_path" ]; 
             echo "Compressing $artifact_name"
             zip -j "./artifacts/$artifact_name.zip" "$asset_path"
             asset_path="./artifacts/$artifact_name.zip"
