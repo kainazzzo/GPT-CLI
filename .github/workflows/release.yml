@@ -43,8 +43,8 @@ jobs:
     - name: Upload artifacts
       uses: actions/upload-artifact@v2
       with:
-        name: ${{ matrix.artifact_name }}
-        path: ${{ matrix.artifact_name }}.zip
+        name: ${{ matrix.artifact_name }}.zip
+        path: build/${{ matrix.artifact_name }}.zip
   create-release:
     needs: build-and-release
     runs-on: ubuntu-latest
