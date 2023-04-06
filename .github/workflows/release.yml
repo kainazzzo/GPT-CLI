@@ -10,7 +10,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
+        include:
+          - os: windows-latest
+            runtime: win-x64
+          - os: ubuntu-latest
+            runtime: linux-x64
+          - os: macos-latest
+            runtime: osx-x64
 
     steps:
     - name: Checkout code
@@ -23,12 +29,6 @@ jobs:
 
     - name: Build and Publish
       run: dotnet publish -c Release -r ${{ matrix.runtime }} --self-contained true
-      env:
-        matrix:
-          runtime:
-            windows-latest: win-x64
-            ubuntu-latest: linux-x64
-            macos-latest: osx-x64
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v2
