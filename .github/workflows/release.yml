@@ -48,9 +48,8 @@ jobs:
     - name: Upload artifacts
       uses: actions/upload-artifact@v2
       with:
-        name: ${{ matrix.os }}-binary
-        path: bin/Release/net7.0/${{ matrix.runtime }}/publish/
-
+        name: ${{ matrix.artifact_name }}
+        path: ${{ matrix.artifact_name }}.zip
   create-release:
     needs: build-and-release
     runs-on: ubuntu-latest
@@ -60,6 +59,8 @@ jobs:
 
     - name: Download artifacts
       uses: actions/download-artifact@v2
+      with:
+        path: artifacts
 
     - name: Create Release
       id: create_release
@@ -72,13 +73,26 @@ jobs:
         draft: false
         prerelease: false
 
-    - name: Upload Release Asset
-      id: upload-release-asset
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: Upload Release Assets
+      uses: actions/github-script@v5
       with:
-        upload_url: ${{ steps.create_release.outputs.upload_url }}
-        asset_path: ${{ matrix.artifact_name }}.zip
-        asset_name: ${{ matrix.artifact_name }}.zip
-        asset_content_type: application/zip
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+        script: |
+          const fs = require('fs');
+          const artifact_names = ['GPT-CLI-win-x64', 'GPT-CLI-linux-x64', 'GPT-CLI-osx-x64'];
+          for (const artifact_name of artifact_names) {
+            const asset_path = `artifacts/${artifact_name}.zip`;
+            if (fs.existsSync(asset_path)) {
+              await github.repos.uploadReleaseAsset({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: ${{ steps.create_release.outputs.id }},
+                name: `${artifact_name}.zip`,
+                data: fs.readFileSync(asset_path),
+                headers: {
+                  'content-type': 'application/zip',
+                  'content-length': fs.statSync(asset_path).size,
+                },
+              });
+            }
+          }
