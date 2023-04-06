@@ -56,7 +56,6 @@ jobs:
       uses: actions/download-artifact@v2
       with:
         path: ./artifacts
-
     - name: Create Release
       id: create_release
       uses: actions/create-release@v1
@@ -67,20 +66,33 @@ jobs:
         release_name: Release ${{ github.ref }}
         draft: false
         prerelease: false
-    - name: Upload Release Assets
+
+    - name: Upload Release Assets (win-64)
+      uses: actions/upload-release-asset@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      run: |
-        for artifact_name in GPT-CLI-win-x64 GPT-CLI-linux-x64 GPT-CLI-osx-x64; do
-            asset_path="./artifacts/$artifact_name.zip"
-            echo "Uploading $artifact_name.zip"
-            curl \
-                --progress-bar \
-                --location \
-                --request POST \
-                --header "Accept: application/vnd.github.v3+json" \
-                --header "Content-Type: application/zip" \
-                --header "Authorization: token $GITHUB_TOKEN" \
-                --upload-file "$asset_path" \
-                "https://uploads.github.com/repos/${{ github.repository }}/releases/${{ steps.create_release.outputs.id }}/assets?name=$artifact_name.zip"
-        done
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: ./artifacts/GPT-CLI-win-x64.zip
+        asset_name: GPT-CLI-win-x64.zip
+        asset_content_type: application/zip
+
+    - name: Upload Release Assets (linux-64)
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: ./artifacts/GPT-CLI-linux-x64.zip
+        asset_name: GPT-CLI-linux-x64.zip
+        asset_content_type: application/zip
+
+    - name: Upload Release Assets (osx-64)
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        upload_url: ${{ steps.create_release.outputs.upload_url }}
+        asset_path: ./artifacts/GPT-CLI-osx-x64.zip
+        asset_name: GPT-CLI-osx-x64.zip
+        asset_content_type: application/zip
