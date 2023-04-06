@@ -6,6 +6,9 @@
     <RootNamespace>GPT.CLI</RootNamespace>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>disable</Nullable>
+    <FileVersion>0.9.2.0</FileVersion>
+    <AssemblyVersion>0.9.2.0</AssemblyVersion>
+    <Version>0.9.2-alpha</Version>
   </PropertyGroup>
 
   <ItemGroup>
