@@ -74,25 +74,23 @@ jobs:
         prerelease: false
 
     - name: Upload Release Assets
-      uses: actions/github-script@v5
-      with:
-        github-token: ${{ secrets.GITHUB_TOKEN }}
-        script: |
-          const fs = require('fs');
-          const artifact_names = ['GPT-CLI-win-x64', 'GPT-CLI-linux-x64', 'GPT-CLI-osx-x64'];
-          for (const artifact_name of artifact_names) {
-            const asset_path = `artifacts/${artifact_name}.zip`;
-            if (fs.existsSync(asset_path)) {
-              await github.repos.uploadReleaseAsset({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                release_id: ${{ steps.create_release.outputs.id }},
-                name: `${artifact_name}.zip`,
-                data: fs.readFileSync(asset_path),
-                headers: {
-                  'content-type': 'application/zip',
-                  'content-length': fs.statSync(asset_path).size,
-                },
-              });
-            }
-          }
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        for artifact_name in GPT-CLI-win-x64 GPT-CLI-linux-x64 GPT-CLI-osx-x64; do
+          asset_path="./artifacts/$artifact_name.zip"
+          if [ -f "$asset_path" ]; then
+            echo "Uploading $artifact_name.zip"
+            curl \
+              --progress-bar \
+              --location \
+              --request POST \
+              --header "Accept: application/vnd.github.v3+json" \
+              --header "Content-Type: application/zip" \
+              --header "Authorization: token $GITHUB_TOKEN" \
+              --upload-file "$asset_path" \
+              "${{ steps.create_release.outputs.upload_url }}?name=$artifact_name.zip"
+          else
+            echo "Skipping $artifact_name.zip (file not found)"
+          fi
+        done
