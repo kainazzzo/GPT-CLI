@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
@@ -6,9 +6,9 @@
     <RootNamespace>GPT.CLI</RootNamespace>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>disable</Nullable>
-    $10.9.4</FileVersion>
-    $10.9.4</AssemblyVersion>
-    $10.9.4-alpha</Version>
+    <FileVersion>0.9.3.0</FileVersion>
+    <AssemblyVersion>0.9.3.0</AssemblyVersion>
+    <Version>0.9.3-alpha</Version>
   </PropertyGroup>
 
   <ItemGroup>
