@@ -28,7 +28,7 @@ jobs:
         dotnet-version: 7.0.x
 
     - name: Build and Publish
-      run: dotnet publish -c Release -r ${{ matrix.runtime }} --self-contained true
+      run: dotnet publish --project gpt.csproj -c Release -r ${{ matrix.runtime }} --self-contained true
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v2
