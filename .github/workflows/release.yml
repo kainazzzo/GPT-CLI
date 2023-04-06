@@ -38,8 +38,12 @@ jobs:
     - name: Build and Publish
       run: |
         dotnet publish gpt.csproj -c Release -r ${{ matrix.runtime }} --self-contained true -p:PublishSingleFile=true -o build/${{ matrix.artifact_name }}
-        mv build/${{ matrix.artifact_name }}/GPT-CLI* build/${{ matrix.artifact_name }}/${{ matrix.artifact_name }}
-        zip -r ${{ matrix.artifact_name }}.zip build/${{ matrix.artifact_name }}/${{ matrix.artifact_name }}
+        if [ "${{ matrix.os }}" == "windows-latest" ]; then
+          mv build/${{ matrix.artifact_name }}/GPT-CLI.exe build/${{ matrix.artifact_name }}/${{ matrix.artifact_name }}.exe
+        else
+          mv build/${{ matrix.artifact_name }}/GPT-CLI build/${{ matrix.artifact_name }}/${{ matrix.artifact_name }}
+        fi
+        zip -r ${{ matrix.artifact_name }}.zip build/${{ matrix.artifact_name }}/${{ matrix.artifact_name }}*
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v2
