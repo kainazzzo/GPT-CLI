@@ -34,7 +34,6 @@ jobs:
       uses: actions/setup-dotnet@v1
       with:
         dotnet-version: 7.0.x
-
     - name: Build and Publish
       shell: bash
       run: |
@@ -44,7 +43,7 @@ jobs:
         else
           mv build/${{ matrix.artifact_name }}/gpt build/${{ matrix.artifact_name }}/${{ matrix.artifact_name }}
         fi
-        zip -r ${{ matrix.artifact_name }}.zip build/${{ matrix.artifact_name }}/${{ matrix.artifact_name }}*
+        7z a -tzip ${{ matrix.artifact_name }}.zip build/${{ matrix.artifact_name }}/${{ matrix.artifact_name }}*
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v2
