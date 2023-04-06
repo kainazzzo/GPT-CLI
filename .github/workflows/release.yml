@@ -34,10 +34,9 @@ jobs:
 
     - name: Build and Publish
       run: |
-        dotnet publish gpt.csproj -c Release -r ${{ matrix.artifact_name }} --self-contained true -p:PublishSingleFile=true -o build/${{ matrix.artifact_name }}
-        mv build/${{ matrix.artifact_name }}/GPT-CLI* build/${{ matrix.artifact_name }}/${{ matrix.artifact_name }}
-        zip -r ${{ matrix.artifact_name }}.zip build/${{ matrix.artifact_name }}/${{ matrix.artifact_name }}
-
+        dotnet publish gpt.csproj -c Release -r ${{ matrix.runtime }} --self-contained true -p:PublishSingleFile=true -o build/${{ matrix.artifact_name }}
+      env:
+        DOTNET_CLI_TELEMETRY_OPTOUT: 1
     - name: Upload artifacts
       uses: actions/upload-artifact@v2
       with:
