@@ -2,6 +2,28 @@
 
 Welcome to GPT-CLI, a command line interface for harnessing the power of OpenAI's GPT, the world's most advanced language model. This project aims to make the incredible capabilities of GPT more accessible and easily integrated into your workflow, right from the command line.
 
+## Prerequisites
+
+In order to use this CLI interface, you will need an OpenAI API key. [Sign up](https://platform.openai.com) if you haven't already, and create an [api key](https://platform.openai.com/account/api-keys). 
+
+Then, create an appSettings.json file next to your gpt binary with the following contents:
+
+```json
+{
+  "OpenAI": {
+    "api-key": "sk-your-api-key-here"
+  }
+}
+```
+
+Alternatively, you can also use the api-key command line parameter:
+
+```bash
+gpt api-key "sk-your-api-key-here" prompt "generate a hello world python script" > hello.py
+```
+
+Since this is a .NET 7 standalone console application, you won't need to worry about installing the .net cli in your environment.
+
 ## Features
 
 GPT, or Generative Pre-trained Transformer, is known for its remarkable language understanding and generation abilities. Here are some features that you might have already experienced using OpenAI's GPT model, whether it's through the API or ChatGPT:
