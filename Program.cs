@@ -2,7 +2,6 @@
 using System.CommandLine.Builder;
 using System.CommandLine.Parsing;
 using System.Text.Json;
-using GPT.Logic;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using OpenAI.GPT3.Extensions;
