@@ -50,11 +50,21 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v2
-
+    - name: Install GitHub CLI
+      run: |
+        curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo gpg --dearmor -o /usr/share/keyrings/githubcli-archive-keyring.gpg
+        echo "deb [signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+        sudo apt update
+        sudo apt install gh
     - name: Download artifacts
-      uses: actions/download-artifact@v2
-      with:
-        path: ./artifacts
+      run: |
+        mkdir -p ./artifacts
+        gh run download --repo $GITHUB_REPOSITORY --name GPT-CLI-linux-x64.zip -D ./artifacts
+        gh run download --repo $GITHUB_REPOSITORY --name GPT-CLI-osx-x64.zip -D ./artifacts
+        gh run download --repo $GITHUB_REPOSITORY --name GPT-CLI-win-x64.zip -D ./artifacts
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
     - name: List artifacts directory
       run: |
         ls -la ./artifacts
