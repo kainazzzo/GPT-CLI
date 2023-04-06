@@ -57,60 +57,63 @@ class Program
         }, binder);
 
         // Invoke the command
-        await new CommandLineBuilder(rootCommand)
+        var retValue = await new CommandLineBuilder(rootCommand)
             .UseDefaults()
             .Build()
             .InvokeAsync(args);
 
-        // Set up dependency injection
-        var services = new ServiceCollection();
-        await ConfigureServices(services, binder);
-
-        await using var serviceProvider = services.BuildServiceProvider();
-
-        // get a OpenAILogic instance
-        var openAILogic = serviceProvider.GetService<OpenAILogic>();
-        IEnumerable<ChoiceResponse> choices = null;
-        string error = null;
-
-        if (!string.IsNullOrEmpty(binder.GPTParameters.Input))
+        if (retValue == 0)
         {
-            var response = await openAILogic.CreateEditAsync(MapEdit(binder.GPTParameters));
+            // Set up dependency injection
+            var services = new ServiceCollection();
+            await ConfigureServices(services, binder);
 
-            if (response.Successful)
+            await using var serviceProvider = services.BuildServiceProvider();
+
+            // get a OpenAILogic instance
+            var openAILogic = serviceProvider.GetService<OpenAILogic>();
+            IEnumerable<ChoiceResponse> choices = null;
+            string error = null;
+
+            if (!string.IsNullOrEmpty(binder.GPTParameters.Input))
             {
-                choices = response.Choices;
+                var response = await openAILogic.CreateEditAsync(MapEdit(binder.GPTParameters));
+
+                if (response.Successful)
+                {
+                    choices = response.Choices;
+                }
+                else
+                {
+                    error = response.Error?.Message?.Trim();
+                }
             }
             else
             {
-                error = response.Error?.Message?.Trim();
-            }
-        }
-        else
-        {
-            var response = await openAILogic.CreateCompletionAsync(MapCreate(binder.GPTParameters));
+                var response = await openAILogic.CreateCompletionAsync(MapCreate(binder.GPTParameters));
 
-            if (response.Successful)
+                if (response.Successful)
+                {
+                    choices = response.Choices;
+                }
+                else
+                {
+                    error = response.Error?.Message?.Trim();
+                }
+            }
+
+
+            if (choices != null)
             {
-                choices = response.Choices;
+                foreach (var choice in choices)
+                {
+                    await Console.Out.WriteAsync(choice.Text.Trim());
+                }
             }
             else
             {
-                error = response.Error?.Message?.Trim();
+                await Console.Error.WriteAsync(error);
             }
-        }
-        
-
-        if (choices != null)
-        {
-            foreach (var choice in choices)
-            {
-                await Console.Out.WriteAsync(choice.Text.Trim());
-            }
-        }
-        else
-        {
-            await Console.Error.WriteAsync(error);
         }
     }
 
