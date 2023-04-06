@@ -37,10 +37,9 @@ jobs:
     - name: Build and Publish
       shell: bash
       run: |
-        dotnet publish gpt.csproj -c Release -r ${{ matrix.runtime }} --self-contained true -p:PublishSingleFile=true -o build/${{ matrix.artifact_name }}
-        cd build/${{ matrix.artifact_name }}
-        7z a -tzip ../${{ matrix.artifact_name }}.zip *
-        cd ../..
+        dotnet publish gpt.csproj -c Release -r ${{ matrix.runtime }} --self-contained true -p:PublishSingleFile=true -o .
+        ls -la *
+        7z a -tzip build/${{ matrix.artifact_name }}.zip build/${{ matrix.artifact_name }}
     - name: Upload artifacts
       uses: actions/upload-artifact@v2
       with:
