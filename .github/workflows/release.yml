@@ -92,9 +92,9 @@ jobs:
               --header "Content-Type: application/zip" \
               --header "Authorization: token $GITHUB_TOKEN" \
               --upload-file "$asset_path" \
-              "https://uploads.github.com/repos/${{ github.repository }}/releases/${{ steps.create_release.outputs.id }}/assets?name=$artifact_name.7z"
+              "https://uploads.github.com/repos/${{ github.repository }}/releases/${{ steps.create_release.outputs.id }}/assets?name=$artifact_name.zip"
      
           else
-            echo "Skipping $artifact_name.zip (file not found)"
+            echo "Skipping $asset_path (file not found)"
           fi
         done
