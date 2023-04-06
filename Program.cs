@@ -5,6 +5,7 @@ using System.Text.Json;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using OpenAI.GPT3.Extensions;
+using OpenAI.GPT3.ObjectModels;
 using OpenAI.GPT3.ObjectModels.RequestModels;
 using OpenAI.GPT3.ObjectModels.SharedModels;
 
@@ -22,7 +23,7 @@ class Program
         var configOption = new Option<string>("config", () => "appSettings.json", "The path to the appSettings.json config file");
 
         // Add the rest of the available fields as command line parameters
-        var modelOption = new Option<string>("model", () => "text-davinci-003", "The model ID to use.");
+        var modelOption = new Option<string>("model", () => "gpt-3.5-turbo", "The model ID to use.");
         var suffixOption = new Option<string>("suffix", "The suffix that comes after a completion of inserted text");
         var maxTokensOption = new Option<int>("max-tokens", () => 50, "The maximum number of tokens to generate in the completion.");
         var temperatureOption = new Option<double>("temperature", "The sampling temperature to use, between 0 and 2");
@@ -62,7 +63,7 @@ class Program
             .Build()
             .InvokeAsync(args);
 
-        if (retValue == 0 && binder.GPTParameters != null && !string.IsNullOrWhiteSpace(binder.GPTParameters.ApiKey) && !string.IsNullOrEmpty(binder.GPTParameters.Prompt))
+        if (retValue == 0 && binder.GPTParameters != null && !string.IsNullOrEmpty(binder.GPTParameters.Prompt))
         {
             // Set up dependency injection
             var services = new ServiceCollection();
@@ -75,7 +76,7 @@ class Program
             IEnumerable<ChoiceResponse> choices = null;
             string error = null;
 
-            if (!string.IsNullOrEmpty(binder.GPTParameters.Input))
+             if (!string.IsNullOrEmpty(binder.GPTParameters.Input))
             {
                 var response = await openAILogic.CreateEditAsync(MapEdit(binder.GPTParameters));
 
@@ -144,6 +145,23 @@ class Program
         services.AddScoped<OpenAILogic>();
     }
 
+    private static ChatCompletionCreateRequest MapChatCreate(GPTParameters parameters)
+    {
+        return new ChatCompletionCreateRequest
+        {
+            Messages = new List<ChatMessage> () {new(StaticValues.ChatMessageRoles.System, parameters.Prompt) },
+            Model = parameters.Model,
+            MaxTokens = parameters.MaxTokens,
+            N = parameters.N,
+            Temperature = (float?)parameters.Temperature,
+            TopP = (float?)parameters.TopP,
+            Stream = parameters.Stream,
+            Stop = parameters.Stop,
+            PresencePenalty = (float?)parameters.PresencePenalty,
+            FrequencyPenalty = (float?)parameters.FrequencyPenalty,
+            LogitBias = parameters.LogitBias == null ? null : JsonSerializer.Deserialize<Dictionary<string, double>>(parameters.LogitBias)
+        };
+    }
     private static CompletionCreateRequest MapCreate(GPTParameters parameters)
     {
         return new CompletionCreateRequest()
