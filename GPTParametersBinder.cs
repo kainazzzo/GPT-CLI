@@ -1,8 +1,9 @@
-﻿using GptConsoleApp;
+﻿using System.CommandLine;
 using System.CommandLine.Binding;
-using System.CommandLine;
 
-public class GptParametersBinder : BinderBase<GptParameters>
+namespace GPT.CLI;
+
+public class GPTParametersBinder : BinderBase<GPTParameters>
 {
     private readonly Option<string> _apiKeyOption;
     private readonly Option<string> _baseUrlOption;
@@ -25,7 +26,7 @@ public class GptParametersBinder : BinderBase<GptParameters>
     private readonly Option<string> _logitBiasOption;
     private readonly Option<string> _userOption;
 
-    public GptParametersBinder(
+    public GPTParametersBinder(
         Option<string> apiKeyOption,
         Option<string> baseUrlOption,
         Option<string> promptOption,
@@ -69,9 +70,9 @@ public class GptParametersBinder : BinderBase<GptParameters>
         _userOption = userOption;
     }
 
-    protected override GptParameters GetBoundValue(BindingContext bindingContext)
+    protected override GPTParameters GetBoundValue(BindingContext bindingContext)
     {
-        GptParameters = new GptParameters
+        GPTParameters = new GPTParameters
         {
             ApiKey = bindingContext.ParseResult.GetValueForOption(_apiKeyOption),
             BaseDomain = bindingContext.ParseResult.GetValueForOption(_baseUrlOption),
@@ -96,8 +97,8 @@ public class GptParametersBinder : BinderBase<GptParameters>
         };
  
 
-        return GptParameters;
+        return GPTParameters;
     }
 
-    public GptParameters GptParameters { get; private set; }
+    public GPTParameters GPTParameters { get; private set; }
 }

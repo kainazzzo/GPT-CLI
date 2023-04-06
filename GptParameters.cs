@@ -1,6 +1,6 @@
-﻿namespace GptConsoleApp;
+﻿namespace GPT.CLI;
 
-public class GptParameters
+public class GPTParameters
 {
     public string ApiKey { get; set; }
     public string BaseDomain { get; set; }

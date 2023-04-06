@@ -2,7 +2,8 @@
   "profiles": {
     "GPT-CLI": {
       "commandName": "Project",
-      "commandLineArgs": "prompt \"make a hello world bash script\""
+      "commandLineArgs": "model \"code-davinci-edit-001\" prompt \"make a hello world bat script\" < hello.sh",
+      "workingDirectory": "C:\\projects\\GPT-CLI\\bin\\Debug\\net7.0"
     }
   }
 }
