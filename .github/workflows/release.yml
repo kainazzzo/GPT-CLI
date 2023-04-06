@@ -39,11 +39,12 @@ jobs:
       run: |
         dotnet publish gpt.csproj -c Release -r ${{ matrix.runtime }} --self-contained true -p:PublishSingleFile=true -o build/${{ matrix.artifact_name }}
         if [ "${{ matrix.os }}" == "windows-latest" ]; then
-          mv build/${{ matrix.artifact_name }}/gpt.exe build/${{ matrix.artifact_name }}/${{ matrix.artifact_name }}.exe
+          mv build/${{ matrix.artifact_name }}/gpt.exe build/${{ matrix.artifact_name }}/
         else
-          mv build/${{ matrix.artifact_name }}/gpt build/${{ matrix.artifact_name }}/${{ matrix.artifact_name }}
+          mv build/${{ matrix.artifact_name }}/gpt build/${{ matrix.artifact_name }}/
         fi
-        7z a -tzip ${{ matrix.artifact_name }}.zip build/${{ matrix.artifact_name }}/${{ matrix.artifact_name }}*
+        7z a -tzip build/${{ matrix.artifact_name }}.zip build/${{ matrix.artifact_name }}*
+        rm -f build/${{ matrix.artifact_name }}
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v2
@@ -72,16 +73,11 @@ jobs:
         release_name: Release ${{ github.ref }}
         draft: false
         prerelease: false
-
     - name: Upload Release Assets
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         for artifact_name in GPT-CLI-win-x64 GPT-CLI-linux-x64 GPT-CLI-osx-x64; do
-            asset_path="./artifacts/$artifact_name"
-
-            echo "Compressing $artifact_name"
-            zip -j "./artifacts/$artifact_name.zip" "$asset_path"
             asset_path="./artifacts/$artifact_name.zip"
             echo "Uploading $artifact_name.zip"
             curl \
@@ -92,5 +88,5 @@ jobs:
                 --header "Content-Type: application/zip" \
                 --header "Authorization: token $GITHUB_TOKEN" \
                 --upload-file "$asset_path" \
-                "https://uploads.github.com/repos/${{ github.repository }}/releases/${{ steps.create_release.outputs.id }}/assets?name=$artifact_name.zip
+                "https://uploads.github.com/repos/${{ github.repository }}/releases/${{ steps.create_release.outputs.id }}/assets?name=$artifact_name.zip"
         done
