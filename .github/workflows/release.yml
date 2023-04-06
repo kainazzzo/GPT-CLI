@@ -81,17 +81,20 @@ jobs:
           asset_path="./artifacts/$artifact_name"
           if [ -f "$asset_path" ]; then
             echo "Compressing $artifact_name"
-            7z a -tzip "./artifacts/$artifact_name.zip" "$asset_path"
+            zip -j "./artifacts/$artifact_name.zip" "$asset_path"
             asset_path="./artifacts/$artifact_name.zip"
             echo "Uploading $artifact_name.zip"
-    
             curl \
+              --progress-bar \
+              --location \
               --request POST \
-              --header "Authorization: token $GITHUB_TOKEN" \
+              --header "Accept: application/vnd.github.v3+json" \
               --header "Content-Type: application/zip" \
-              --data-binary "@$asset_path" \
-              --url "https://uploads.github.com/repos/${{ github.repository }}/${{ steps.create_release.outputs.id }}/releases/$release_id/assets?name=$artifact_name.zip"
+              --header "Authorization: token $GITHUB_TOKEN" \
+              --upload-file "$asset_path" \
+              "https://uploads.github.com/repos/${{ github.repository }}/releases/${{ steps.create_release.outputs.id }}/assets?name=$artifact_name.7z"
+     
           else
-            echo "Artifact $artifact_name not found."
+            echo "Skipping $artifact_name.zip (file not found)"
           fi
         done
