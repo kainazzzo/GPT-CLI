@@ -5,9 +5,9 @@
     <RootNamespace>GPT.CLI</RootNamespace>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>disable</Nullable>
-    <FileVersion>0.9.8</FileVersion>
-    <AssemblyVersion>0.9.8</AssemblyVersion>
-    <Version>0.9.8-beta</Version>
+    <FileVersion>0.9.9</FileVersion>
+    <AssemblyVersion>0.9.9</AssemblyVersion>
+    <Version>0.9.9-beta</Version>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Betalgo.OpenAI.GPT3" Version="6.8.3" />
