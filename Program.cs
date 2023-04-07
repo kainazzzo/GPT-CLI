@@ -7,6 +7,7 @@ using Microsoft.Extensions.DependencyInjection;
 using OpenAI.GPT3.Extensions;
 using OpenAI.GPT3.ObjectModels;
 using OpenAI.GPT3.ObjectModels.RequestModels;
+using OpenAI.GPT3.ObjectModels.ResponseModels;
 
 namespace GPT.CLI;
 
@@ -23,11 +24,11 @@ class Program
 
         // Add the rest of the available fields as command line parameters
         var modelOption = new Option<string>("model", () => "gpt-3.5-turbo", "The model ID to use.");
-        var maxTokensOption = new Option<int>("max-tokens", () => 50, "The maximum number of tokens to generate in the completion.");
+        var maxTokensOption = new Option<int>("max-tokens", () => 1000, "The maximum number of tokens to generate in the completion.");
         var temperatureOption = new Option<double>("temperature", "The sampling temperature to use, between 0 and 2");
         var topPOption = new Option<double>("top-p", "The value for nucleus sampling");
         var nOption = new Option<int>("n", () => 1, "The number of completions to generate for each prompt.");
-        var streamOption = new Option<bool>("stream", "Whether to stream back partial progress");
+        var streamOption = new Option<bool>("stream", () => true, "Whether to stream back partial progress");
         var stopOption = new Option<string>("stop", "Up to 4 sequences where the API will stop generating further tokens");
         var presencePenaltyOption = new Option<double>("presence-penalty", "Penalty for new tokens based on their presence in the text so far");
         var frequencyPenaltyOption = new Option<double>("frequency-penalty", "Penalty for new tokens based on their frequency in the text so far");
@@ -72,22 +73,28 @@ class Program
                 ? MapChatEdit(binder.GPTParameters)
                 : MapChatCreate(binder.GPTParameters);
 
-            var response = await openAILogic.CreateChatCompletionAsync(chatRequest);
+            var responses = binder.GPTParameters.Stream == true 
+                ? openAILogic.CreateChatCompletionAsyncEnumerable(chatRequest)
+                : (await openAILogic.CreateChatCompletionAsync(chatRequest)).ToAsyncEnumerable();
 
-       
-            if (response.Successful)
+
+            await foreach (var response in responses)
             {
-                foreach (var choice in response.Choices)
+                if (response.Successful)
                 {
-                    await Console.Out.WriteAsync(choice.Message.Content.Trim());
+                    foreach (var choice in response.Choices)
+                    {
+                        await Console.Out.WriteAsync(choice.Message.Content);
+                    }
                 }
-            }
-            else
-            {
-                await Console.Error.WriteAsync(response.Error?.Message?.Trim());
+                else
+                {
+                    await Console.Error.WriteAsync(response.Error?.Message?.Trim());
+                }
             }
         }
     }
+
 
     private static async Task ConfigureServices(IServiceCollection services, GPTParametersBinder gptParametersBinder)
     {

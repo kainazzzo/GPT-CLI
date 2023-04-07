@@ -13,13 +13,13 @@ public class OpenAILogic
         _openAIService = openAIService;
     }
 
-    public async Task<CompletionCreateResponse> CreateCompletionAsync(CompletionCreateRequest request)
-    {
-        return await _openAIService.Completions.CreateCompletion(request);
-    }
-
     public async Task<ChatCompletionCreateResponse> CreateChatCompletionAsync(ChatCompletionCreateRequest request)
     {
         return await _openAIService.ChatCompletion.CreateCompletion(request);
+    }
+
+    public IAsyncEnumerable<ChatCompletionCreateResponse> CreateChatCompletionAsyncEnumerable(ChatCompletionCreateRequest request)
+    {
+        return _openAIService.ChatCompletion.CreateCompletionAsStream(request);
     }
 }

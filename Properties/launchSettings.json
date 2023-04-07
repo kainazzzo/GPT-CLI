@@ -2,7 +2,7 @@
   "profiles": {
     "GPT-CLI": {
       "commandName": "Project",
-      "commandLineArgs": "prompt \"give me a hello world bash script\"",
+      "commandLineArgs": "prompt \"generate a hello world bash script\"",
       "workingDirectory": "C:\\projects\\GPT-CLI\\bin\\Debug\\net7.0"
     }
   }
