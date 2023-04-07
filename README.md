@@ -6,7 +6,7 @@ Welcome to GPT-CLI, a command line interface for harnessing the power of OpenAI'
 
 In order to use this CLI interface, you will need an OpenAI API key. [Sign up](https://platform.openai.com) if you haven't already, and create an [api key](https://platform.openai.com/account/api-keys). 
 
-Then, create an appSettings.json file next to your gpt binary with the following contents:
+Then, create an appSettings.json file in the current working directory with the following contents:
 
 ```json
 {
