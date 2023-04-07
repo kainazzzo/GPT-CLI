@@ -150,8 +150,13 @@ class Program
         return new ChatCompletionCreateRequest
         {
             Messages = new List<ChatMessage>() { 
-                new (StaticValues.ChatMessageRoles.System,$"My next message will be a prompt describing how you should edit this text: {parameters.Input}"),
-                new(StaticValues.ChatMessageRoles.System, parameters.Prompt) },
+                new (StaticValues.ChatMessageRoles.System,$"My next message will be text. My message after that will be a prompt describing how you should proceed. I want you to read through the text I give you, understand it, and then apply the prompt in the message after using the text I give you first as a starting point. Your final message after the prompt should only be the result of the prompt applied to the input text, and no more."),
+                new (StaticValues.ChatMessageRoles.Assistant, "Sure. I will read through the next message, understand it, and then wait for the next message containing a prompt. After I combine them, my final response will be only the text edited with the prompt for a guide."),
+                new (StaticValues.ChatMessageRoles.User, parameters.Input),
+                new (StaticValues.ChatMessageRoles.Assistant, "Thank you. Now I will wait for the prompt and then apply it in context."),
+                new (StaticValues.ChatMessageRoles.User, parameters.Prompt)
+
+            },
             Model = parameters.Model,
             MaxTokens = parameters.MaxTokens,
             N = parameters.N,
@@ -161,7 +166,8 @@ class Program
             Stop = parameters.Stop,
             PresencePenalty = (float?)parameters.PresencePenalty,
             FrequencyPenalty = (float?)parameters.FrequencyPenalty,
-            LogitBias = parameters.LogitBias == null ? null : JsonSerializer.Deserialize<Dictionary<string, double>>(parameters.LogitBias)
+            LogitBias = parameters.LogitBias == null ? null : JsonSerializer.Deserialize<Dictionary<string, double>>(parameters.LogitBias),
+            User = parameters.User
         };
     }
 
@@ -179,7 +185,8 @@ class Program
             Stop = parameters.Stop,
             PresencePenalty = (float?)parameters.PresencePenalty,
             FrequencyPenalty = (float?)parameters.FrequencyPenalty,
-            LogitBias = parameters.LogitBias == null ? null : JsonSerializer.Deserialize<Dictionary<string, double>>(parameters.LogitBias)
+            LogitBias = parameters.LogitBias == null ? null : JsonSerializer.Deserialize<Dictionary<string, double>>(parameters.LogitBias),
+            User = parameters.User
         };
     }
     private static CompletionCreateRequest MapCreate(GPTParameters parameters)
