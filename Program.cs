@@ -73,12 +73,12 @@ class Program
 
             // get a OpenAILogic instance
             var openAILogic = serviceProvider.GetService<OpenAILogic>();
-            IEnumerable<ChoiceResponse> choices = null;
+            List<ChatChoiceResponse> choices = null;
             string error = null;
 
              if (!string.IsNullOrEmpty(binder.GPTParameters.Input))
             {
-                var response = await openAILogic.CreateEditAsync(MapEdit(binder.GPTParameters));
+                var response = await openAILogic.CreateChatCompletionAsync(MapChatEdit(binder.GPTParameters));
 
                 if (response.Successful)
                 {
@@ -91,7 +91,7 @@ class Program
             }
             else
             {
-                var response = await openAILogic.CreateCompletionAsync(MapCreate(binder.GPTParameters));
+                var response = await openAILogic.CreateChatCompletionAsync(MapChatCreate(binder.GPTParameters));
 
                 if (response.Successful)
                 {
@@ -108,7 +108,7 @@ class Program
             {
                 foreach (var choice in choices)
                 {
-                    await Console.Out.WriteAsync(choice.Text.Trim());
+                    await Console.Out.WriteAsync(choice.Message.Content.Trim());
                 }
             }
             else
@@ -143,6 +143,26 @@ class Program
             settings.BaseDomain = gptParameters.BaseDomain;
         });
         services.AddScoped<OpenAILogic>();
+    }
+
+    private static ChatCompletionCreateRequest MapChatEdit(GPTParameters parameters)
+    {
+        return new ChatCompletionCreateRequest
+        {
+            Messages = new List<ChatMessage>() { 
+                new (StaticValues.ChatMessageRoles.System,$"My next message will be a prompt describing how you should edit this text: {parameters.Input}"),
+                new(StaticValues.ChatMessageRoles.System, parameters.Prompt) },
+            Model = parameters.Model,
+            MaxTokens = parameters.MaxTokens,
+            N = parameters.N,
+            Temperature = (float?)parameters.Temperature,
+            TopP = (float?)parameters.TopP,
+            Stream = parameters.Stream,
+            Stop = parameters.Stop,
+            PresencePenalty = (float?)parameters.PresencePenalty,
+            FrequencyPenalty = (float?)parameters.FrequencyPenalty,
+            LogitBias = parameters.LogitBias == null ? null : JsonSerializer.Deserialize<Dictionary<string, double>>(parameters.LogitBias)
+        };
     }
 
     private static ChatCompletionCreateRequest MapChatCreate(GPTParameters parameters)

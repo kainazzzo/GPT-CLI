@@ -22,10 +22,4 @@ public class OpenAILogic
     {
         return await _openAIService.ChatCompletion.CreateCompletion(request);
     }
-
-    public async Task<EditCreateResponse> CreateEditAsync(EditCreateRequest request)
-    {
-        return await _openAIService.Edit.CreateEdit(request);
-    }
-
 }
