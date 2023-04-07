@@ -118,46 +118,47 @@ class Program
 
     private static ChatCompletionCreateRequest MapChatEdit(GPTParameters parameters)
     {
-        return new ChatCompletionCreateRequest
+        return MapCommon(parameters, new ChatCompletionCreateRequest
         {
-            Messages = new List<ChatMessage>() { 
-                new (StaticValues.ChatMessageRoles.System,"My next message will be text. My message after that will be a prompt describing how you should proceed. I want you to read through the text I give you, understand it, and then apply the prompt in the message after using the text I give you first as a starting point. Your final message after the prompt should only be the result of the prompt applied to the input text, and no more."),
-                new (StaticValues.ChatMessageRoles.Assistant, "Sure. I will read through the next message, understand it, and then wait for the next message containing a prompt. After I combine them, my final response will be only the text edited with the prompt for a guide."),
-                new (StaticValues.ChatMessageRoles.User, parameters.Input),
-                new (StaticValues.ChatMessageRoles.Assistant, "Thank you. Now I will wait for the prompt and then apply it in context."),
-                new (StaticValues.ChatMessageRoles.User, parameters.Prompt)
+            Messages = new List<ChatMessage>()
+            {
+                new(StaticValues.ChatMessageRoles.System,
+                    "My next message will be text. My message after that will be a prompt describing how you should proceed. I want you to read through the text I give you, understand it, and then apply the prompt in the message after using the text I give you first as a starting point. Your final message after the prompt should only be the result of the prompt applied to the input text, and no more."),
+                new(StaticValues.ChatMessageRoles.Assistant,
+                    "Sure. I will read through the next message, understand it, and then wait for the next message containing a prompt. After I combine them, my final response will be only the text edited with the prompt for a guide."),
+                new(StaticValues.ChatMessageRoles.User, parameters.Input),
+                new(StaticValues.ChatMessageRoles.Assistant,
+                    "Thank you. Now I will wait for the prompt and then apply it in context."),
+                new(StaticValues.ChatMessageRoles.User, parameters.Prompt)
 
-            },
-            Model = parameters.Model,
-            MaxTokens = parameters.MaxTokens,
-            N = parameters.N,
-            Temperature = (float?)parameters.Temperature,
-            TopP = (float?)parameters.TopP,
-            Stream = parameters.Stream,
-            Stop = parameters.Stop,
-            PresencePenalty = (float?)parameters.PresencePenalty,
-            FrequencyPenalty = (float?)parameters.FrequencyPenalty,
-            LogitBias = parameters.LogitBias == null ? null : JsonSerializer.Deserialize<Dictionary<string, double>>(parameters.LogitBias),
-            User = parameters.User
-        };
+            }
+        });
+    }
+
+    private static ChatCompletionCreateRequest MapCommon(GPTParameters parameters, ChatCompletionCreateRequest request)
+    {
+        request.Model = parameters.Model;
+        request.MaxTokens = parameters.MaxTokens;
+        request.N = parameters.N;
+        request.Temperature = (float?)parameters.Temperature;
+        request.TopP = (float?)parameters.TopP;
+        request.Stream = parameters.Stream;
+        request.Stop = parameters.Stop;
+        request.PresencePenalty = (float?)parameters.PresencePenalty;
+        request.FrequencyPenalty = (float?)parameters.FrequencyPenalty;
+        request.LogitBias = parameters.LogitBias == null
+            ? null
+            : JsonSerializer.Deserialize<Dictionary<string, double>>(parameters.LogitBias);
+        request.User = parameters.User;
+
+        return request;
     }
 
     private static ChatCompletionCreateRequest MapChatCreate(GPTParameters parameters)
     {
-        return new ChatCompletionCreateRequest
+        return MapCommon(parameters, new ChatCompletionCreateRequest
         {
-            Messages = new List<ChatMessage> () {new(StaticValues.ChatMessageRoles.System, parameters.Prompt) },
-            Model = parameters.Model,
-            MaxTokens = parameters.MaxTokens,
-            N = parameters.N,
-            Temperature = (float?)parameters.Temperature,
-            TopP = (float?)parameters.TopP,
-            Stream = parameters.Stream,
-            Stop = parameters.Stop,
-            PresencePenalty = (float?)parameters.PresencePenalty,
-            FrequencyPenalty = (float?)parameters.FrequencyPenalty,
-            LogitBias = parameters.LogitBias == null ? null : JsonSerializer.Deserialize<Dictionary<string, double>>(parameters.LogitBias),
-            User = parameters.User
-        };
+            Messages = new List<ChatMessage>() { new(StaticValues.ChatMessageRoles.System, parameters.Prompt) }
+        });
     }
 }
