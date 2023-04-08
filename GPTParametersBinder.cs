@@ -21,6 +21,7 @@ public class GPTParametersBinder : BinderBase<GPTParameters>
     private readonly Option<double> _frequencyPenaltyOption;
     private readonly Option<string> _logitBiasOption;
     private readonly Option<string> _userOption;
+    private readonly Option<bool> _chatOption;
 
     public GPTParametersBinder(
         Option<string> apiKeyOption,
@@ -38,7 +39,8 @@ public class GPTParametersBinder : BinderBase<GPTParameters>
         Option<double> presencePenaltyOption,
         Option<double> frequencyPenaltyOption,
         Option<string> logitBiasOption,
-        Option<string> userOption)
+        Option<string> userOption,
+        Option<bool> chatOption)
     {
         _apiKeyOption = apiKeyOption;
         _baseUrlOption = baseUrlOption;
@@ -56,6 +58,7 @@ public class GPTParametersBinder : BinderBase<GPTParameters>
         _frequencyPenaltyOption = frequencyPenaltyOption;
         _logitBiasOption = logitBiasOption;
         _userOption = userOption;
+        _chatOption = chatOption;
     }
 
     protected override GPTParameters GetBoundValue(BindingContext bindingContext)
@@ -77,7 +80,8 @@ public class GPTParametersBinder : BinderBase<GPTParameters>
             PresencePenalty = bindingContext.ParseResult.GetValueForOption(_presencePenaltyOption),
             FrequencyPenalty = bindingContext.ParseResult.GetValueForOption(_frequencyPenaltyOption),
             LogitBias = bindingContext.ParseResult.GetValueForOption(_logitBiasOption),
-            User = bindingContext.ParseResult.GetValueForOption(_userOption)
+            User = bindingContext.ParseResult.GetValueForOption(_userOption),
+            Chat = bindingContext.ParseResult.GetValueForOption(_chatOption)
         };
  
 
