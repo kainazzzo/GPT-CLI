@@ -119,13 +119,12 @@ class Program
 #       ###### #    #   #   #  #### ######     #       #       #        #  
 #       #    # ######   #   #     # #          #       #       #        #  
 #     # #    # #    #   #   #     # #          #       #     # #        #  
- #####  #    # #    #   #    #####  #          #        #####  ####### ### 
-                        ");
+ #####  #    # #    #   #    #####  #          #        #####  ####### ###");
                 var sb = new StringBuilder();
                 do
                 {
                     
-                    await Console.Out.WriteAsync("? ");
+                    await Console.Out.WriteAsync("\r\n? ");
                     var input = await Console.In.ReadLineAsync();
                     
 
