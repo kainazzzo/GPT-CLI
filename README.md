@@ -82,6 +82,10 @@ grep -o '".*"' input_text.txt | gpt --prompt "create a motivational poster using
 grep 'ERROR' log_file.txt | gpt --prompt "analyze these error logs and generate a brief report on the most common issues" > error_report.txt
 ```
 
+8. **Embed context into a chat session via curl, stripping html tags with sed:**
+```bash
+curl http://url/documentation | sed 's/<[^>]\+>//g' | gpt embed --chunk-size=2048 > docs.dat && gpt chat --file docs.dat
+```
 With GPT-CLI, the possibilities are limited only by your imagination and ability to prompt and string together commands.
 
 I hope this tool will empower you to integrate GPT into your workflow, streamline your tasks, and unleash your creativity.
