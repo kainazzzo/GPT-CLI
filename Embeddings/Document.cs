@@ -1,11 +1,15 @@
 ﻿using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace GPT.CLI.Embeddings
 {
     public class Document
     {
+        [JsonPropertyName("text")]
         public string Text { get; set; }
+
+        [JsonPropertyName("embed")]
         public List<double> Embedding { get; set; }
 
         public static List<Document> LoadEmbeddings(Stream input)
