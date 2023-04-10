@@ -330,22 +330,27 @@ class Program
 
     private static async Task<ChatCompletionCreateRequest> MapCommon(GPTParameters parameters, OpenAILogic openAILogic, ChatCompletionCreateRequest request)
     {
-        var documents = await ReadEmbedFilesAsync(parameters);
-
-        if (documents != null)
+        if (parameters.Prompt != null)
         {
-            // Search for the closest few documents and add those if they aren't used yet
-            var closestDocuments =
-                Document.FindMostSimilarDocuments(documents, await openAILogic.GetEmbeddingForPrompt(parameters.Prompt));
-            if (closestDocuments != null)
+            var documents = await ReadEmbedFilesAsync(parameters);
+
+            if (documents != null)
             {
-                foreach (var closestDocument in closestDocuments)
+                // Search for the closest few documents and add those if they aren't used yet
+                var closestDocuments =
+                    Document.FindMostSimilarDocuments(documents,
+                        await openAILogic.GetEmbeddingForPrompt(parameters.Prompt));
+                if (closestDocuments != null)
                 {
-                    request.Messages.Add(new(StaticValues.ChatMessageRoles.User,
+                    foreach (var closestDocument in closestDocuments)
+                    {
+                        request.Messages.Add(new(StaticValues.ChatMessageRoles.User,
                             $"Here is some context provided for you to learn from for the next prompt: {closestDocument.Text}"));
+                    }
                 }
             }
         }
+
         request.Model = parameters.Model;
         request.MaxTokens = parameters.MaxTokens;
         request.N = parameters.N;
@@ -366,7 +371,7 @@ class Program
     private static async Task<ChatCompletionCreateRequest> MapChatCreate(GPTParameters parameters,
         OpenAILogic openAILogic)
     {
-        var request = await MapCommon(parameters, openAILogic, new ChatCompletionCreateRequest
+        var request = await MapCommon(parameters, openAILogic,new ChatCompletionCreateRequest
         {
             Messages = new List<ChatMessage>()
         });
