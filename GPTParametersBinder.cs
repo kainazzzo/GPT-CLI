@@ -8,7 +8,6 @@ public class GPTParametersBinder : BinderBase<GPTParameters>
     private readonly Option<string> _apiKeyOption;
     private readonly Option<string> _baseUrlOption;
     private readonly Option<string> _promptOption;
-    private readonly Option<string> _inputOption;
     private readonly Option<string> _configOption;
     private readonly Option<string> _modelOption;
     private readonly Option<int> _maxTokensOption;
@@ -21,13 +20,11 @@ public class GPTParametersBinder : BinderBase<GPTParameters>
     private readonly Option<double> _frequencyPenaltyOption;
     private readonly Option<string> _logitBiasOption;
     private readonly Option<string> _userOption;
-    private readonly Option<bool> _chatOption;
 
     public GPTParametersBinder(
         Option<string> apiKeyOption,
         Option<string> baseUrlOption,
         Option<string> promptOption,
-        Option<string> inputOption,
         Option<string> configOption,
         Option<string> modelOption,
         Option<int> maxTokensOption,
@@ -39,13 +36,11 @@ public class GPTParametersBinder : BinderBase<GPTParameters>
         Option<double> presencePenaltyOption,
         Option<double> frequencyPenaltyOption,
         Option<string> logitBiasOption,
-        Option<string> userOption,
-        Option<bool> chatOption)
+        Option<string> userOption)
     {
         _apiKeyOption = apiKeyOption;
         _baseUrlOption = baseUrlOption;
         _promptOption = promptOption;
-        _inputOption = inputOption;
         _configOption = configOption;
         _modelOption = modelOption;
         _maxTokensOption = maxTokensOption;
@@ -58,7 +53,6 @@ public class GPTParametersBinder : BinderBase<GPTParameters>
         _frequencyPenaltyOption = frequencyPenaltyOption;
         _logitBiasOption = logitBiasOption;
         _userOption = userOption;
-        _chatOption = chatOption;
     }
 
     protected override GPTParameters GetBoundValue(BindingContext bindingContext)
@@ -68,7 +62,6 @@ public class GPTParametersBinder : BinderBase<GPTParameters>
             ApiKey = bindingContext.ParseResult.GetValueForOption(_apiKeyOption),
             BaseDomain = bindingContext.ParseResult.GetValueForOption(_baseUrlOption),
             Prompt = bindingContext.ParseResult.GetValueForOption(_promptOption),
-            Input = bindingContext.ParseResult.GetValueForOption(_inputOption),
             Config = bindingContext.ParseResult.GetValueForOption(_configOption),
             Model = bindingContext.ParseResult.GetValueForOption(_modelOption),
             MaxTokens = bindingContext.ParseResult.GetValueForOption(_maxTokensOption),
@@ -80,8 +73,7 @@ public class GPTParametersBinder : BinderBase<GPTParameters>
             PresencePenalty = bindingContext.ParseResult.GetValueForOption(_presencePenaltyOption),
             FrequencyPenalty = bindingContext.ParseResult.GetValueForOption(_frequencyPenaltyOption),
             LogitBias = bindingContext.ParseResult.GetValueForOption(_logitBiasOption),
-            User = bindingContext.ParseResult.GetValueForOption(_userOption),
-            Chat = bindingContext.ParseResult.GetValueForOption(_chatOption)
+            User = bindingContext.ParseResult.GetValueForOption(_userOption)
         };
  
 

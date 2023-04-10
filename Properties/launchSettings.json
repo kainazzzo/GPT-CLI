@@ -2,7 +2,7 @@
   "profiles": {
     "GPT-CLI": {
       "commandName": "Project",
-      "commandLineArgs": "chat true model \"gpt-4\"",
+      "commandLineArgs": "chat",
       "workingDirectory": "C:\\projects\\GPT-CLI\\bin\\Debug\\net7.0"
     }
   }

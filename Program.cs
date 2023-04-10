@@ -14,60 +14,81 @@ namespace GPT.CLI;
 
 class Program
 {
+    enum Mode
+    {
+        Normal,
+        Chat,
+        Embed
+    }
+
     static async Task Main(string[] args)
     {
         // Define command line parameters
-        var apiKeyOption = new Option<string>("api-key", "Your OpenAI API key");
-        var baseUrlOption = new Option<string>("base-domain", "The base URL for the OpenAI API");
-        var chatOption = new Option<bool>("chat", () => false, "Starts listening in chat mode.");
-        var promptOption = new Option<string>("prompt", "The prompt for text generation. Required outside of chat mode.");
-        var inputOption = new Option<string>("input", "The input text for processing. Combine this with a prompt to trigger edit mode. Also works with stdin for piping commands.");
-        var configOption = new Option<string>("config", () => "appSettings.json", "The path to the appSettings.json config file");
+        var apiKeyOption = new Option<string>("--api-key", "Your OpenAI API key");
+        var baseUrlOption = new Option<string>("--base-domain", "The base URL for the OpenAI API");
+        var promptOption = new Option<string>("--prompt", "The prompt for text generation. Optional for most commands.") {IsRequired = true};
+
+        var configOption = new Option<string>("--config", () => "appSettings.json", "The path to the appSettings.json config file");
 
         // Add the rest of the available fields as command line parameters
-        var modelOption = new Option<string>("model", () => "gpt-3.5-turbo", "The model ID to use.");
-        var maxTokensOption = new Option<int>("max-tokens", () => 1000, "The maximum number of tokens to generate in the completion.");
-        var temperatureOption = new Option<double>("temperature", "The sampling temperature to use, between 0 and 2");
-        var topPOption = new Option<double>("top-p", "The value for nucleus sampling");
-        var nOption = new Option<int>("n", () => 1, "The number of completions to generate for each prompt.");
-        var streamOption = new Option<bool>("stream", () => true, "Whether to stream back partial progress");
-        var stopOption = new Option<string>("stop", "Up to 4 sequences where the API will stop generating further tokens");
-        var presencePenaltyOption = new Option<double>("presence-penalty", "Penalty for new tokens based on their presence in the text so far");
-        var frequencyPenaltyOption = new Option<double>("frequency-penalty", "Penalty for new tokens based on their frequency in the text so far");
-        var logitBiasOption = new Option<string>("logit-bias", "Modify the likelihood of specified tokens appearing in the completion");
-        var userOption = new Option<string>("user", "A unique identifier representing your end-user");
+        var modelOption = new Option<string>("--model", () => "gpt-3.5-turbo", "The model ID to use.");
+        var maxTokensOption = new Option<int>("--max-tokens", () => 1000, "The maximum number of tokens to generate in the completion.");
+        var temperatureOption = new Option<double>("--temperature", "The sampling temperature to use, between 0 and 2");
+        var topPOption = new Option<double>("--top-p", "The value for nucleus sampling");
+        var nOption = new Option<int>("--n", () => 1, "The number of completions to generate for each prompt.");
+        var streamOption = new Option<bool>("--stream", () => true, "Whether to stream back partial progress");
+        var stopOption = new Option<string>("--stop", "Up to 4 sequences where the API will stop generating further tokens");
+        var presencePenaltyOption = new Option<double>("--presence-penalty", "Penalty for new tokens based on their presence in the text so far");
+        var frequencyPenaltyOption = new Option<double>("--frequency-penalty", "Penalty for new tokens based on their frequency in the text so far");
+        var logitBiasOption = new Option<string>("--logit-bias", "Modify the likelihood of specified tokens appearing in the completion");
+        var userOption = new Option<string>("--user", "A unique identifier representing your end-user");
+
+        var chatCommand = new Command("chat", "Starts listening in chat mode.");
+        var embedCommand = new Command("embed", "Create an embedding for STDIN.");
+
+        embedCommand.AddValidator(result =>
+        {
+            if (!Console.IsInputRedirected)
+            {
+                result.ErrorMessage = "Input required for embedding";
+            }
+        });
 
 
         // Create a command and add the options
-        var rootCommand = new RootCommand("GPT Console Application")
-        {
-            apiKeyOption, baseUrlOption, promptOption, inputOption, configOption,
-            modelOption, maxTokensOption, temperatureOption, topPOption,
-            nOption, streamOption, stopOption,
-            presencePenaltyOption, frequencyPenaltyOption, logitBiasOption, userOption,
-            chatOption
-        };
-        rootCommand.AddValidator(result =>
-        {
-            var co = result.Children.FirstOrDefault(o => o.Symbol.Name == "chat");
-            var po = result.Children.FirstOrDefault(o => o.Symbol.Name == "prompt");
-            if ((co == null || co is OptionResult chatResult && !chatResult.GetValueOrDefault<bool>()) && (po == null || po is OptionResult promptResult && promptResult.GetValueOrDefault<string>() == null))
-            {
-                result.ErrorMessage = "The prompt option is required when chat is false.";
-            }
+        var rootCommand = new RootCommand("GPT Console Application");
 
-        });
+        rootCommand.AddGlobalOption(apiKeyOption);
+        rootCommand.AddGlobalOption(baseUrlOption);
+        rootCommand.AddOption(promptOption);
+        rootCommand.AddGlobalOption(configOption);
+        rootCommand.AddGlobalOption(modelOption);
+        rootCommand.AddGlobalOption(maxTokensOption);
+        rootCommand.AddGlobalOption(temperatureOption);
+        rootCommand.AddGlobalOption(topPOption);
+        rootCommand.AddGlobalOption(nOption);
+        rootCommand.AddGlobalOption(streamOption);
+        rootCommand.AddGlobalOption(stopOption);
+        rootCommand.AddGlobalOption(presencePenaltyOption);
+        rootCommand.AddGlobalOption(frequencyPenaltyOption);
+        rootCommand.AddGlobalOption(logitBiasOption);
+        rootCommand.AddGlobalOption(userOption);
+
+        rootCommand.AddCommand(chatCommand);
+        rootCommand.AddCommand(embedCommand);
+
         var binder = new GPTParametersBinder(
-            apiKeyOption, baseUrlOption, promptOption, inputOption, configOption,
+            apiKeyOption, baseUrlOption, promptOption, configOption,
             modelOption, maxTokensOption, temperatureOption, topPOption,
             nOption, streamOption, stopOption,
-            presencePenaltyOption, frequencyPenaltyOption, logitBiasOption, userOption,
-            chatOption);
+            presencePenaltyOption, frequencyPenaltyOption, logitBiasOption, userOption);
+
+        Mode mode = Mode.Normal;
 
         // Set the handler for the rootCommand
-        rootCommand.SetHandler(_ =>
-        {
-        }, binder);
+        rootCommand.SetHandler(_ => {}, binder);
+        chatCommand.SetHandler(_ => mode = Mode.Chat, binder);
+        embedCommand.SetHandler(_ => mode = Mode.Embed, binder);
 
         // Invoke the command
         var retValue = await new CommandLineBuilder(rootCommand)
@@ -75,7 +96,7 @@ class Program
             .Build()
             .InvokeAsync(args);
 
-        if (retValue == 0 && binder.GPTParameters != null && (!string.IsNullOrEmpty(binder.GPTParameters.Prompt) || binder.GPTParameters.Chat))
+        if (retValue == 0 && binder.GPTParameters != null && (!string.IsNullOrEmpty(binder.GPTParameters.Prompt) || mode == Mode.Chat))
         {
             // Set up dependency injection
             var services = new ServiceCollection();
@@ -86,33 +107,20 @@ class Program
             // get a OpenAILogic instance
             var openAILogic = serviceProvider.GetService<OpenAILogic>();
 
-            if (!binder.GPTParameters.Chat)
+            switch (mode)
             {
-
-                var chatRequest = !string.IsNullOrWhiteSpace(binder.GPTParameters.Input)
-                    ? MapChatEdit(binder.GPTParameters)
-                    : MapChatCreate(binder.GPTParameters);
-
-                var responses = binder.GPTParameters.Stream == true
-                    ? openAILogic.CreateChatCompletionAsyncEnumerable(chatRequest)
-                    : (await openAILogic.CreateChatCompletionAsync(chatRequest)).ToAsyncEnumerable();
-
-                await foreach (var response in responses)
+                case Mode.Chat:
                 {
-                    await OutputChatResponse(response);
-                }
-            }
-            else
-            {
-                var chatGpt = new ChatGPTLogic(openAILogic, MapCommon(binder.GPTParameters, new ChatCompletionCreateRequest()
-                {
-                    Messages = new List<ChatMessage>(50)
+                    var chatGpt = new ChatGPTLogic(openAILogic, MapCommon(binder.GPTParameters, new ChatCompletionCreateRequest()
                     {
-                        new(StaticValues.ChatMessageRoles.System, "You are ChatGPT CLI, the helpful assistant, but you're running on a command line.")
+                        Messages = new List<ChatMessage>(50)
+                        {
+                            new(StaticValues.ChatMessageRoles.System, "You are ChatGPT CLI, the helpful assistant, but you're running on a command line.")
+                        }
                     }
-                }));
+                    ));
 
-                await Console.Out.WriteLineAsync(@"
+                    await Console.Out.WriteLineAsync(@"
  #####                       #####  ######  #######     #####  #       ### 
 #     # #    #   ##   ##### #     # #     #    #       #     # #        #  
 #       #    #  #  #    #   #       #     #    #       #       #        #  
@@ -120,38 +128,62 @@ class Program
 #       #    # ######   #   #     # #          #       #       #        #  
 #     # #    # #    #   #   #     # #          #       #     # #        #  
  #####  #    # #    #   #    #####  #          #        #####  ####### ###");
-                var sb = new StringBuilder();
-                do
-                {
+                    var sb = new StringBuilder();
+                    do
+                    {
                     
-                    await Console.Out.WriteAsync("\r\n? ");
-                    var input = await Console.In.ReadLineAsync();
+                        await Console.Out.WriteAsync("\r\n? ");
+                        var chatInput = await Console.In.ReadLineAsync();
                     
 
-                    if (!string.IsNullOrWhiteSpace(input))
-                    {
-                        chatGpt.AppendMessage(new(StaticValues.ChatMessageRoles.User, input));
-                        var responses = chatGpt.SendMessages();
-                        sb.Clear();
-                        await foreach (var response in responses)
+                        if (!string.IsNullOrWhiteSpace(chatInput))
                         {
-                            if (await OutputChatResponse(response))
+                            chatGpt.AppendMessage(new(StaticValues.ChatMessageRoles.User, chatInput));
+                            var responses = chatGpt.SendMessages();
+                            sb.Clear();
+                            await foreach (var response in responses)
                             {
-                                foreach (var choice in response.Choices)
+                                if (await OutputChatResponse(response))
                                 {
-                                    sb.Append(choice.Message.Content);
+                                    foreach (var choice in response.Choices)
+                                    {
+                                        sb.Append(choice.Message.Content);
+                                    }
                                 }
                             }
-                        }
 
-                        await Console.Out.WriteLineAsync();
-                        chatGpt.AppendMessage(new (StaticValues.ChatMessageRoles.Assistant, sb.ToString()));
-                    }
-                    else
+                            await Console.Out.WriteLineAsync();
+                            chatGpt.AppendMessage(new (StaticValues.ChatMessageRoles.Assistant, sb.ToString()));
+                        }
+                        else
+                        {
+                            break;
+                        }
+                    } while (true);
+
+                    break;
+                }
+                case Mode.Embed:
+                    throw new NotImplementedException();
+                    break;
+                case Mode.Normal:
+                default:
+                {
+                    var chatRequest = !string.IsNullOrWhiteSpace(binder.GPTParameters.Input)
+                        ? MapChatEdit(binder.GPTParameters)
+                        : MapChatCreate(binder.GPTParameters);
+
+                    var responses = binder.GPTParameters.Stream == true
+                        ? openAILogic.CreateChatCompletionAsyncEnumerable(chatRequest)
+                        : (await openAILogic.CreateChatCompletionAsync(chatRequest)).ToAsyncEnumerable();
+
+                    await foreach (var response in responses)
                     {
-                        break;
+                        await OutputChatResponse(response);
                     }
-                } while (true);
+
+                    break;
+                }
             }
         }
     }

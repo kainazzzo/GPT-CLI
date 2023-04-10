@@ -5,7 +5,6 @@ public class GPTParameters
     public string ApiKey { get; set; }
     public string BaseDomain { get; set; }
     public string Prompt { get; set; }
-    public string Input { get; set; }
     public string Config { get; set; }
     public string Model { get; set; }
     public int? MaxTokens { get; set; }
@@ -18,5 +17,5 @@ public class GPTParameters
     public double? FrequencyPenalty { get; set; }
     public string LogitBias { get; set; }
     public string User { get; set; }
-    public bool Chat { get; set; }
+    public string Input { get; set; }
 }
