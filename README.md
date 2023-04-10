@@ -40,7 +40,7 @@ The primary goal of this project is to create a command line interface (CLI) for
 
 For example, you could generate a bash script for "Hello, World!" with the following command:
 ```bash
-gpt prompt "create a bash Hello World script" > hello.sh
+gpt --prompt "create a bash Hello World script" > hello.sh
 ```
 
 But GPT-CLI's potential doesn't stop there. You can even pipe GPT commands to other commands, or back to GPT itself, creating powerful and dynamic workflows.
@@ -49,37 +49,37 @@ Here are some additional ideas for GPT-CLI functionalities:
 
 1. **Code Refactoring:** Use GPT-CLI to refactor your code by providing a prompt and outputting the result to the desired file.
 ```bash
-cat original_code.py | gpt prompt "refactor this Python function for better readability" model " > refactored_code.py
+cat original_code.py | gpt --prompt "refactor this Python function for better readability" > refactored_code.py
 ```
 
 2. **Automated Documentation:** Generate documentation for your code by providing relevant prompts.
 ```bash
-gpt prompt "create markdown documentation for this JavaScript code" model "code-davinci-edit-001" < file.js
+gpt --prompt "create markdown documentation for this JavaScript code" < file.js
 ```
 
 3. **Text Processing:** Use GPT-CLI in conjunction with other command line tools to process and manipulate text, such as grep, awk, or sed.
 ```bash
-curl -s https://datti.net/2023/03/14/Publishing-an-Azure-Static-Website-with-Github-Actions-&-Jekyll/ | grep -zPo '<section id="content" class="main inactive">\K.*?(?=</section>)' | sed 's/<[^>]*>//g' | gpt prompt "summarize this article" model "text-davinci-edit-001" | grep 'keyword' > summarized_with_keyword.txt
+curl -s https://datti.net/2023/03/14/Publishing-an-Azure-Static-Website-with-Github-Actions-&-Jekyll/ | grep -zPo '<section id="content" class="main inactive">\K.*?(?=</section>)' | sed 's/<[^>]*>//g' | gpt --prompt "summarize this article" | grep 'keyword' > summarized_with_keyword.txt
 ```
 
 4. **Combine Text from Multiple Files and Summarize:**
 ```bash
-cat file1.txt file2.txt | gpt prompt "combine and summarize the information from these two texts" model "text-davinci-edit-001" > summarized_information.txt
+cat file1.txt file2.txt | gpt --prompt "combine and summarize the information from these two texts" > summarized_information.txt
 ```
 
 5. **Generate a List of Ideas and Sort by Relevance:**
 ```bash
-gpt prompt "generate a list of 10 innovative AI project ideas" | sort -R | gpt prompt="rank these AI project ideas by their potential impact" model "text-davinci-edit-001" > sorted_AI_project_ideas.txt
+gpt --prompt "generate a list of 10 innovative AI project ideas" | sort -R | gpt --prompt="rank these AI project ideas by their potential impact" > sorted_AI_project_ideas.txt
 ```
 
 6. **Extract Quotes from a Text and Generate a Motivational Poster:**
 ```bash
-grep -o '".*"' input_text.txt | gpt prompt "create a motivational poster using one of these quotes" model "text-davinci-edit-001" > motivational_poster.txt
+grep -o '".*"' input_text.txt | gpt --prompt "create a motivational poster using one of these quotes" > motivational_poster.txt
 ```
 
 7. **Filter Log File and Generate a Report:**
 ```bash
-grep 'ERROR' log_file.txt | gpt prompt "analyze these error logs and generate a brief report on the most common issues" model "text-davinci-edit-001" > error_report.txt
+grep 'ERROR' log_file.txt | gpt --prompt "analyze these error logs and generate a brief report on the most common issues" > error_report.txt
 ```
 
 With GPT-CLI, the possibilities are limited only by your imagination and ability to prompt and string together commands.
