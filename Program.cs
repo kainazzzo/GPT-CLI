@@ -163,15 +163,15 @@ class Program
 
     private static async Task HandleChatMode(OpenAILogic openAILogic, GPTParametersBinder binder)
     {
-        var chatGpt = new ChatGPTLogic(openAILogic, await MapCommon(binder.GPTParameters, openAILogic,new ChatCompletionCreateRequest()
+        var initialRequest = await MapCommon(binder.GPTParameters, openAILogic, new ChatCompletionCreateRequest()
+        {
+            Messages = new List<ChatMessage>(50)
             {
-                Messages = new List<ChatMessage>(50)
-                {
-                    new(StaticValues.ChatMessageRoles.System,
-                        "You are ChatGPT CLI, the helpful assistant, but you're running on a command line.")
-                }
+                new(StaticValues.ChatMessageRoles.System,
+                    "You are ChatGPT CLI, the helpful assistant, but you're running on a command line.")
             }
-        ));
+        });
+
 
 
         await Console.Out.WriteLineAsync(@"
@@ -183,14 +183,18 @@ class Program
 #     # #    # #    #   #   #     # #          #       #     # #        #  
  #####  #    # #    #   #    #####  #          #        #####  ####### ###");
         var sb = new StringBuilder();
-        var usedDocuments = new HashSet<Document>();
         var documents = await ReadEmbedFilesAsync(binder.GPTParameters);
+        var prompts = new List<string>();
+        var promptResponses = new List<string>();
 
         do
         {
+            // Keeping track of all the prompts and responses means we can rebuild the chat message history
+            // without including the old context every time, saving on tokens
+            var chatGpt = new ChatGPTLogic(openAILogic, initialRequest);
+
             await Console.Out.WriteAsync("\r\n? ");
             var chatInput = await Console.In.ReadLineAsync();
-
 
             if (!string.IsNullOrWhiteSpace(chatInput))
             {
@@ -199,6 +203,15 @@ class Program
                     break;
                 }
 
+
+                for (int i = 0; i < prompts.Count; i++)
+                {
+                    chatGpt.AppendMessage(new(StaticValues.ChatMessageRoles.User, prompts[i]));
+                    chatGpt.AppendMessage(new(StaticValues.ChatMessageRoles.Assistant, promptResponses[i]));
+                }
+
+                
+                // If there's embedded context provided, inject it after the existing chat history, and before the new prompt
                 if (documents != null)
                 {
                     // Search for the closest few documents and add those if they aren't used yet
@@ -208,17 +221,16 @@ class Program
                     {
                         foreach (var closestDocument in closestDocuments)
                         {
-                            // If the document is used already, that means the chat history has context already.
-                            if (!usedDocuments.Contains(closestDocument))
-                            {
-                                usedDocuments.Add(closestDocument);
-                                chatGpt.AppendMessage(new(StaticValues.ChatMessageRoles.User, 
-                                    $"Here is some context provided for you to learn from for the next prompt: {closestDocument.Text}"));
-                            }
+                            chatGpt.AppendMessage(new(StaticValues.ChatMessageRoles.User, 
+                                    $"Embedding context for the next prompt: {closestDocument.Text}"));
                         }
                     }
                 }
+
+                prompts.Add(chatInput);
                 chatGpt.AppendMessage(new(StaticValues.ChatMessageRoles.User, chatInput));
+
+                // Get the new response:
                 var responses = chatGpt.SendMessages();
                 sb.Clear();
                 await foreach (var response in responses)
@@ -232,8 +244,11 @@ class Program
                     }
                 }
 
+                // Store the streamed response for the chat history
+                promptResponses.Add(sb.ToString());
+
+                // Output the 
                 await Console.Out.WriteLineAsync();
-                chatGpt.AppendMessage(new(StaticValues.ChatMessageRoles.Assistant, sb.ToString()));
             }
         } while (true);
     }
@@ -330,6 +345,8 @@ class Program
 
     private static async Task<ChatCompletionCreateRequest> MapCommon(GPTParameters parameters, OpenAILogic openAILogic, ChatCompletionCreateRequest request)
     {
+        // This won't do anything for chat mode, unless a starting prompt is specified, I suppose
+        // TODO: Test this prompt with chat mode:
         if (parameters.Prompt != null)
         {
             var documents = await ReadEmbedFilesAsync(parameters);

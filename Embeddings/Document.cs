@@ -34,34 +34,31 @@ namespace GPT.CLI.Embeddings
             return similarities.Take(numResults).Select(x => x.Document).ToList();
         }
 
-        public static async Task<List<Document>> ChunkStreamToDocumentsAsync(Stream contentStream, int chunkSize = 2048)
+        public static async Task<List<Document>> ChunkStreamToDocumentsAsync(Stream contentStream, int chunkSize = 200)
         {
-            List<Document> documents = new List<Document>();
+            var documents = new List<Document>();
 
-            using (StreamReader reader = new StreamReader(contentStream))
+            using StreamReader reader = new StreamReader(contentStream);
+            StringBuilder chunkBuilder = new StringBuilder();
+            int currentChunkSize = 0;
+
+            while (await reader.ReadLineAsync() is { } line)
             {
-                StringBuilder chunkBuilder = new StringBuilder();
-                string line;
-                int currentChunkSize = 0;
-
-                while ((line = await reader.ReadLineAsync()) != null)
-                {
-                    int lineLength = line.Length + 1; // +1 for the newline character
-                    if (currentChunkSize + lineLength > chunkSize)
-                    {
-                        documents.Add(new Document { Text = chunkBuilder.ToString() });
-                        chunkBuilder.Clear();
-                        currentChunkSize = 0;
-                    }
-
-                    chunkBuilder.AppendLine(line);
-                    currentChunkSize += lineLength;
-                }
-
-                if (chunkBuilder.Length > 0)
+                int lineLength = line.Length + 1; // +1 for the newline character
+                if (currentChunkSize + lineLength > chunkSize)
                 {
                     documents.Add(new Document { Text = chunkBuilder.ToString() });
+                    chunkBuilder.Clear();
+                    currentChunkSize = 0;
                 }
+
+                chunkBuilder.AppendLine(line);
+                currentChunkSize += lineLength;
+            }
+
+            if (chunkBuilder.Length > 0)
+            {
+                documents.Add(new Document { Text = chunkBuilder.ToString() });
             }
 
             return documents;
