@@ -18,4 +18,5 @@ public class GPTParameters
     public string LogitBias { get; set; }
     public string User { get; set; }
     public Stream Input { get; set; }
+    public string[] EmbedFilenames { get; set; }
 }

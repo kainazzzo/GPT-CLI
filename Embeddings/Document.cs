@@ -1,4 +1,5 @@
 ﻿using System.Text;
+using System.Text.Json;
 
 namespace GPT.CLI.Embeddings
 {
@@ -6,6 +7,18 @@ namespace GPT.CLI.Embeddings
     {
         public string Text { get; set; }
         public List<double> Embedding { get; set; }
+
+        public static List<Document> LoadEmbeddings(Stream input)
+        {
+            try
+            {
+                return JsonSerializer.Deserialize<List<Document>>(input);
+            }
+            catch
+            {
+                return null;
+            }
+        }
 
         public static List<Document> FindMostSimilarDocuments(List<Document> documents, List<double> queryEmbedding, int numResults = 3)
         {

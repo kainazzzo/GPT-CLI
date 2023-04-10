@@ -43,4 +43,10 @@ public class OpenAILogic
             documents[i].Embedding = embeddings.Data[i].Embedding;
         }
     }
+
+    public async Task<List<double>> GetEmbeddingForPrompt(string prompt)
+    {
+        return (await _openAIService.Embeddings.CreateEmbedding(new() { Input = prompt, Model = Models.TextEmbeddingAdaV2 }))
+            .Data.First().Embedding;
+    }
 }

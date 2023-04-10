@@ -45,7 +45,9 @@ class Program
         var userOption = new Option<string>("--user", "A unique identifier representing your end-user");
 
         var chatCommand = new Command("chat", "Starts listening in chat mode.");
-        var embedCommand = new Command("embed", "Create an embedding for STDIN.");
+        var embedCommand = new Command("embed", "Create an embedding for data redirected via STDIN.");
+        var embedFileOption = new Option<string[]>("--file", "Name of a file from which to load previously saved embeddings. Multiple files allowed.")
+            { AllowMultipleArgumentsPerToken = true, Arity = ArgumentArity.OneOrMore};
 
         embedCommand.AddValidator(result =>
         {
@@ -55,6 +57,7 @@ class Program
             }
         });
 
+        embedCommand.AddOption(embedFileOption);
 
         // Create a command and add the options
         var rootCommand = new RootCommand("GPT Console Application");
@@ -74,6 +77,7 @@ class Program
         rootCommand.AddGlobalOption(frequencyPenaltyOption);
         rootCommand.AddGlobalOption(logitBiasOption);
         rootCommand.AddGlobalOption(userOption);
+        rootCommand.AddGlobalOption(embedFileOption);
 
         rootCommand.AddCommand(chatCommand);
         rootCommand.AddCommand(embedCommand);
@@ -83,7 +87,7 @@ class Program
             apiKeyOption, baseUrlOption, promptOption, configOption,
             modelOption, maxTokensOption, temperatureOption, topPOption,
             nOption, streamOption, stopOption,
-            presencePenaltyOption, frequencyPenaltyOption, logitBiasOption, userOption);
+            presencePenaltyOption, frequencyPenaltyOption, logitBiasOption, userOption, embedFileOption);
 
         Mode mode = Mode.Completion;
 
@@ -118,7 +122,7 @@ class Program
                     break;
                 }
                 case Mode.Embed:
-                    await HandleEmbedMode(openAILogic, binder);
+                    await HandleEmbedMode(openAILogic);
                     break;
                 case Mode.Completion:
                 default:
@@ -131,24 +135,21 @@ class Program
         }
     }
 
-    private static async Task HandleEmbedMode(OpenAILogic openAILogic, GPTParametersBinder binder)
+    private static async Task HandleEmbedMode(OpenAILogic openAILogic)
     {
         // Create and output embedding
         var documents = await Document.ChunkStreamToDocumentsAsync(Console.OpenStandardInput());
 
         await openAILogic.CreateEmbeddings(documents);
 
-        foreach (var document in documents)
-        {
-            await Console.Out.WriteLineAsync(JsonSerializer.Serialize(document));
-        }
+        await Console.Out.WriteLineAsync(JsonSerializer.Serialize(documents));
     }
 
     private static async Task HandleCompletionMode(OpenAILogic openAILogic, GPTParametersBinder binder)
     {
         var chatRequest = Console.IsInputRedirected
-            ? await MapChatEdit(binder.GPTParameters)
-            : MapChatCreate(binder.GPTParameters);
+            ? await MapChatEdit(binder.GPTParameters, openAILogic)
+            : await MapChatCreate(binder.GPTParameters, openAILogic);
 
         var responses = binder.GPTParameters.Stream == true
             ? openAILogic.CreateChatCompletionAsyncEnumerable(chatRequest)
@@ -162,7 +163,7 @@ class Program
 
     private static async Task HandleChatMode(OpenAILogic openAILogic, GPTParametersBinder binder)
     {
-        var chatGpt = new ChatGPTLogic(openAILogic, MapCommon(binder.GPTParameters, new ChatCompletionCreateRequest()
+        var chatGpt = new ChatGPTLogic(openAILogic, await MapCommon(binder.GPTParameters, openAILogic,new ChatCompletionCreateRequest()
             {
                 Messages = new List<ChatMessage>(50)
                 {
@@ -171,6 +172,7 @@ class Program
                 }
             }
         ));
+
 
         await Console.Out.WriteLineAsync(@"
  #####                       #####  ######  #######     #####  #       ### 
@@ -181,6 +183,9 @@ class Program
 #     # #    # #    #   #   #     # #          #       #     # #        #  
  #####  #    # #    #   #    #####  #          #        #####  ####### ###");
         var sb = new StringBuilder();
+        var usedDocuments = new HashSet<Document>();
+        var documents = await ReadEmbedFilesAsync(binder.GPTParameters);
+
         do
         {
             await Console.Out.WriteAsync("\r\n? ");
@@ -189,6 +194,30 @@ class Program
 
             if (!string.IsNullOrWhiteSpace(chatInput))
             {
+                if ("exit".Equals(chatInput, StringComparison.OrdinalIgnoreCase))
+                {
+                    break;
+                }
+
+                if (documents != null)
+                {
+                    // Search for the closest few documents and add those if they aren't used yet
+                    var closestDocuments =
+                        Document.FindMostSimilarDocuments(documents, await openAILogic.GetEmbeddingForPrompt(chatInput));
+                    if (closestDocuments != null)
+                    {
+                        foreach (var closestDocument in closestDocuments)
+                        {
+                            // If the document is used already, that means the chat history has context already.
+                            if (!usedDocuments.Contains(closestDocument))
+                            {
+                                usedDocuments.Add(closestDocument);
+                                chatGpt.AppendMessage(new(StaticValues.ChatMessageRoles.User, 
+                                    $"Here is some context provided for you to learn from for the next prompt: {closestDocument.Text}"));
+                            }
+                        }
+                    }
+                }
                 chatGpt.AppendMessage(new(StaticValues.ChatMessageRoles.User, chatInput));
                 var responses = chatGpt.SendMessages();
                 sb.Clear();
@@ -206,13 +235,25 @@ class Program
                 await Console.Out.WriteLineAsync();
                 chatGpt.AppendMessage(new(StaticValues.ChatMessageRoles.Assistant, sb.ToString()));
             }
-            else
-            {
-                break;
-            }
         } while (true);
+    }
 
-        return;
+    private static async Task<List<Document>> ReadEmbedFilesAsync(GPTParameters parameters)
+    {
+        List<Document> documents = null;
+        if (parameters.EmbedFilenames is { Length: > 0 })
+        {
+            foreach (var embedFile in parameters.EmbedFilenames)
+            {
+                documents ??= new(parameters.EmbedFilenames.Length);
+
+                await using var fileStream = File.OpenRead(embedFile);
+
+                documents.AddRange(Document.LoadEmbeddings(fileStream));
+            }
+        }
+
+        return documents;
     }
 
     private static async Task<bool> OutputChatResponse(ChatCompletionCreateResponse response)
@@ -260,12 +301,13 @@ class Program
         services.AddScoped<OpenAILogic>();
     }
 
-    private static async Task<ChatCompletionCreateRequest> MapChatEdit(GPTParameters parameters)
+    private static async Task<ChatCompletionCreateRequest> MapChatEdit(GPTParameters parameters, OpenAILogic openAILogic)
     {
         using var streamReader = new StreamReader(parameters.Input);
         var input = await streamReader.ReadToEndAsync();
+        await parameters.Input.DisposeAsync();
 
-        return MapCommon(parameters, new ChatCompletionCreateRequest
+        var request = await MapCommon(parameters, openAILogic, new ChatCompletionCreateRequest
         {
             Messages = new List<ChatMessage>()
             {
@@ -275,15 +317,35 @@ class Program
                     "Sure. I will read through the first message and understand it. Then I'll wait for another message containing the prompt. After I apply the prompt to the original text, my final response will be the result of applying the prompt to my understanding of the input text."),
                 new(StaticValues.ChatMessageRoles.User, input),
                 new(StaticValues.ChatMessageRoles.Assistant,
-                    "Thank you. Now I will wait for the prompt and then apply it in context."),
-                new(StaticValues.ChatMessageRoles.User, parameters.Prompt)
-
+                    "Thank you. Now I will wait for the prompt and then apply it in context.")
             }
         });
+
+        // This is placed here so the MapCommon method can add contextual embeddings before the prompt
+        request.Messages.Add(new(StaticValues.ChatMessageRoles.User, parameters.Prompt));
+
+        return request;
+
     }
 
-    private static ChatCompletionCreateRequest MapCommon(GPTParameters parameters, ChatCompletionCreateRequest request)
+    private static async Task<ChatCompletionCreateRequest> MapCommon(GPTParameters parameters, OpenAILogic openAILogic, ChatCompletionCreateRequest request)
     {
+        var documents = await ReadEmbedFilesAsync(parameters);
+
+        if (documents != null)
+        {
+            // Search for the closest few documents and add those if they aren't used yet
+            var closestDocuments =
+                Document.FindMostSimilarDocuments(documents, await openAILogic.GetEmbeddingForPrompt(parameters.Prompt));
+            if (closestDocuments != null)
+            {
+                foreach (var closestDocument in closestDocuments)
+                {
+                    request.Messages.Add(new(StaticValues.ChatMessageRoles.User,
+                            $"Here is some context provided for you to learn from for the next prompt: {closestDocument.Text}"));
+                }
+            }
+        }
         request.Model = parameters.Model;
         request.MaxTokens = parameters.MaxTokens;
         request.N = parameters.N;
@@ -301,11 +363,16 @@ class Program
         return request;
     }
 
-    private static ChatCompletionCreateRequest MapChatCreate(GPTParameters parameters)
+    private static async Task<ChatCompletionCreateRequest> MapChatCreate(GPTParameters parameters,
+        OpenAILogic openAILogic)
     {
-        return MapCommon(parameters, new ChatCompletionCreateRequest
+        var request = await MapCommon(parameters, openAILogic, new ChatCompletionCreateRequest
         {
-            Messages = new List<ChatMessage>() { new(StaticValues.ChatMessageRoles.System, parameters.Prompt) }
+            Messages = new List<ChatMessage>()
         });
+
+        request.Messages.Add(new(StaticValues.ChatMessageRoles.System, parameters.Prompt));
+
+        return request;
     }
 }
