@@ -46,6 +46,8 @@ class Program
 
         var chatCommand = new Command("chat", "Starts listening in chat mode.");
         var embedCommand = new Command("embed", "Create an embedding for data redirected via STDIN.");
+        var chunkSizeOption = new Option<int>("--chunk-size", () => 1024,
+            "The size to chunk down text into embeddable documents.");
         var embedFileOption = new Option<string[]>("--file", "Name of a file from which to load previously saved embeddings. Multiple files allowed.")
             { AllowMultipleArgumentsPerToken = true, Arity = ArgumentArity.OneOrMore};
 
@@ -58,6 +60,7 @@ class Program
         });
 
         embedCommand.AddOption(embedFileOption);
+        embedCommand.AddOption(chunkSizeOption);
 
         // Create a command and add the options
         var rootCommand = new RootCommand("GPT Console Application");
@@ -82,12 +85,12 @@ class Program
         rootCommand.AddCommand(chatCommand);
         rootCommand.AddCommand(embedCommand);
 
-
         var binder = new GPTParametersBinder(
             apiKeyOption, baseUrlOption, promptOption, configOption,
             modelOption, maxTokensOption, temperatureOption, topPOption,
             nOption, streamOption, stopOption,
-            presencePenaltyOption, frequencyPenaltyOption, logitBiasOption, userOption, embedFileOption);
+            presencePenaltyOption, frequencyPenaltyOption, logitBiasOption, 
+            userOption, embedFileOption, chunkSizeOption);
 
         Mode mode = Mode.Completion;
 
@@ -118,16 +121,16 @@ class Program
             {
                 case Mode.Chat:
                 {
-                    await HandleChatMode(openAILogic, binder);
+                    await HandleChatMode(openAILogic, binder.GPTParameters);
                     break;
                 }
                 case Mode.Embed:
-                    await HandleEmbedMode(openAILogic);
+                    await HandleEmbedMode(openAILogic, binder.GPTParameters);
                     break;
                 case Mode.Completion:
                 default:
                 {
-                    await HandleCompletionMode(openAILogic, binder);
+                    await HandleCompletionMode(openAILogic, binder.GPTParameters);
 
                     break;
                 }
@@ -135,23 +138,23 @@ class Program
         }
     }
 
-    private static async Task HandleEmbedMode(OpenAILogic openAILogic)
+    private static async Task HandleEmbedMode(OpenAILogic openAILogic, GPTParameters gptParameters)
     {
         // Create and output embedding
-        var documents = await Document.ChunkStreamToDocumentsAsync(Console.OpenStandardInput());
+        var documents = await Document.ChunkStreamToDocumentsAsync(Console.OpenStandardInput(), gptParameters.ChunkSize);
 
         await openAILogic.CreateEmbeddings(documents);
 
         await Console.Out.WriteLineAsync(JsonSerializer.Serialize(documents));
     }
 
-    private static async Task HandleCompletionMode(OpenAILogic openAILogic, GPTParametersBinder binder)
+    private static async Task HandleCompletionMode(OpenAILogic openAILogic, GPTParameters gptParameters)
     {
         var chatRequest = Console.IsInputRedirected
-            ? await MapChatEdit(binder.GPTParameters, openAILogic)
-            : await MapChatCreate(binder.GPTParameters, openAILogic);
+            ? await MapChatEdit(gptParameters, openAILogic)
+            : await MapChatCreate(gptParameters, openAILogic);
 
-        var responses = binder.GPTParameters.Stream == true
+        var responses = gptParameters.Stream == true
             ? openAILogic.CreateChatCompletionAsyncEnumerable(chatRequest)
             : (await openAILogic.CreateChatCompletionAsync(chatRequest)).ToAsyncEnumerable();
 
@@ -161,9 +164,9 @@ class Program
         }
     }
 
-    private static async Task HandleChatMode(OpenAILogic openAILogic, GPTParametersBinder binder)
+    private static async Task HandleChatMode(OpenAILogic openAILogic, GPTParameters gptParameters)
     {
-        var initialRequest = await MapCommon(binder.GPTParameters, openAILogic, new ChatCompletionCreateRequest()
+        var initialRequest = await MapCommon(gptParameters, openAILogic, new ChatCompletionCreateRequest()
         {
             Messages = new List<ChatMessage>(50)
             {
@@ -183,7 +186,7 @@ class Program
 #     # #    # #    #   #   #     # #          #       #     # #        #  
  #####  #    # #    #   #    #####  #          #        #####  ####### ###");
         var sb = new StringBuilder();
-        var documents = await ReadEmbedFilesAsync(binder.GPTParameters);
+        var documents = await ReadEmbedFilesAsync(gptParameters);
         var prompts = new List<string>();
         var promptResponses = new List<string>();
 
@@ -192,6 +195,7 @@ class Program
             // Keeping track of all the prompts and responses means we can rebuild the chat message history
             // without including the old context every time, saving on tokens
             var chatGpt = new ChatGPTLogic(openAILogic, initialRequest);
+            chatGpt.ClearMessages();
 
             await Console.Out.WriteAsync("\r\n? ");
             var chatInput = await Console.In.ReadLineAsync();

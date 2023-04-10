@@ -21,9 +21,9 @@ public class GPTParametersBinder : BinderBase<GPTParameters>
     private readonly Option<string> _logitBiasOption;
     private readonly Option<string> _userOption;
     private readonly Option<string[]> _embedFileOption;
+    private readonly Option<int> _chunkSizeOption;
 
-    public GPTParametersBinder(
-        Option<string> apiKeyOption,
+    public GPTParametersBinder(Option<string> apiKeyOption,
         Option<string> baseUrlOption,
         Option<string> promptOption,
         Option<string> configOption,
@@ -38,7 +38,8 @@ public class GPTParametersBinder : BinderBase<GPTParameters>
         Option<double> frequencyPenaltyOption,
         Option<string> logitBiasOption,
         Option<string> userOption,
-        Option<string[]> embedFileOption)
+        Option<string[]> embedFileOption, 
+        Option<int> chunkSizeOption)
     {
         _apiKeyOption = apiKeyOption;
         _baseUrlOption = baseUrlOption;
@@ -56,6 +57,7 @@ public class GPTParametersBinder : BinderBase<GPTParameters>
         _logitBiasOption = logitBiasOption;
         _userOption = userOption;
         _embedFileOption = embedFileOption;
+        _chunkSizeOption = chunkSizeOption;
     }
 
     protected override GPTParameters GetBoundValue(BindingContext bindingContext)
@@ -77,7 +79,8 @@ public class GPTParametersBinder : BinderBase<GPTParameters>
             FrequencyPenalty = bindingContext.ParseResult.GetValueForOption(_frequencyPenaltyOption),
             LogitBias = bindingContext.ParseResult.GetValueForOption(_logitBiasOption),
             User = bindingContext.ParseResult.GetValueForOption(_userOption),
-            EmbedFilenames = bindingContext.ParseResult.GetValueForOption(_embedFileOption)
+            EmbedFilenames = bindingContext.ParseResult.GetValueForOption(_embedFileOption),
+            ChunkSize = bindingContext.ParseResult.GetValueForOption(_chunkSizeOption)
         };
  
 

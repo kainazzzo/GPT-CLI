@@ -28,5 +28,15 @@ namespace GPT.CLI
         {
             return _openAILogic.CreateChatCompletionAsyncEnumerable(_request);
         }
+
+        public void ClearMessages()
+        {
+            var message = _request.Messages.FirstOrDefault();
+            if (message != null)
+            {
+                _request.Messages.Clear();
+                _request.Messages.Add(message);
+            }
+        }
     }
 }

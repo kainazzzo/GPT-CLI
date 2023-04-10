@@ -34,7 +34,7 @@ namespace GPT.CLI.Embeddings
             return similarities.Take(numResults).Select(x => x.Document).ToList();
         }
 
-        public static async Task<List<Document>> ChunkStreamToDocumentsAsync(Stream contentStream, int chunkSize = 200)
+        public static async Task<List<Document>> ChunkStreamToDocumentsAsync(Stream contentStream, int chunkSize = 512)
         {
             var documents = new List<Document>();
 
