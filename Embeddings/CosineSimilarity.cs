@@ -8,9 +8,9 @@ namespace GPT.CLI.Embeddings;
 
 public static class CosineSimilarity
 {
-    public static double Calculate(double[] vector1, double[] vector2)
+    public static double Calculate(List<double> vector1, List<double> vector2)
     {
-        if (vector1.Length != vector2.Length)
+        if (vector1.Count != vector2.Count)
         {
             throw new ArgumentException("Vectors must have the same length.");
         }

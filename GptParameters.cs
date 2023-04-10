@@ -17,5 +17,5 @@ public class GPTParameters
     public double? FrequencyPenalty { get; set; }
     public string LogitBias { get; set; }
     public string User { get; set; }
-    public string Input { get; set; }
+    public Stream Input { get; set; }
 }

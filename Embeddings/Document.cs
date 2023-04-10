@@ -5,9 +5,9 @@ namespace GPT.CLI.Embeddings
     public class Document
     {
         public string Text { get; set; }
-        public double[] Embedding { get; set; }
+        public List<double> Embedding { get; set; }
 
-        public static List<Document> FindMostSimilarDocuments(List<Document> documents, double[] queryEmbedding, int numResults = 3)
+        public static List<Document> FindMostSimilarDocuments(List<Document> documents, List<double> queryEmbedding, int numResults = 3)
         {
             var similarities = new List<(Document Document, double Similarity)>();
 

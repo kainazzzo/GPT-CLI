@@ -3,6 +3,7 @@ using System.CommandLine.Builder;
 using System.CommandLine.Parsing;
 using System.Text;
 using System.Text.Json;
+using GPT.CLI.Embeddings;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using OpenAI.GPT3.Extensions;
@@ -16,7 +17,7 @@ class Program
 {
     enum Mode
     {
-        Normal,
+        Completion,
         Chat,
         Embed
     }
@@ -24,14 +25,14 @@ class Program
     static async Task Main(string[] args)
     {
         // Define command line parameters
-        var apiKeyOption = new Option<string>("--api-key", "Your OpenAI API key");
+        var apiKeyOption = new Option<string>("--api-key", "Your OpenAI API key") ;
         var baseUrlOption = new Option<string>("--base-domain", "The base URL for the OpenAI API");
         var promptOption = new Option<string>("--prompt", "The prompt for text generation. Optional for most commands.") {IsRequired = true};
 
         var configOption = new Option<string>("--config", () => "appSettings.json", "The path to the appSettings.json config file");
 
         // Add the rest of the available fields as command line parameters
-        var modelOption = new Option<string>("--model", () => "gpt-3.5-turbo", "The model ID to use.");
+        var modelOption = new Option<string>("--model", () => Models.ChatGpt3_5Turbo, "The model ID to use.");
         var maxTokensOption = new Option<int>("--max-tokens", () => 1000, "The maximum number of tokens to generate in the completion.");
         var temperatureOption = new Option<double>("--temperature", "The sampling temperature to use, between 0 and 2");
         var topPOption = new Option<double>("--top-p", "The value for nucleus sampling");
@@ -66,7 +67,7 @@ class Program
         rootCommand.AddGlobalOption(maxTokensOption);
         rootCommand.AddGlobalOption(temperatureOption);
         rootCommand.AddGlobalOption(topPOption);
-        rootCommand.AddGlobalOption(nOption);
+        rootCommand.AddOption(nOption);
         rootCommand.AddGlobalOption(streamOption);
         rootCommand.AddGlobalOption(stopOption);
         rootCommand.AddGlobalOption(presencePenaltyOption);
@@ -77,13 +78,14 @@ class Program
         rootCommand.AddCommand(chatCommand);
         rootCommand.AddCommand(embedCommand);
 
+
         var binder = new GPTParametersBinder(
             apiKeyOption, baseUrlOption, promptOption, configOption,
             modelOption, maxTokensOption, temperatureOption, topPOption,
             nOption, streamOption, stopOption,
             presencePenaltyOption, frequencyPenaltyOption, logitBiasOption, userOption);
 
-        Mode mode = Mode.Normal;
+        Mode mode = Mode.Completion;
 
         // Set the handler for the rootCommand
         rootCommand.SetHandler(_ => {}, binder);
@@ -96,11 +98,12 @@ class Program
             .Build()
             .InvokeAsync(args);
 
-        if (retValue == 0 && binder.GPTParameters != null && (!string.IsNullOrEmpty(binder.GPTParameters.Prompt) || mode == Mode.Chat))
+        if (retValue == 0 && binder.GPTParameters != null)
         {
             // Set up dependency injection
-            var services = new ServiceCollection();
-            await ConfigureServices(services, binder);
+            var services = new ServiceCollection(); 
+            
+            ConfigureServices(services, binder);
 
             await using var serviceProvider = services.BuildServiceProvider();
 
@@ -111,16 +114,65 @@ class Program
             {
                 case Mode.Chat:
                 {
-                    var chatGpt = new ChatGPTLogic(openAILogic, MapCommon(binder.GPTParameters, new ChatCompletionCreateRequest()
-                    {
-                        Messages = new List<ChatMessage>(50)
-                        {
-                            new(StaticValues.ChatMessageRoles.System, "You are ChatGPT CLI, the helpful assistant, but you're running on a command line.")
-                        }
-                    }
-                    ));
+                    await HandleChatMode(openAILogic, binder);
+                    break;
+                }
+                case Mode.Embed:
+                    await HandleEmbedMode(openAILogic, binder);
+                    break;
+                case Mode.Completion:
+                default:
+                {
+                    await HandleCompletionMode(openAILogic, binder);
 
-                    await Console.Out.WriteLineAsync(@"
+                    break;
+                }
+            }
+        }
+    }
+
+    private static async Task HandleEmbedMode(OpenAILogic openAILogic, GPTParametersBinder binder)
+    {
+        // Create and output embedding
+        var documents = await Document.ChunkStreamToDocumentsAsync(Console.OpenStandardInput());
+
+        await openAILogic.CreateEmbeddings(documents);
+
+        foreach (var document in documents)
+        {
+            await Console.Out.WriteLineAsync(JsonSerializer.Serialize(document));
+        }
+    }
+
+    private static async Task HandleCompletionMode(OpenAILogic openAILogic, GPTParametersBinder binder)
+    {
+        var chatRequest = Console.IsInputRedirected
+            ? await MapChatEdit(binder.GPTParameters)
+            : MapChatCreate(binder.GPTParameters);
+
+        var responses = binder.GPTParameters.Stream == true
+            ? openAILogic.CreateChatCompletionAsyncEnumerable(chatRequest)
+            : (await openAILogic.CreateChatCompletionAsync(chatRequest)).ToAsyncEnumerable();
+
+        await foreach (var response in responses)
+        {
+            await OutputChatResponse(response);
+        }
+    }
+
+    private static async Task HandleChatMode(OpenAILogic openAILogic, GPTParametersBinder binder)
+    {
+        var chatGpt = new ChatGPTLogic(openAILogic, MapCommon(binder.GPTParameters, new ChatCompletionCreateRequest()
+            {
+                Messages = new List<ChatMessage>(50)
+                {
+                    new(StaticValues.ChatMessageRoles.System,
+                        "You are ChatGPT CLI, the helpful assistant, but you're running on a command line.")
+                }
+            }
+        ));
+
+        await Console.Out.WriteLineAsync(@"
  #####                       #####  ######  #######     #####  #       ### 
 #     # #    #   ##   ##### #     # #     #    #       #     # #        #  
 #       #    #  #  #    #   #       #     #    #       #       #        #  
@@ -128,64 +180,39 @@ class Program
 #       #    # ######   #   #     # #          #       #       #        #  
 #     # #    # #    #   #   #     # #          #       #     # #        #  
  #####  #    # #    #   #    #####  #          #        #####  ####### ###");
-                    var sb = new StringBuilder();
-                    do
-                    {
-                    
-                        await Console.Out.WriteAsync("\r\n? ");
-                        var chatInput = await Console.In.ReadLineAsync();
-                    
+        var sb = new StringBuilder();
+        do
+        {
+            await Console.Out.WriteAsync("\r\n? ");
+            var chatInput = await Console.In.ReadLineAsync();
 
-                        if (!string.IsNullOrWhiteSpace(chatInput))
-                        {
-                            chatGpt.AppendMessage(new(StaticValues.ChatMessageRoles.User, chatInput));
-                            var responses = chatGpt.SendMessages();
-                            sb.Clear();
-                            await foreach (var response in responses)
-                            {
-                                if (await OutputChatResponse(response))
-                                {
-                                    foreach (var choice in response.Choices)
-                                    {
-                                        sb.Append(choice.Message.Content);
-                                    }
-                                }
-                            }
 
-                            await Console.Out.WriteLineAsync();
-                            chatGpt.AppendMessage(new (StaticValues.ChatMessageRoles.Assistant, sb.ToString()));
-                        }
-                        else
-                        {
-                            break;
-                        }
-                    } while (true);
-
-                    break;
-                }
-                case Mode.Embed:
-                    throw new NotImplementedException();
-                    break;
-                case Mode.Normal:
-                default:
+            if (!string.IsNullOrWhiteSpace(chatInput))
+            {
+                chatGpt.AppendMessage(new(StaticValues.ChatMessageRoles.User, chatInput));
+                var responses = chatGpt.SendMessages();
+                sb.Clear();
+                await foreach (var response in responses)
                 {
-                    var chatRequest = !string.IsNullOrWhiteSpace(binder.GPTParameters.Input)
-                        ? MapChatEdit(binder.GPTParameters)
-                        : MapChatCreate(binder.GPTParameters);
-
-                    var responses = binder.GPTParameters.Stream == true
-                        ? openAILogic.CreateChatCompletionAsyncEnumerable(chatRequest)
-                        : (await openAILogic.CreateChatCompletionAsync(chatRequest)).ToAsyncEnumerable();
-
-                    await foreach (var response in responses)
+                    if (await OutputChatResponse(response))
                     {
-                        await OutputChatResponse(response);
+                        foreach (var choice in response.Choices)
+                        {
+                            sb.Append(choice.Message.Content);
+                        }
                     }
-
-                    break;
                 }
+
+                await Console.Out.WriteLineAsync();
+                chatGpt.AppendMessage(new(StaticValues.ChatMessageRoles.Assistant, sb.ToString()));
             }
-        }
+            else
+            {
+                break;
+            }
+        } while (true);
+
+        return;
     }
 
     private static async Task<bool> OutputChatResponse(ChatCompletionCreateResponse response)
@@ -206,7 +233,7 @@ class Program
     }
 
 
-    private static async Task ConfigureServices(IServiceCollection services, GPTParametersBinder gptParametersBinder)
+    private static void ConfigureServices(IServiceCollection services, GPTParametersBinder gptParametersBinder)
     {
         var gptParameters = gptParametersBinder.GPTParameters;
 
@@ -220,8 +247,7 @@ class Program
 
         if (Console.IsInputRedirected)
         {
-            using var streamReader = new StreamReader(Console.OpenStandardInput());
-            gptParameters.Input = await streamReader.ReadToEndAsync();
+            gptParameters.Input = Console.OpenStandardInput();
         }
 
         // Add the configuration object to the services
@@ -234,8 +260,11 @@ class Program
         services.AddScoped<OpenAILogic>();
     }
 
-    private static ChatCompletionCreateRequest MapChatEdit(GPTParameters parameters)
+    private static async Task<ChatCompletionCreateRequest> MapChatEdit(GPTParameters parameters)
     {
+        using var streamReader = new StreamReader(parameters.Input);
+        var input = await streamReader.ReadToEndAsync();
+
         return MapCommon(parameters, new ChatCompletionCreateRequest
         {
             Messages = new List<ChatMessage>()
@@ -244,7 +273,7 @@ class Program
                     "You will receive two messages from the user. The first message will be text for you to parse and understand. The next message will be a prompt describing how you should proceed. You will read through the text or code in the first message, understand it, and then apply the prompt in the second message, with the first message as your main context. Your final message after the prompt should only be the result of the prompt applied to the input text, and no more."),
                 new(StaticValues.ChatMessageRoles.Assistant,
                     "Sure. I will read through the first message and understand it. Then I'll wait for another message containing the prompt. After I apply the prompt to the original text, my final response will be the result of applying the prompt to my understanding of the input text."),
-                new(StaticValues.ChatMessageRoles.User, parameters.Input),
+                new(StaticValues.ChatMessageRoles.User, input),
                 new(StaticValues.ChatMessageRoles.Assistant,
                     "Thank you. Now I will wait for the prompt and then apply it in context."),
                 new(StaticValues.ChatMessageRoles.User, parameters.Prompt)

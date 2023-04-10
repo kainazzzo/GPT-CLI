@@ -1,4 +1,6 @@
-﻿using OpenAI.GPT3.Interfaces;
+﻿using GPT.CLI.Embeddings;
+using OpenAI.GPT3.Interfaces;
+using OpenAI.GPT3.ObjectModels;
 using OpenAI.GPT3.ObjectModels.RequestModels;
 using OpenAI.GPT3.ObjectModels.ResponseModels;
 
@@ -21,5 +23,24 @@ public class OpenAILogic
     public IAsyncEnumerable<ChatCompletionCreateResponse> CreateChatCompletionAsyncEnumerable(ChatCompletionCreateRequest request)
     {
         return _openAIService.ChatCompletion.CreateCompletionAsStream(request);
+    }
+
+    public async Task<EmbeddingCreateResponse> CreateEmbedding(EmbeddingCreateRequest request)
+    {
+        return await _openAIService.Embeddings.CreateEmbedding(request);
+    }
+
+    public async Task CreateEmbeddings(List<Document> documents)
+    {
+        var embeddings = await _openAIService.Embeddings.CreateEmbedding(new EmbeddingCreateRequest()
+        {
+            Model = Models.TextEmbeddingAdaV2,
+            InputAsList = documents.Select(d => d.Text).ToList()
+        });
+
+        for (int i = 0; i < embeddings.Data.Count; i++)
+        {
+            documents[i].Embedding = embeddings.Data[i].Embedding;
+        }
     }
 }

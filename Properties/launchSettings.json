@@ -2,8 +2,8 @@
   "profiles": {
     "GPT-CLI": {
       "commandName": "Project",
-      "commandLineArgs": "chat",
-      "workingDirectory": "C:\\projects\\GPT-CLI\\bin\\Debug\\net7.0"
+      "commandLineArgs": "embed < Program.cs",
+      "workingDirectory": "C:\\projects\\GPT-CLI\\"
     }
   }
 }
