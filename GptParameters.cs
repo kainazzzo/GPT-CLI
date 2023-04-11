@@ -20,4 +20,5 @@ public class GPTParameters
     public Stream Input { get; set; }
     public string[] EmbedFilenames { get; set; }
     public int ChunkSize { get; set; }
+    public string UsageFilename { get; set; }
 }

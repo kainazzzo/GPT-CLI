@@ -43,6 +43,7 @@ class Program
         var frequencyPenaltyOption = new Option<double>("--frequency-penalty", "Penalty for new tokens based on their frequency in the text so far");
         var logitBiasOption = new Option<string>("--logit-bias", "Modify the likelihood of specified tokens appearing in the completion");
         var userOption = new Option<string>("--user", "A unique identifier representing your end-user");
+        var usageOutputOption = new Option<string>("--usage-output", "File path to output usage statistics");
 
         var chatCommand = new Command("chat", "Starts listening in chat mode.");
         var embedCommand = new Command("embed", "Create an embedding for data redirected via STDIN.");
@@ -81,6 +82,7 @@ class Program
         rootCommand.AddGlobalOption(logitBiasOption);
         rootCommand.AddGlobalOption(userOption);
         rootCommand.AddGlobalOption(embedFileOption);
+        rootCommand.AddGlobalOption(usageOutputOption);
 
         rootCommand.AddCommand(chatCommand);
         rootCommand.AddCommand(embedCommand);
@@ -90,7 +92,7 @@ class Program
             modelOption, maxTokensOption, temperatureOption, topPOption,
             nOption, streamOption, stopOption,
             presencePenaltyOption, frequencyPenaltyOption, logitBiasOption, 
-            userOption, embedFileOption, chunkSizeOption);
+            userOption, embedFileOption, chunkSizeOption, usageOutputOption);
 
         Mode mode = Mode.Completion;
 
@@ -143,9 +145,15 @@ class Program
         // Create and output embedding
         var documents = await Document.ChunkStreamToDocumentsAsync(Console.OpenStandardInput(), gptParameters.ChunkSize);
 
-        await openAILogic.CreateEmbeddings(documents);
+        var response = await openAILogic.CreateEmbeddings(documents);
 
         await Console.Out.WriteLineAsync(JsonSerializer.Serialize(documents));
+
+        if (gptParameters.UsageFilename != null)
+        {
+            await SaveUsagesAsync(File.OpenWrite(gptParameters.UsageFilename),
+                new List<UsageResponse>() { response.Usage });
+        }
     }
 
     private static async Task HandleCompletionMode(OpenAILogic openAILogic, GPTParameters gptParameters)
@@ -158,9 +166,20 @@ class Program
             ? openAILogic.CreateChatCompletionAsyncEnumerable(chatRequest)
             : (await openAILogic.CreateChatCompletionAsync(chatRequest)).ToAsyncEnumerable();
 
+        var usages = new List<UsageResponse>();
+
         await foreach (var response in responses)
         {
+            if (gptParameters.UsageFilename != null)
+            {
+                usages.Add(response.Usage);
+            }
             await OutputChatResponse(response);
+        }
+
+        if (gptParameters.UsageFilename != null)
+        {
+            await SaveUsagesAsync(File.OpenWrite(gptParameters.UsageFilename), usages);
         }
     }
 
@@ -171,7 +190,7 @@ class Program
             Messages = new List<ChatMessage>(50)
             {
                 new(StaticValues.ChatMessageRoles.System,
-                    "You are ChatGPT CLI, the helpful assistant, but you're running on a command line.")
+                    "You're ChatGPT CLI, the helpful assistant that runs on a command line.")
             }
         });
 
@@ -189,6 +208,16 @@ class Program
         var documents = await ReadEmbedFilesAsync(gptParameters);
         var prompts = new List<string>();
         var promptResponses = new List<string>();
+        var usages = new List<UsageResponse>();
+
+        if (gptParameters.UsageFilename != null)
+        {
+            Console.CancelKeyPress += async (_, _) =>
+            {
+                await SaveUsagesAsync(File.OpenWrite(gptParameters.UsageFilename), usages);
+                Environment.Exit(0);
+            };
+        }
 
         do
         {
@@ -202,7 +231,7 @@ class Program
 
             if (!string.IsNullOrWhiteSpace(chatInput))
             {
-                if ("exit".Equals(chatInput, StringComparison.OrdinalIgnoreCase))
+                if ("exit".Equals(chatInput, StringComparison.OrdinalIgnoreCase) || "quit".Equals(chatInput, StringComparison.OrdinalIgnoreCase))
                 {
                     break;
                 }
@@ -214,19 +243,20 @@ class Program
                     chatGpt.AppendMessage(new(StaticValues.ChatMessageRoles.Assistant, promptResponses[i]));
                 }
 
-                
+
                 // If there's embedded context provided, inject it after the existing chat history, and before the new prompt
                 if (documents != null)
                 {
                     // Search for the closest few documents and add those if they aren't used yet
                     var closestDocuments =
-                        Document.FindMostSimilarDocuments(documents, await openAILogic.GetEmbeddingForPrompt(chatInput));
+                        Document.FindMostSimilarDocuments(documents,
+                            await openAILogic.GetEmbeddingForPrompt(chatInput));
                     if (closestDocuments != null)
                     {
                         foreach (var closestDocument in closestDocuments)
                         {
-                            chatGpt.AppendMessage(new(StaticValues.ChatMessageRoles.User, 
-                                    $"Embedding context for the next prompt: {closestDocument.Text}"));
+                            chatGpt.AppendMessage(new(StaticValues.ChatMessageRoles.User,
+                                $"Embedding context for the next prompt: {closestDocument.Text}"));
                         }
                     }
                 }
@@ -241,6 +271,12 @@ class Program
                 {
                     if (await OutputChatResponse(response))
                     {
+                        // ReSharper disable once ConditionIsAlwaysTrueOrFalse
+                        if (gptParameters.UsageFilename != null && response.Usage != null)
+                        {
+                            usages.Add(response.Usage);
+                        }
+
                         foreach (var choice in response.Choices)
                         {
                             sb.Append(choice.Message.Content);
@@ -255,6 +291,21 @@ class Program
                 await Console.Out.WriteLineAsync();
             }
         } while (true);
+
+        if (gptParameters.UsageFilename != null)
+        {
+            await SaveUsagesAsync(File.OpenWrite(gptParameters.UsageFilename), usages);
+        }
+    }
+
+    private static async Task SaveUsagesAsync(Stream openWrite, List<UsageResponse> usages)
+    {
+        if (openWrite == null || usages == null || usages.Count == 0) 
+        {
+            return;
+        }
+
+        await JsonSerializer.SerializeAsync(openWrite, usages);
     }
 
     private static async Task<List<Document>> ReadEmbedFilesAsync(GPTParameters parameters)
