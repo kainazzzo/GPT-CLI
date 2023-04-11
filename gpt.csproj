@@ -1,13 +1,13 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net7.0</TargetFramework>
     <RootNamespace>GPT.CLI</RootNamespace>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>disable</Nullable>
-    <FileVersion>0.11.3</FileVersion>
-    <AssemblyVersion>0.11.3</AssemblyVersion>
-    <Version>0.11.3-beta</Version>
+    <FileVersion>0.11.4</FileVersion>
+    <AssemblyVersion>0.11.4</AssemblyVersion>
+    <Version>0.11.4-beta</Version>
   </PropertyGroup>
   <ItemGroup>
     <None Include=".github\workflows\release.yml" />
