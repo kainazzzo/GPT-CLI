@@ -31,7 +31,7 @@ public class OpenAILogic
         return await _openAIService.Embeddings.CreateEmbedding(request);
     }
 
-    public async Task CreateEmbeddings(List<Document> documents)
+    public async Task<EmbeddingCreateResponse> CreateEmbeddings(List<Document> documents)
     {
         var embeddings = await _openAIService.Embeddings.CreateEmbedding(new EmbeddingCreateRequest()
         {
@@ -43,6 +43,8 @@ public class OpenAILogic
         {
             documents[i].Embedding = embeddings.Data[i].Embedding;
         }
+        
+        return embeddings;
     }
 
     public async Task<List<double>> GetEmbeddingForPrompt(string prompt)
