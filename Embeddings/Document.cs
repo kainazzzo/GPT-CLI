@@ -1,4 +1,5 @@
-﻿using System.Text;
+﻿using System.IO;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -42,28 +43,14 @@ namespace GPT.CLI.Embeddings
         {
             var documents = new List<Document>();
 
-            using StreamReader reader = new StreamReader(contentStream);
-            StringBuilder chunkBuilder = new StringBuilder();
-            int currentChunkSize = 0;
+            var buffer = new byte[chunkSize];
+            int bytesRead;
 
-            while (await reader.ReadLineAsync() is { } line)
+            while ((bytesRead = await contentStream.ReadAsync(buffer, 0, chunkSize)) > 0)
             {
-                int lineLength = line.Length + 1; // +1 for the newline character
-                if (currentChunkSize + lineLength > chunkSize)
-                {
-                    documents.Add(new Document { Text = chunkBuilder.ToString() });
-                    chunkBuilder.Clear();
-                    currentChunkSize = 0;
-                }
-
-                chunkBuilder.AppendLine(line);
-                currentChunkSize += lineLength;
+                documents.Add(new Document { Text = Encoding.UTF8.GetString(buffer, 0, bytesRead) });
             }
-
-            if (chunkBuilder.Length > 0)
-            {
-                documents.Add(new Document { Text = chunkBuilder.ToString() });
-            }
+            
 
             return documents;
         }

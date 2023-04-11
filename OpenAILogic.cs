@@ -3,6 +3,7 @@ using OpenAI.GPT3.Interfaces;
 using OpenAI.GPT3.ObjectModels;
 using OpenAI.GPT3.ObjectModels.RequestModels;
 using OpenAI.GPT3.ObjectModels.ResponseModels;
+using Microsoft.DeepDev;
 
 namespace GPT.CLI;
 
@@ -48,5 +49,12 @@ public class OpenAILogic
     {
         return (await _openAIService.Embeddings.CreateEmbedding(new() { Input = prompt, Model = Models.TextEmbeddingAdaV2 }))
             .Data.First().Embedding;
+    }
+
+    public static int CountTokens(string prompt, string modelName)
+    {
+        var tokenizer = TokenizerBuilder.CreateByModelName(modelName);
+        var encoded = tokenizer.Encode(prompt, new List<string>());
+        return encoded.Count;
     }
 }
