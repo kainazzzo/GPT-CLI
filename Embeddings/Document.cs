@@ -25,7 +25,7 @@ namespace GPT.CLI.Embeddings
             }
         }
 
-        public static List<Document> FindMostSimilarDocuments(List<Document> documents, List<double> queryEmbedding, int numResults = 3)
+        public static List<Document> FindMostSimilarDocuments(List<Document> documents, List<double> queryEmbedding, int numResults)
         {
             var similarities = new List<(Document Document, double Similarity)>();
 

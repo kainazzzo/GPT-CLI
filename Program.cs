@@ -51,6 +51,9 @@ class Program
         var embedFileOption = new Option<string[]>("--file", "Name of a file from which to load previously saved embeddings. Multiple files allowed.")
             { AllowMultipleArgumentsPerToken = true, Arity = ArgumentArity.OneOrMore};
 
+        var matchLimitOption = new Option<int>("--match-limit", () => 3,
+            "Limits the number of embedding chunks to use when applying context.");
+
         embedCommand.AddValidator(result =>
         {
             if (!Console.IsInputRedirected)
@@ -81,6 +84,7 @@ class Program
         rootCommand.AddGlobalOption(logitBiasOption);
         rootCommand.AddGlobalOption(userOption);
         rootCommand.AddGlobalOption(embedFileOption);
+        rootCommand.AddGlobalOption(matchLimitOption);
 
         rootCommand.AddCommand(chatCommand);
         rootCommand.AddCommand(embedCommand);
@@ -90,7 +94,7 @@ class Program
             modelOption, maxTokensOption, temperatureOption, topPOption,
             nOption, streamOption, stopOption,
             presencePenaltyOption, frequencyPenaltyOption, logitBiasOption, 
-            userOption, embedFileOption, chunkSizeOption);
+            userOption, embedFileOption, chunkSizeOption, matchLimitOption);
 
         Mode mode = Mode.Completion;
 
@@ -125,8 +129,10 @@ class Program
                     break;
                 }
                 case Mode.Embed:
+                {
                     await HandleEmbedMode(openAILogic, binder.GPTParameters);
                     break;
+                }
                 case Mode.Completion:
                 default:
                 {
@@ -220,7 +226,7 @@ class Program
                 {
                     // Search for the closest few documents and add those if they aren't used yet
                     var closestDocuments =
-                        Document.FindMostSimilarDocuments(documents, await openAILogic.GetEmbeddingForPrompt(chatInput));
+                        Document.FindMostSimilarDocuments(documents, await openAILogic.GetEmbeddingForPrompt(chatInput), gptParameters.ClosestMatchLimit);
                     if (closestDocuments != null)
                     {
                         foreach (var closestDocument in closestDocuments)
@@ -360,7 +366,7 @@ class Program
                 // Search for the closest few documents and add those if they aren't used yet
                 var closestDocuments =
                     Document.FindMostSimilarDocuments(documents,
-                        await openAILogic.GetEmbeddingForPrompt(parameters.Prompt));
+                        await openAILogic.GetEmbeddingForPrompt(parameters.Prompt), parameters.ClosestMatchLimit);
                 if (closestDocuments != null)
                 {
                     foreach (var closestDocument in closestDocuments)
