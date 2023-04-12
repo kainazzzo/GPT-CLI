@@ -43,14 +43,12 @@ class Program
         var frequencyPenaltyOption = new Option<double>("--frequency-penalty", "Penalty for new tokens based on their frequency in the text so far");
         var logitBiasOption = new Option<string>("--logit-bias", "Modify the likelihood of specified tokens appearing in the completion");
         var userOption = new Option<string>("--user", "A unique identifier representing your end-user");
-
         var chatCommand = new Command("chat", "Starts listening in chat mode.");
         var embedCommand = new Command("embed", "Create an embedding for data redirected via STDIN.");
         var chunkSizeOption = new Option<int>("--chunk-size", () => 1024,
             "The size to chunk down text into embeddable documents.");
         var embedFileOption = new Option<string[]>("--file", "Name of a file from which to load previously saved embeddings. Multiple files allowed.")
             { AllowMultipleArgumentsPerToken = true, Arity = ArgumentArity.OneOrMore};
-
         var matchLimitOption = new Option<int>("--match-limit", () => 3,
             "Limits the number of embedding chunks to use when applying context.");
 
@@ -84,7 +82,7 @@ class Program
         rootCommand.AddGlobalOption(logitBiasOption);
         rootCommand.AddGlobalOption(userOption);
         rootCommand.AddGlobalOption(embedFileOption);
-        rootCommand.AddGlobalOption(matchLimitOption);
+        rootCommand.AddOption(matchLimitOption);
 
         rootCommand.AddCommand(chatCommand);
         rootCommand.AddCommand(embedCommand);
@@ -337,7 +335,7 @@ class Program
             Messages = new List<ChatMessage>()
             {
                 new(StaticValues.ChatMessageRoles.System,
-                    "You will receive two messages from the user. The first message will be text for you to parse and understand. The next message will be a prompt describing how you should proceed. You will read through the text or code in the first message, understand it, and then apply the prompt in the second message, with the first message as your main context. Your final message after the prompt should only be the result of the prompt applied to the input text, and no more."),
+                    "You will receive two messages from the user. The first message will be text for you to parse and understand. The next message will be a prompt describing how you should proceed. You will read through the text or code in the first message, understand it, and then apply the prompt in the second message, with the first message as your main context. Your final message after the prompt should only be the result of the prompt applied to the input text with no preamble."),
                 new(StaticValues.ChatMessageRoles.Assistant,
                     "Sure. I will read through the first message and understand it. Then I'll wait for another message containing the prompt. After I apply the prompt to the original text, my final response will be the result of applying the prompt to my understanding of the input text."),
                 new(StaticValues.ChatMessageRoles.User, input),
