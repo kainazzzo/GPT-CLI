@@ -21,7 +21,7 @@ namespace GPT.CLI.Embeddings
             }
             catch
             {
-                return null;
+                return new();
             }
         }
 
@@ -29,15 +29,21 @@ namespace GPT.CLI.Embeddings
         {
             var similarities = new List<(Document Document, double Similarity)>();
 
+            // Calculate the cosine similarity between the query and each document
             foreach (var document in documents)
             {
                 double similarity = CosineSimilarity.Calculate(queryEmbedding, document.Embedding);
                 similarities.Add((document, similarity));
             }
 
-            similarities.Sort((a, b) => b.Similarity.CompareTo(a.Similarity));
+            // Sort by similarity
+            similarities.Sort((x, y) => y.Similarity.CompareTo(x.Similarity));
+            
+            // Return the top numResults
             return similarities.Take(numResults).Select(x => x.Document).ToList();
         }
+
+        
 
         public static async Task<List<Document>> ChunkStreamToDocumentsAsync(Stream contentStream, int chunkSize = 512)
         {

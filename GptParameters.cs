@@ -21,4 +21,5 @@ public class GPTParameters
     public string[] EmbedFilenames { get; set; }
     public int ChunkSize { get; set; }
     public int ClosestMatchLimit { get; set; }
+    public string[] EmbedDirectoryNames { get; set; }
 }

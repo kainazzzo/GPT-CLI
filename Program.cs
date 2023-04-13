@@ -49,6 +49,12 @@ class Program
             "The size to chunk down text into embeddable documents.");
         var embedFileOption = new Option<string[]>("--file", "Name of a file from which to load previously saved embeddings. Multiple files allowed.")
             { AllowMultipleArgumentsPerToken = true, Arity = ArgumentArity.OneOrMore};
+        var embedDirectoryOption = new Option<string[]>("--directory",
+            "Name of a directory from which to load previously saved embeddings. Multiple directories allowed.")
+        {
+            AllowMultipleArgumentsPerToken = true, Arity = ArgumentArity.OneOrMore
+        };
+
         var matchLimitOption = new Option<int>("--match-limit", () => 3,
             "Limits the number of embedding chunks to use when applying context.");
 
@@ -60,7 +66,6 @@ class Program
             }
         });
 
-        embedCommand.AddOption(embedFileOption);
         embedCommand.AddOption(chunkSizeOption);
 
         // Create a command and add the options
@@ -82,6 +87,8 @@ class Program
         rootCommand.AddGlobalOption(logitBiasOption);
         rootCommand.AddGlobalOption(userOption);
         rootCommand.AddGlobalOption(embedFileOption);
+        rootCommand.AddGlobalOption(embedDirectoryOption);
+
         rootCommand.AddOption(matchLimitOption);
 
         rootCommand.AddCommand(chatCommand);
@@ -92,7 +99,7 @@ class Program
             modelOption, maxTokensOption, temperatureOption, topPOption,
             nOption, streamOption, stopOption,
             presencePenaltyOption, frequencyPenaltyOption, logitBiasOption, 
-            userOption, embedFileOption, chunkSizeOption, matchLimitOption);
+            userOption, embedFileOption, embedDirectoryOption, chunkSizeOption, matchLimitOption);
 
         Mode mode = Mode.Completion;
 
@@ -191,6 +198,8 @@ class Program
  #####  #    # #    #   #    #####  #          #        #####  ####### ###");
         var sb = new StringBuilder();
         var documents = await ReadEmbedFilesAsync(gptParameters);
+        documents.AddRange(await ReadEmbedDirectoriesAsync(gptParameters));
+
         var prompts = new List<string>();
         var promptResponses = new List<string>();
 
@@ -220,7 +229,7 @@ class Program
 
                 
                 // If there's embedded context provided, inject it after the existing chat history, and before the new prompt
-                if (documents != null)
+                if (documents.Count > 0)
                 {
                     // Search for the closest few documents and add those if they aren't used yet
                     var closestDocuments =
@@ -263,16 +272,35 @@ class Program
 
     private static async Task<List<Document>> ReadEmbedFilesAsync(GPTParameters parameters)
     {
-        List<Document> documents = null;
+        List<Document> documents = new ();
         if (parameters.EmbedFilenames is { Length: > 0 })
         {
             foreach (var embedFile in parameters.EmbedFilenames)
             {
-                documents ??= new(parameters.EmbedFilenames.Length);
-
                 await using var fileStream = File.OpenRead(embedFile);
 
                 documents.AddRange(Document.LoadEmbeddings(fileStream));
+            }
+        }
+
+        return documents;
+    }
+
+    private static async Task<List<Document>> ReadEmbedDirectoriesAsync(GPTParameters parameters)
+    {
+        List<Document> documents = new();
+
+        if (parameters.EmbedDirectoryNames is { Length: > 0 })
+        {
+            foreach (var embedDirectory in parameters.EmbedDirectoryNames)
+            {
+                var files = Directory.EnumerateFiles(embedDirectory);
+                foreach (var file in files)
+                {
+                    await using var fileStream = File.OpenRead(file);
+
+                    documents.AddRange(Document.LoadEmbeddings(fileStream));
+                }
             }
         }
 
@@ -358,8 +386,10 @@ class Program
         if (parameters.Prompt != null)
         {
             var documents = await ReadEmbedFilesAsync(parameters);
+            documents.AddRange(await ReadEmbedDirectoriesAsync(parameters));
+            
 
-            if (documents != null)
+            if (documents.Count > 0)
             {
                 // Search for the closest few documents and add those if they aren't used yet
                 var closestDocuments =
