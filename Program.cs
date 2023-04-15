@@ -3,13 +3,27 @@ using System.CommandLine.Builder;
 using System.CommandLine.Parsing;
 using System.Text;
 using System.Text.Json;
+using Discord.WebSocket;
+using Discord;
 using GPT.CLI.Embeddings;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Identity.Web;
+using Microsoft.OpenApi.Models;
 using OpenAI.GPT3.Extensions;
 using OpenAI.GPT3.ObjectModels;
 using OpenAI.GPT3.ObjectModels.RequestModels;
 using OpenAI.GPT3.ObjectModels.ResponseModels;
+using TokenType = Discord.TokenType;
+using System.Security.Cryptography;
+using GPT.CLI.Discord;
+using Org.BouncyCastle.Crypto.Parameters;
+using Org.BouncyCastle.Security;
 
 namespace GPT.CLI;
 
@@ -19,8 +33,12 @@ class Program
     {
         Completion,
         Chat,
-        Embed
+        Embed,
+        Http,
+        Discord
     }
+
+    private static DiscordSocketClient _discordClient;
 
     static async Task Main(string[] args)
     {
@@ -45,6 +63,10 @@ class Program
         var userOption = new Option<string>("--user", "A unique identifier representing your end-user");
         var chatCommand = new Command("chat", "Starts listening in chat mode.");
         var embedCommand = new Command("embed", "Create an embedding for data redirected via STDIN.");
+        var httpCommand = new Command("http", "Starts an HTTP server to listen for requests.");
+        var discordCommand = new Command("discord", "Starts the CLI as a Discord bot that receives messages from all channels on your server.");
+        var botTokenOption = new Option<string>("--bot-token", "The token for your Discord bot.");
+
         var chunkSizeOption = new Option<int>("--chunk-size", () => 1024,
             "The size to chunk down text into embeddable documents.");
         var embedFileOption = new Option<string[]>("--file", "Name of a file from which to load previously saved embeddings. Multiple files allowed.")
@@ -54,6 +76,9 @@ class Program
         {
             AllowMultipleArgumentsPerToken = true, Arity = ArgumentArity.OneOrMore
         };
+
+        var httpPortOption = new Option<int>("--port", () => 5000, "The port to listen on for HTTP requests.");
+        var sslPortOption = new Option<int>("--ssl-port", () => 5001, "The port to listen on for HTTPS requests.");
 
         var matchLimitOption = new Option<int>("--match-limit", () => 3,
             "Limits the number of embedding chunks to use when applying context.");
@@ -93,13 +118,18 @@ class Program
 
         rootCommand.AddCommand(chatCommand);
         rootCommand.AddCommand(embedCommand);
+        // We'll add this later when I have an api idea.
+        //rootCommand.AddCommand(httpCommand);
+        rootCommand.AddCommand(discordCommand);
+        rootCommand.AddOption(botTokenOption);
+        
 
         var binder = new GPTParametersBinder(
             apiKeyOption, baseUrlOption, promptOption, configOption,
             modelOption, maxTokensOption, temperatureOption, topPOption,
             nOption, streamOption, stopOption,
             presencePenaltyOption, frequencyPenaltyOption, logitBiasOption, 
-            userOption, embedFileOption, embedDirectoryOption, chunkSizeOption, matchLimitOption);
+            userOption, embedFileOption, embedDirectoryOption, chunkSizeOption, matchLimitOption, botTokenOption);
 
         Mode mode = Mode.Completion;
 
@@ -107,6 +137,8 @@ class Program
         rootCommand.SetHandler(_ => {}, binder);
         chatCommand.SetHandler(_ => mode = Mode.Chat, binder);
         embedCommand.SetHandler(_ => mode = Mode.Embed, binder);
+        httpCommand.SetHandler(_ => mode = Mode.Http, binder);
+        discordCommand.SetHandler(_ => mode = Mode.Discord, binder);
 
         // Invoke the command
         var retValue = await new CommandLineBuilder(rootCommand)
@@ -119,7 +151,7 @@ class Program
             // Set up dependency injection
             var services = new ServiceCollection(); 
             
-            ConfigureServices(services, binder);
+            ConfigureServices(services, binder, mode);
 
             await using var serviceProvider = services.BuildServiceProvider();
 
@@ -138,6 +170,11 @@ class Program
                     await HandleEmbedMode(openAILogic, binder.GPTParameters);
                     break;
                 }
+                case Mode.Discord:
+                {
+                    await HandleDiscordMode(openAILogic, binder.GPTParameters, services);
+                    break;
+                }
                 case Mode.Completion:
                 default:
                 {
@@ -147,6 +184,116 @@ class Program
                 }
             }
         }
+    }
+
+    private static async Task HandleDiscordMode(GPTParameters gptParameters)
+    {
+        // You will need to provide your Discord bot token here
+        string botToken = gptParameters.BotToken;
+
+        var discordClient = new DiscordSocketClient();
+        discordClient.Log += LogAsync;
+        discordClient.MessageReceived += MessageReceivedAsync;
+
+        await discordClient.LoginAsync(TokenType.Bot, botToken);
+        await discordClient.StartAsync();
+
+        // Block this task until the program is closed.
+        await Task.Delay(-1);
+    }
+
+    private static Task LogAsync(LogMessage log)
+    {
+        Console.WriteLine(log.ToString());
+        return Task.CompletedTask;
+    }
+
+    private static async Task MessageReceivedAsync(SocketMessage message)
+    {
+        // Ignore messages from the bot itself
+        if (message.Author.Id == _discordClient.CurrentUser.Id)
+            return;
+
+        // Process the message here, e.g., call your OpenAILogic methods
+    }
+
+    private static async Task HandleDiscordMode(OpenAILogic openAILogic, GPTParameters gptParameters, IServiceCollection services)
+    {
+        var hostBuilder = new HostBuilder().ConfigureWebHostDefaults(webBuilder =>
+        {
+            webBuilder.ConfigureServices(servicesCollection =>
+            {
+                foreach (var service in services)
+                {
+                    servicesCollection.Add(service);
+                }
+            });
+
+            webBuilder.Configure(app =>
+            {
+                app.UseHttpsRedirection(); // Add HTTPS redirection
+                app.UseRouting();
+                
+                //app.UseAuthentication();
+                //app.UseAuthorization();
+
+                app.UseEndpoints(endpoints =>
+                {
+                    endpoints.MapPost("/", async (context) =>
+                    {
+                        // Read the request body
+                        var request  = context.Request;
+                        var response = context.Response;
+                        using var reader = new StreamReader(request.Body, Encoding.UTF8);
+                        string requestBody = await reader.ReadToEndAsync();
+
+                        // Get the signature and timestamp from headers
+                        string signature = request.Headers["X-Signature-Ed25519"];
+                        string timestamp = request.Headers["X-Signature-Timestamp"];
+
+                        // Verify the signature
+                        if (!VerifySignature("f35df98f5bfd306aed9f224c9dc8ee06840203ca6cd6c5f9369ae26f21d61032", signature, timestamp, requestBody))
+                        {
+                            response.StatusCode = StatusCodes.Status401Unauthorized;
+                            return;
+                        }
+
+                        // Parse the request body
+                        var json = JsonDocument.Parse(requestBody);
+                        var interactionType = json.RootElement.GetProperty("type").GetInt32();
+
+                        // Handle PING (type 1) interaction
+                        if (interactionType == 1)
+                        {
+                            response.ContentType = "application/json";
+                            await response.WriteAsync("{\"type\": 1}");
+                            return;
+                        }
+
+                        // Handle other interaction types as needed
+                        // ...
+
+                        response.StatusCode = StatusCodes.Status400BadRequest;
+
+                    } );
+                });
+            });
+
+            // Configure Kestrel to listen on port 80
+            webBuilder.UseKestrel(options =>
+            {
+                options.ListenAnyIP(80);
+                options.ListenAnyIP(443, configure => configure.UseHttps());
+            });
+        });
+
+        hostBuilder.ConfigureServices((hostContext, services) =>
+        {
+            services.AddSingleton<DiscordSocketClient>();
+            services.AddHostedService<DiscordBot>();
+        });
+
+        await hostBuilder.RunConsoleAsync();
     }
 
     private static async Task HandleEmbedMode(OpenAILogic openAILogic, GPTParameters gptParameters)
@@ -184,7 +331,7 @@ class Program
                 new(StaticValues.ChatMessageRoles.System,
                     "You are ChatGPT CLI, the helpful assistant, but you're running on a command line.")
             }
-        });
+        }, Mode.Chat);
 
 
 
@@ -325,17 +472,17 @@ class Program
     }
 
 
-    private static void ConfigureServices(IServiceCollection services, GPTParametersBinder gptParametersBinder)
+    private static void ConfigureServices(IServiceCollection services, GPTParametersBinder gptParametersBinder, Mode mode)
     {
         var gptParameters = gptParametersBinder.GPTParameters;
 
-        var configuration = new ConfigurationBuilder()
+        Configuration = new ConfigurationBuilder()
             .SetBasePath(AppDomain.CurrentDomain.BaseDirectory)
             .AddJsonFile(gptParameters.Config ?? "appSettings.json", optional: true, reloadOnChange: false)
             .Build();
 
-        gptParameters.ApiKey ??= configuration["OpenAI:api-key"];
-        gptParameters.BaseDomain ??= configuration["OpenAI:base-domain"];
+        gptParameters.ApiKey ??= Configuration["OpenAI:api-key"];
+        gptParameters.BaseDomain ??= Configuration["OpenAI:base-domain"];
 
         if (Console.IsInputRedirected)
         {
@@ -343,14 +490,59 @@ class Program
         }
 
         // Add the configuration object to the services
-        services.AddSingleton<IConfiguration>(configuration);
+        services.AddSingleton<IConfiguration>(Configuration);
         services.AddOpenAIService(settings =>
         {
             settings.ApiKey = gptParameters.ApiKey;
             settings.BaseDomain = gptParameters.BaseDomain;
         });
-        services.AddScoped<OpenAILogic>();
+        services.AddSingleton<OpenAILogic>();
+        services.AddSingleton<DiscordSocketClient>();
+        services.AddSingleton<DiscordBot>();
+
+
+
+        if (mode == Mode.Http)
+        {
+            // Add OpenAPI/Swagger document generation
+            //services.AddSwaggerGen(c =>
+            //{
+            //    c.SwaggerDoc("v1", new OpenApiInfo { Title = "GPT-CLI API", Version = "v1" });
+
+            //    // Set the comments path for the Swagger JSON and UI
+            //    var xmlFile = $"{Assembly.GetExecutingAssembly().GetName().Name}.xml";
+            //    var xmlPath = Path.Combine(AppContext.BaseDirectory, xmlFile);
+            //    c.IncludeXmlComments(xmlPath);
+
+            //    // Include custom API descriptions
+            //    var apiDescriptionsFile = "ApiDescriptions.xml";
+            //    var apiDescriptionsPath = Path.Combine(AppContext.BaseDirectory, apiDescriptionsFile);
+            //    c.IncludeXmlComments(apiDescriptionsPath);
+            //});
+
+            // Add Azure AD B2C authentication
+            // Add authentication with Azure AD B2C
+            services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+                .AddMicrosoftIdentityWebApi(options =>
+                {
+                    Configuration.Bind("AzureAdB2C", options);
+                    options.TokenValidationParameters.NameClaimType = "name";
+                },options => Configuration.Bind("AzureAdB2C", options));
+
+            
+            // Add minimal API
+            services.AddEndpointsApiExplorer();
+            services.AddRouting();
+
+            // Add Swagger
+            services.AddSwaggerGen(c =>
+            {
+                c.SwaggerDoc("v1", new OpenApiInfo { Title = "My API", Version = "v1" });
+            });
+        }
     }
+
+    public static IConfigurationRoot Configuration { get; set; }
 
     private static async Task<ChatCompletionCreateRequest> MapChatEdit(GPTParameters parameters, OpenAILogic openAILogic)
     {
@@ -370,7 +562,7 @@ class Program
                 new(StaticValues.ChatMessageRoles.Assistant,
                     "Thank you. Now I will wait for the prompt and then apply it in context.")
             }
-        });
+        }, Mode.Completion);
 
         // This is placed here so the MapCommon method can add contextual embeddings before the prompt
         request.Messages.Add(new(StaticValues.ChatMessageRoles.User, parameters.Prompt));
@@ -379,33 +571,36 @@ class Program
 
     }
 
-    private static async Task<ChatCompletionCreateRequest> MapCommon(GPTParameters parameters, OpenAILogic openAILogic, ChatCompletionCreateRequest request)
+    private static async Task<ChatCompletionCreateRequest> MapCommon(GPTParameters parameters, OpenAILogic openAILogic, ChatCompletionCreateRequest request, Mode mode)
     {
-        // This won't do anything for chat mode, unless a starting prompt is specified, I suppose
-        // TODO: Test this prompt with chat mode:
-        if (parameters.Prompt != null)
+        // It only makes sense to look for embeddings when in completion mode and when a prompt is provided
+        if (mode == Mode.Completion && parameters.Prompt != null)
         {
+            // Read the embeddings from the files and directories (empty list is returned if none are provided)
             var documents = await ReadEmbedFilesAsync(parameters);
             documents.AddRange(await ReadEmbedDirectoriesAsync(parameters));
-            
 
+            // If there were embeddings supplied either as files or directories:
             if (documents.Count > 0)
             {
                 // Search for the closest few documents and add those if they aren't used yet
                 var closestDocuments =
                     Document.FindMostSimilarDocuments(documents,
                         await openAILogic.GetEmbeddingForPrompt(parameters.Prompt), parameters.ClosestMatchLimit);
+
+                // Add any closest documents to the request
                 if (closestDocuments != null)
                 {
                     foreach (var closestDocument in closestDocuments)
                     {
                         request.Messages.Add(new(StaticValues.ChatMessageRoles.User,
-                            $"Here is some context provided for you to learn from for the next prompt: {closestDocument.Text}"));
+                            $"Context for the next message: {closestDocument.Text}"));
                     }
                 }
             }
         }
 
+        // Map the common parameters to the request
         request.Model = parameters.Model;
         request.MaxTokens = parameters.MaxTokens;
         request.N = parameters.N;
@@ -429,10 +624,74 @@ class Program
         var request = await MapCommon(parameters, openAILogic,new ChatCompletionCreateRequest
         {
             Messages = new List<ChatMessage>()
-        });
+        }, Mode.Completion);
 
         request.Messages.Add(new(StaticValues.ChatMessageRoles.System, parameters.Prompt));
 
         return request;
     }
+
+    private static bool VerifySignature(string publicKey, string signature, string timestamp, string body)
+    {
+        byte[] publicKeyBytes = StringToByteArray(publicKey);
+        byte[] signatureBytes = StringToByteArray(signature);
+        byte[] timestampBytes = Encoding.UTF8.GetBytes(timestamp);
+        byte[] bodyBytes = Encoding.UTF8.GetBytes(body);
+
+        try
+        {
+            var pubKeyParam = new Ed25519PublicKeyParameters(publicKeyBytes, 0);
+            var verifier = SignerUtilities.GetSigner("Ed25519");
+
+            verifier.Init(false, pubKeyParam);
+
+            byte[] combinedBytes = new byte[timestampBytes.Length + bodyBytes.Length];
+            Buffer.BlockCopy(timestampBytes, 0, combinedBytes, 0, timestampBytes.Length);
+            Buffer.BlockCopy(bodyBytes, 0, combinedBytes, timestampBytes.Length, bodyBytes.Length);
+
+            verifier.BlockUpdate(combinedBytes, 0, combinedBytes.Length);
+
+            return verifier.VerifySignature(signatureBytes);
+        }
+        catch (Exception ex)
+        {
+            return false;
+        }
+
+        
+    }
+    private static byte[] StringToByteArray(string hex)
+    {
+        int length = hex.Length;
+        byte[] bytes = new byte[length / 2];
+        for (int i = 0; i < length; i += 2)
+        {
+            bytes[i / 2] = Convert.ToByte(hex.Substring(i, 2), 16);
+        }
+        return bytes;
+    }
+    
+
+    public class InteractionPayload
+    {
+        public string ApplicationId { get; set; }
+        public string Id { get; set; }
+        public string Token { get; set; }
+        public int Type { get; set; }
+        public InteractionUser User { get; set; }
+        public int Version { get; set; }
+    }
+
+    public class InteractionUser
+    {
+        public string Avatar { get; set; }
+        public object AvatarDecoration { get; set; }
+        public string Discriminator { get; set; }
+        public object DisplayName { get; set; }
+        public object GlobalName { get; set; }
+        public string Id { get; set; }
+        public int PublicFlags { get; set; }
+        public string Username { get; set; }
+    }
+
 }

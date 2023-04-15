@@ -2,7 +2,7 @@
   "profiles": {
     "GPT-CLI": {
       "commandName": "Project",
-      "commandLineArgs": "chat --file cli.dat",
+      "commandLineArgs": "discord",
       "workingDirectory": "C:\\projects\\GPT-CLI\\"
     }
   }

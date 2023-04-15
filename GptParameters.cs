@@ -22,4 +22,5 @@ public class GPTParameters
     public int ChunkSize { get; set; }
     public int ClosestMatchLimit { get; set; }
     public string[] EmbedDirectoryNames { get; set; }
+    public string BotToken { get; set; }
 }

@@ -25,6 +25,7 @@ public class GPTParametersBinder : BinderBase<GPTParameters>
 
     private readonly Option<int> _chunkSizeOption;
     private readonly Option<int> _matchLimitOption;
+    private readonly Option<string> _botTokenOption;
 
     public GPTParametersBinder(Option<string> apiKeyOption,
         Option<string> baseUrlOption,
@@ -44,7 +45,8 @@ public class GPTParametersBinder : BinderBase<GPTParameters>
         Option<string[]> embedFileOption,
         Option<string[]> embedDirectoryOption,
         Option<int> chunkSizeOption,
-        Option<int> matchLimitOption)
+        Option<int> matchLimitOption,
+        Option<string> botTokenOption)
     {
         _apiKeyOption = apiKeyOption;
         _baseUrlOption = baseUrlOption;
@@ -65,6 +67,7 @@ public class GPTParametersBinder : BinderBase<GPTParameters>
         _embedDirectoryOption = embedDirectoryOption;
         _chunkSizeOption = chunkSizeOption;
         _matchLimitOption = matchLimitOption;
+        _botTokenOption = botTokenOption;
     }
 
     protected override GPTParameters GetBoundValue(BindingContext bindingContext)
@@ -89,7 +92,8 @@ public class GPTParametersBinder : BinderBase<GPTParameters>
             EmbedFilenames = bindingContext.ParseResult.GetValueForOption(_embedFileOption),
             EmbedDirectoryNames = bindingContext.ParseResult.GetValueForOption(_embedDirectoryOption),
             ChunkSize = bindingContext.ParseResult.GetValueForOption(_chunkSizeOption),
-            ClosestMatchLimit = bindingContext.ParseResult.GetValueForOption(_matchLimitOption)
+            ClosestMatchLimit = bindingContext.ParseResult.GetValueForOption(_matchLimitOption),
+            BotToken = bindingContext.ParseResult.GetValueForOption(_botTokenOption)
         };
  
 
