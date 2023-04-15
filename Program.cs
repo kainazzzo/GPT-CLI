@@ -3,8 +3,8 @@ using System.CommandLine.Builder;
 using System.CommandLine.Parsing;
 using System.Text;
 using System.Text.Json;
-using Discord.WebSocket;
 using Discord;
+using Discord.WebSocket;
 using GPT.CLI.Embeddings;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Builder;
@@ -19,27 +19,14 @@ using OpenAI.GPT3.Extensions;
 using OpenAI.GPT3.ObjectModels;
 using OpenAI.GPT3.ObjectModels.RequestModels;
 using OpenAI.GPT3.ObjectModels.ResponseModels;
-using TokenType = Discord.TokenType;
-using System.Security.Cryptography;
-using GPT.CLI.Discord;
 using Org.BouncyCastle.Crypto.Parameters;
 using Org.BouncyCastle.Security;
+using GPT.CLI.Chat.Discord;
 
 namespace GPT.CLI;
 
 class Program
 {
-    enum Mode
-    {
-        Completion,
-        Chat,
-        Embed,
-        Http,
-        Discord
-    }
-
-    private static DiscordSocketClient _discordClient;
-
     static async Task Main(string[] args)
     {
         // Define command line parameters
@@ -131,14 +118,14 @@ class Program
             presencePenaltyOption, frequencyPenaltyOption, logitBiasOption, 
             userOption, embedFileOption, embedDirectoryOption, chunkSizeOption, matchLimitOption, botTokenOption);
 
-        Mode mode = Mode.Completion;
+        ParameterMapping.Mode mode = ParameterMapping.Mode.Completion;
 
         // Set the handler for the rootCommand
         rootCommand.SetHandler(_ => {}, binder);
-        chatCommand.SetHandler(_ => mode = Mode.Chat, binder);
-        embedCommand.SetHandler(_ => mode = Mode.Embed, binder);
-        httpCommand.SetHandler(_ => mode = Mode.Http, binder);
-        discordCommand.SetHandler(_ => mode = Mode.Discord, binder);
+        chatCommand.SetHandler(_ => mode = ParameterMapping.Mode.Chat, binder);
+        embedCommand.SetHandler(_ => mode = ParameterMapping.Mode.Embed, binder);
+        httpCommand.SetHandler(_ => mode = ParameterMapping.Mode.Http, binder);
+        discordCommand.SetHandler(_ => mode = ParameterMapping.Mode.Discord, binder);
 
         // Invoke the command
         var retValue = await new CommandLineBuilder(rootCommand)
@@ -160,22 +147,22 @@ class Program
 
             switch (mode)
             {
-                case Mode.Chat:
+                case ParameterMapping.Mode.Chat:
                 {
                     await HandleChatMode(openAILogic, binder.GPTParameters);
                     break;
                 }
-                case Mode.Embed:
+                case ParameterMapping.Mode.Embed:
                 {
                     await HandleEmbedMode(openAILogic, binder.GPTParameters);
                     break;
                 }
-                case Mode.Discord:
+                case ParameterMapping.Mode.Discord:
                 {
                     await HandleDiscordMode(openAILogic, binder.GPTParameters, services);
                     break;
                 }
-                case Mode.Completion:
+                case ParameterMapping.Mode.Completion:
                 default:
                 {
                     await HandleCompletionMode(openAILogic, binder.GPTParameters);
@@ -184,37 +171,6 @@ class Program
                 }
             }
         }
-    }
-
-    private static async Task HandleDiscordMode(GPTParameters gptParameters)
-    {
-        // You will need to provide your Discord bot token here
-        string botToken = gptParameters.BotToken;
-
-        var discordClient = new DiscordSocketClient();
-        discordClient.Log += LogAsync;
-        discordClient.MessageReceived += MessageReceivedAsync;
-
-        await discordClient.LoginAsync(TokenType.Bot, botToken);
-        await discordClient.StartAsync();
-
-        // Block this task until the program is closed.
-        await Task.Delay(-1);
-    }
-
-    private static Task LogAsync(LogMessage log)
-    {
-        Console.WriteLine(log.ToString());
-        return Task.CompletedTask;
-    }
-
-    private static async Task MessageReceivedAsync(SocketMessage message)
-    {
-        // Ignore messages from the bot itself
-        if (message.Author.Id == _discordClient.CurrentUser.Id)
-            return;
-
-        // Process the message here, e.g., call your OpenAILogic methods
     }
 
     private static async Task HandleDiscordMode(OpenAILogic openAILogic, GPTParameters gptParameters, IServiceCollection services)
@@ -287,10 +243,9 @@ class Program
             });
         });
 
-        hostBuilder.ConfigureServices((hostContext, services) =>
+        hostBuilder.ConfigureServices((hostContext, innerServices) =>
         {
-            services.AddSingleton<DiscordSocketClient>();
-            services.AddHostedService<DiscordBot>();
+            innerServices.AddHostedService<DiscordBot>();
         });
 
         await hostBuilder.RunConsoleAsync();
@@ -309,8 +264,8 @@ class Program
     private static async Task HandleCompletionMode(OpenAILogic openAILogic, GPTParameters gptParameters)
     {
         var chatRequest = Console.IsInputRedirected
-            ? await MapChatEdit(gptParameters, openAILogic)
-            : await MapChatCreate(gptParameters, openAILogic);
+            ? await ParameterMapping.MapChatEdit(gptParameters, openAILogic)
+            : await ParameterMapping.MapChatCreate(gptParameters, openAILogic);
 
         var responses = gptParameters.Stream == true
             ? openAILogic.CreateChatCompletionAsyncEnumerable(chatRequest)
@@ -324,14 +279,14 @@ class Program
 
     private static async Task HandleChatMode(OpenAILogic openAILogic, GPTParameters gptParameters)
     {
-        var initialRequest = await MapCommon(gptParameters, openAILogic, new ChatCompletionCreateRequest()
+        var initialRequest = await ParameterMapping.MapCommon(gptParameters, openAILogic, new ChatCompletionCreateRequest()
         {
             Messages = new List<ChatMessage>(50)
             {
                 new(StaticValues.ChatMessageRoles.System,
                     "You are ChatGPT CLI, the helpful assistant, but you're running on a command line.")
             }
-        }, Mode.Chat);
+        }, ParameterMapping.Mode.Chat);
 
 
 
@@ -417,7 +372,7 @@ class Program
         } while (true);
     }
 
-    private static async Task<List<Document>> ReadEmbedFilesAsync(GPTParameters parameters)
+    public static async Task<List<Document>> ReadEmbedFilesAsync(GPTParameters parameters)
     {
         List<Document> documents = new ();
         if (parameters.EmbedFilenames is { Length: > 0 })
@@ -433,7 +388,7 @@ class Program
         return documents;
     }
 
-    private static async Task<List<Document>> ReadEmbedDirectoriesAsync(GPTParameters parameters)
+    public static async Task<List<Document>> ReadEmbedDirectoriesAsync(GPTParameters parameters)
     {
         List<Document> documents = new();
 
@@ -472,7 +427,7 @@ class Program
     }
 
 
-    private static void ConfigureServices(IServiceCollection services, GPTParametersBinder gptParametersBinder, Mode mode)
+    private static void ConfigureServices(IServiceCollection services, GPTParametersBinder gptParametersBinder, ParameterMapping.Mode mode)
     {
         var gptParameters = gptParametersBinder.GPTParameters;
 
@@ -497,12 +452,23 @@ class Program
             settings.BaseDomain = gptParameters.BaseDomain;
         });
         services.AddSingleton<OpenAILogic>();
-        services.AddSingleton<DiscordSocketClient>();
+        services.AddSingleton(_ =>
+        {
+            var config = new DiscordSocketConfig
+            {
+                GatewayIntents = GatewayIntents.Guilds | GatewayIntents.GuildMessages | GatewayIntents.GuildMembers | GatewayIntents.GuildPresences | 
+                                 GatewayIntents.MessageContent | GatewayIntents.DirectMessages | GatewayIntents.DirectMessageReactions,
+                MessageCacheSize = 100
+            };
+
+            return new DiscordSocketClient(config);
+        });
         services.AddSingleton<DiscordBot>();
+        services.AddSingleton(_ => gptParameters);
 
 
 
-        if (mode == Mode.Http)
+        if (mode == ParameterMapping.Mode.Http)
         {
             // Add OpenAPI/Swagger document generation
             //services.AddSwaggerGen(c =>
@@ -544,93 +510,6 @@ class Program
 
     public static IConfigurationRoot Configuration { get; set; }
 
-    private static async Task<ChatCompletionCreateRequest> MapChatEdit(GPTParameters parameters, OpenAILogic openAILogic)
-    {
-        using var streamReader = new StreamReader(parameters.Input);
-        var input = await streamReader.ReadToEndAsync();
-        await parameters.Input.DisposeAsync();
-
-        var request = await MapCommon(parameters, openAILogic, new ChatCompletionCreateRequest
-        {
-            Messages = new List<ChatMessage>()
-            {
-                new(StaticValues.ChatMessageRoles.System,
-                    "You will receive two messages from the user. The first message will be text for you to parse and understand. The next message will be a prompt describing how you should proceed. You will read through the text or code in the first message, understand it, and then apply the prompt in the second message, with the first message as your main context. Your final message after the prompt should only be the result of the prompt applied to the input text with no preamble."),
-                new(StaticValues.ChatMessageRoles.Assistant,
-                    "Sure. I will read through the first message and understand it. Then I'll wait for another message containing the prompt. After I apply the prompt to the original text, my final response will be the result of applying the prompt to my understanding of the input text."),
-                new(StaticValues.ChatMessageRoles.User, input),
-                new(StaticValues.ChatMessageRoles.Assistant,
-                    "Thank you. Now I will wait for the prompt and then apply it in context.")
-            }
-        }, Mode.Completion);
-
-        // This is placed here so the MapCommon method can add contextual embeddings before the prompt
-        request.Messages.Add(new(StaticValues.ChatMessageRoles.User, parameters.Prompt));
-
-        return request;
-
-    }
-
-    private static async Task<ChatCompletionCreateRequest> MapCommon(GPTParameters parameters, OpenAILogic openAILogic, ChatCompletionCreateRequest request, Mode mode)
-    {
-        // It only makes sense to look for embeddings when in completion mode and when a prompt is provided
-        if (mode == Mode.Completion && parameters.Prompt != null)
-        {
-            // Read the embeddings from the files and directories (empty list is returned if none are provided)
-            var documents = await ReadEmbedFilesAsync(parameters);
-            documents.AddRange(await ReadEmbedDirectoriesAsync(parameters));
-
-            // If there were embeddings supplied either as files or directories:
-            if (documents.Count > 0)
-            {
-                // Search for the closest few documents and add those if they aren't used yet
-                var closestDocuments =
-                    Document.FindMostSimilarDocuments(documents,
-                        await openAILogic.GetEmbeddingForPrompt(parameters.Prompt), parameters.ClosestMatchLimit);
-
-                // Add any closest documents to the request
-                if (closestDocuments != null)
-                {
-                    foreach (var closestDocument in closestDocuments)
-                    {
-                        request.Messages.Add(new(StaticValues.ChatMessageRoles.User,
-                            $"Context for the next message: {closestDocument.Text}"));
-                    }
-                }
-            }
-        }
-
-        // Map the common parameters to the request
-        request.Model = parameters.Model;
-        request.MaxTokens = parameters.MaxTokens;
-        request.N = parameters.N;
-        request.Temperature = (float?)parameters.Temperature;
-        request.TopP = (float?)parameters.TopP;
-        request.Stream = parameters.Stream;
-        request.Stop = parameters.Stop;
-        request.PresencePenalty = (float?)parameters.PresencePenalty;
-        request.FrequencyPenalty = (float?)parameters.FrequencyPenalty;
-        request.LogitBias = parameters.LogitBias == null
-            ? null
-            : JsonSerializer.Deserialize<Dictionary<string, double>>(parameters.LogitBias);
-        request.User = parameters.User;
-
-        return request;
-    }
-
-    private static async Task<ChatCompletionCreateRequest> MapChatCreate(GPTParameters parameters,
-        OpenAILogic openAILogic)
-    {
-        var request = await MapCommon(parameters, openAILogic,new ChatCompletionCreateRequest
-        {
-            Messages = new List<ChatMessage>()
-        }, Mode.Completion);
-
-        request.Messages.Add(new(StaticValues.ChatMessageRoles.System, parameters.Prompt));
-
-        return request;
-    }
-
     private static bool VerifySignature(string publicKey, string signature, string timestamp, string body)
     {
         byte[] publicKeyBytes = StringToByteArray(publicKey);
@@ -638,25 +517,18 @@ class Program
         byte[] timestampBytes = Encoding.UTF8.GetBytes(timestamp);
         byte[] bodyBytes = Encoding.UTF8.GetBytes(body);
 
-        try
-        {
-            var pubKeyParam = new Ed25519PublicKeyParameters(publicKeyBytes, 0);
-            var verifier = SignerUtilities.GetSigner("Ed25519");
+        var pubKeyParam = new Ed25519PublicKeyParameters(publicKeyBytes, 0);
+        var verifier = SignerUtilities.GetSigner("Ed25519");
 
-            verifier.Init(false, pubKeyParam);
+        verifier.Init(false, pubKeyParam);
 
-            byte[] combinedBytes = new byte[timestampBytes.Length + bodyBytes.Length];
-            Buffer.BlockCopy(timestampBytes, 0, combinedBytes, 0, timestampBytes.Length);
-            Buffer.BlockCopy(bodyBytes, 0, combinedBytes, timestampBytes.Length, bodyBytes.Length);
+        byte[] combinedBytes = new byte[timestampBytes.Length + bodyBytes.Length];
+        Buffer.BlockCopy(timestampBytes, 0, combinedBytes, 0, timestampBytes.Length);
+        Buffer.BlockCopy(bodyBytes, 0, combinedBytes, timestampBytes.Length, bodyBytes.Length);
 
-            verifier.BlockUpdate(combinedBytes, 0, combinedBytes.Length);
+        verifier.BlockUpdate(combinedBytes, 0, combinedBytes.Length);
 
-            return verifier.VerifySignature(signatureBytes);
-        }
-        catch (Exception ex)
-        {
-            return false;
-        }
+        return verifier.VerifySignature(signatureBytes);
 
         
     }

@@ -16,6 +16,7 @@
     <PackageReference Include="Betalgo.OpenAI.GPT3" Version="6.8.3" />
     <PackageReference Include="BouncyCastle.NetCore" Version="1.9.0" />
     <PackageReference Include="Discord.Net" Version="3.10.0" />
+    <PackageReference Include="Discord.Net.Interactions" Version="3.10.0" />
     <PackageReference Include="Microsoft.AspNetCore" Version="2.2.0" />
     <PackageReference Include="Microsoft.AspNetCore.Authentication.AzureADB2C.UI" Version="6.0.16" />
     <PackageReference Include="Microsoft.AspNetCore.Routing" Version="2.2.2" />
