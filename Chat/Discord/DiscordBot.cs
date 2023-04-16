@@ -130,6 +130,7 @@ public class DiscordBot : IHostedService
 
         // Add this message as a chat log
         channel.chatBot.AddMessage(new ChatMessage(StaticValues.ChatMessageRoles.User, message.Content));
+        await Console.Out.WriteLineAsync($"Message received from {message.Author.Id}: {message.Content}");
 
         if (!channel.options.Muted)
         {
