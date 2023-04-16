@@ -8,5 +8,4 @@ RUN apk add --no-cache libstdc++ libgcc icu-libs
 WORKDIR /app
 COPY --from=build /app/publish .
 COPY --from=build /src/appSettings.json .
-ENV MODEL="gpt-3.5-turbo"
-ENTRYPOINT ["./gpt", "discord", "--model=${MODEL}"]
+ENTRYPOINT ["./gpt", "discord"]

@@ -142,11 +142,19 @@ public class DiscordBot : IHostedService
             // Send the response to the channel
             await foreach (var response in responses)
             {
-                var content = response?.Choices?.FirstOrDefault()?.Message.Content;
-                if (content is not null)
+                if (response.Successful)
                 {
-                    sb.Append(content);
+                    var content = response?.Choices?.FirstOrDefault()?.Message.Content;
+                    if (content is not null)
+                    {
+                        sb.Append(content);
+                    }
                 }
+                else
+                {
+                    await Console.Out.WriteLineAsync($"Error code {response.Error?.Code}: {response.Error?.Message}");
+                }
+
             }
 
             if (sb.Length > 0)
