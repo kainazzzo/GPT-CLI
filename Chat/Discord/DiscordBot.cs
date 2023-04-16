@@ -22,7 +22,7 @@ public class DiscordBot : IHostedService
     private readonly IConfiguration _configuration;
     private readonly OpenAILogic _openAILogic;
     private readonly GPTParameters _defaultParameters;
-    private readonly Dictionary<string, (ChatBot chatBot, ChannelOptions options)> _channelBots = new();
+    private readonly Dictionary<ulong, (ChatBot chatBot, ChannelOptions options)> _channelBots = new();
 
     public DiscordBot(DiscordSocketClient client, IConfiguration configuration, OpenAILogic openAILogic, GPTParameters defaultParameters)
     {
@@ -118,11 +118,11 @@ public class DiscordBot : IHostedService
 
         // Handle the received message here
         // ...
-        if (!_channelBots.TryGetValue(message.Channel.Name, out var channel))
+        if (!_channelBots.TryGetValue(message.Channel.Id, out var channel))
         {
             channel = (new (_openAILogic, Clone(_defaultParameters)), new ());
             channel.chatBot.AddInstruction(new (StaticValues.ChatMessageRoles.System, "You're a Discord Chat Bot named GPTInfoBot. Every message to the best of your ability."));
-            _channelBots.Add(message.Channel.Name, channel);
+            _channelBots.Add(message.Channel.Id, channel);
         }
 
         if (!channel.options.Enabled)
@@ -174,10 +174,10 @@ public class DiscordBot : IHostedService
     private async void HandleGptCliCommand(SocketSlashCommand command)
     {
         var channel = command.Channel;
-        if (!_channelBots.TryGetValue(channel.Name, out var chatBot))
+        if (!_channelBots.TryGetValue(channel.Id, out var chatBot))
         {
             chatBot = new(new(_openAILogic, Clone(_defaultParameters)), new ChannelOptions());
-            _channelBots.Add(channel.Name, chatBot);
+            _channelBots.Add(channel.Id, chatBot);
         }
 
 
@@ -187,26 +187,32 @@ public class DiscordBot : IHostedService
             switch (option.Name)
             {
                 case "clear":
-                    chatBot.chatBot.ClearMessages();
-                    await command.RespondAsync("Messages cleared.");
+                    var clearOptionValue = option.Value.ToString();
+                    if (clearOptionValue == "messages")
+                    {
+                        chatBot.chatBot.ClearMessages();
+                    }
+                    else if (clearOptionValue == "instructions")
+                    {
+                        chatBot.chatBot.ClearInstructions();
+                    }
+                    else if (clearOptionValue == "all")
+                    {
+                        chatBot.chatBot.ClearMessages();
+                        chatBot.chatBot.ClearInstructions();
+                    }
+
+                    if (clearOptionValue != null)
+                        await command.RespondAsync($"{char.ToUpper(clearOptionValue[0])}{clearOptionValue.Substring(1)} cleared.");
+
                     break;
                 case "instruction":
                     var instruction = option.Value.ToString();
-                    if (instruction == "clear")
-                    {
-                        chatBot.chatBot.ClearInstructions();
-                        await command.RespondAsync("Instructions cleared.");
-                    }
-                    else if (instruction == "get")
-                    {
-                        await command.RespondAsync($"Instructions: \n {chatBot.chatBot.Instructions}");
-                    }
-                    else if (!string.IsNullOrWhiteSpace(instruction))
+                    if (!string.IsNullOrWhiteSpace(instruction))
                     {
                         chatBot.chatBot.AddInstruction(new(StaticValues.ChatMessageRoles.System, instruction));
                         await command.RespondAsync($"Instruction added: {instruction}");
                     }
-
                     break;
                 case "enabled":
                     if (option.Value is bool enabled)
