@@ -141,7 +141,7 @@ public class DiscordBot : IHostedService
             // Send the response to the channel
             await foreach (var response in responses)
             {
-                var content = response.Choices.FirstOrDefault()?.Message.Content;
+                var content = response?.Choices?.FirstOrDefault()?.Message.Content;
                 if (content is not null)
                 {
                     sb.Append(content);
