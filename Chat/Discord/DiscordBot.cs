@@ -57,7 +57,8 @@ public class DiscordBot : IHostedService
             ChunkSize = gptParameters.ChunkSize,
             ClosestMatchLimit = gptParameters.ClosestMatchLimit,
             EmbedDirectoryNames = gptParameters.EmbedDirectoryNames,
-            Prompt = gptParameters.Prompt
+            Prompt = gptParameters.Prompt,
+            BotToken = gptParameters.BotToken
         };
 
         return parameters;
@@ -105,10 +106,9 @@ public class DiscordBot : IHostedService
         await _client.StopAsync();
     }
 
-    private Task LogAsync(LogMessage log)
+    private async Task LogAsync(LogMessage log)
     {
-        Console.WriteLine(log.ToString());
-        return Task.CompletedTask;
+        await Console.Out.WriteLineAsync(log.ToString());
     }
 
     private async Task MessageReceivedAsync(SocketMessage message)
@@ -141,16 +141,21 @@ public class DiscordBot : IHostedService
             // Send the response to the channel
             await foreach (var response in responses)
             {
-                sb.Append(response.Choices[0].Message.Content);
+                var content = response.Choices.FirstOrDefault()?.Message.Content;
+                if (content is not null)
+                {
+                    sb.Append(content);
+                }
             }
 
-            var responseMessage = new ChatMessage(StaticValues.ChatMessageRoles.Assistant, sb.ToString());
+            if (sb.Length > 0)
+            {
+                var responseMessage = new ChatMessage(StaticValues.ChatMessageRoles.Assistant, sb.ToString());
 
-            channel.chatBot.AddMessage(responseMessage);
-            await message.Channel.SendMessageAsync(responseMessage.Content);
+                channel.chatBot.AddMessage(responseMessage);
+                await message.Channel.SendMessageAsync(responseMessage.Content);
+            }
         }
-
-        await Task.CompletedTask;
     }
 
     private Task HandleInteractionAsync(SocketInteraction arg)
@@ -203,7 +208,17 @@ public class DiscordBot : IHostedService
                     }
 
                     if (clearOptionValue != null)
-                        await command.RespondAsync($"{char.ToUpper(clearOptionValue[0])}{clearOptionValue.Substring(1)} cleared.");
+                    {
+                        try
+                        {
+                            await command.RespondAsync(
+                                $"{char.ToUpper(clearOptionValue[0])}{clearOptionValue.Substring(1)} cleared.");
+                        }
+                        catch (Exception ex)
+                        {
+                            await Console.Out.WriteLineAsync(ex.Message);
+                        }
+                    }
 
                     break;
                 case "instruction":
@@ -211,24 +226,62 @@ public class DiscordBot : IHostedService
                     if (!string.IsNullOrWhiteSpace(instruction))
                     {
                         chatBot.chatBot.AddInstruction(new(StaticValues.ChatMessageRoles.System, instruction));
-                        await command.RespondAsync($"Instruction added: {instruction}");
+
+                        try
+                        {
+                            await command.RespondAsync($"Instruction added: {instruction}");
+                        }
+                        catch (Exception ex)
+                        {
+                            await Console.Out.WriteLineAsync(ex.Message);
+                        }
                     }
+                    break;
+                case "instructions":
+                    
+                    await command.RespondAsync($"Instructions: {chatBot.chatBot.Instructions}");
                     break;
                 case "enabled":
                     if (option.Value is bool enabled)
                     {
                         chatBot.options.Enabled = enabled;
-                        await command.RespondAsync($"Chat bot {(enabled ? "enabled" : "disabled")}.");
+                        try
+                        {
+                            await command.RespondAsync($"Chat bot {(enabled ? "enabled" : "disabled")}.");
+                        }
+                        catch (Exception ex)
+                        {
+                            await Console.Out.WriteLineAsync(ex.Message);
+                        }
                     }
                     break;
                 case "mute":
                     if (option.Value is bool muted)
                     {
                         chatBot.options.Muted = muted;
-                        await command.RespondAsync($"Chat bot {(muted ? "muted" : "unmuted")}.");
+
+                        try
+                        {
+                            await command.RespondAsync($"Chat bot {(muted ? "muted" : "unmuted")}.");
+                        }
+                        catch (Exception ex)
+                        {
+                            await Console.Out.WriteLineAsync(ex.Message);
+                        }
                     }
                     break;
                 case "embed":
+                    if (option.Value is string embed)
+                    {
+                        try
+                        {
+                            await command.RespondAsync($"Embed set to {embed}.");
+                        }
+                        catch (Exception ex)
+                        {
+                            await Console.Out.WriteLineAsync(ex.Message);
+                        }
+                    }
                     break;
             }
         }
