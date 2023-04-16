@@ -53,6 +53,7 @@ class Program
         var httpCommand = new Command("http", "Starts an HTTP server to listen for requests.");
         var discordCommand = new Command("discord", "Starts the CLI as a Discord bot that receives messages from all channels on your server.");
         var botTokenOption = new Option<string>("--bot-token", "The token for your Discord bot.");
+        var maxChatHistoryLengthOption = new Option<uint>("--max-chat-history-length", () => 10, "The maximum number of messages to keep in chat history (chat & discord modes).");
 
         var chunkSizeOption = new Option<int>("--chunk-size", () => 1024,
             "The size to chunk down text into embeddable documents.");
@@ -109,6 +110,8 @@ class Program
         //rootCommand.AddCommand(httpCommand);
         rootCommand.AddCommand(discordCommand);
         rootCommand.AddOption(botTokenOption);
+        chatCommand.AddOption(maxChatHistoryLengthOption);
+        discordCommand.AddOption(maxChatHistoryLengthOption);
         
 
         var binder = new GPTParametersBinder(
@@ -116,7 +119,7 @@ class Program
             modelOption, maxTokensOption, temperatureOption, topPOption,
             nOption, streamOption, stopOption,
             presencePenaltyOption, frequencyPenaltyOption, logitBiasOption, 
-            userOption, embedFileOption, embedDirectoryOption, chunkSizeOption, matchLimitOption, botTokenOption);
+            userOption, embedFileOption, embedDirectoryOption, chunkSizeOption, matchLimitOption, botTokenOption, maxChatHistoryLengthOption);
 
         ParameterMapping.Mode mode = ParameterMapping.Mode.Completion;
 

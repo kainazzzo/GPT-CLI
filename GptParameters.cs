@@ -23,4 +23,5 @@ public class GPTParameters
     public int ClosestMatchLimit { get; set; }
     public string[] EmbedDirectoryNames { get; set; }
     public string BotToken { get; set; }
+    public uint MaxChatHistoryLength { get; set; }
 }

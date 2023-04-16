@@ -26,6 +26,7 @@ public class GPTParametersBinder : BinderBase<GPTParameters>
     private readonly Option<int> _chunkSizeOption;
     private readonly Option<int> _matchLimitOption;
     private readonly Option<string> _botTokenOption;
+    private readonly Option<uint> _maxChatHistoryLengthOption;
 
     public GPTParametersBinder(Option<string> apiKeyOption,
         Option<string> baseUrlOption,
@@ -46,7 +47,8 @@ public class GPTParametersBinder : BinderBase<GPTParameters>
         Option<string[]> embedDirectoryOption,
         Option<int> chunkSizeOption,
         Option<int> matchLimitOption,
-        Option<string> botTokenOption)
+        Option<string> botTokenOption,
+        Option<uint> maxChatHistoryLengthOption)
     {
         _apiKeyOption = apiKeyOption;
         _baseUrlOption = baseUrlOption;
@@ -68,6 +70,7 @@ public class GPTParametersBinder : BinderBase<GPTParameters>
         _chunkSizeOption = chunkSizeOption;
         _matchLimitOption = matchLimitOption;
         _botTokenOption = botTokenOption;
+        _maxChatHistoryLengthOption = maxChatHistoryLengthOption;
     }
 
     protected override GPTParameters GetBoundValue(BindingContext bindingContext)
@@ -93,7 +96,8 @@ public class GPTParametersBinder : BinderBase<GPTParameters>
             EmbedDirectoryNames = bindingContext.ParseResult.GetValueForOption(_embedDirectoryOption),
             ChunkSize = bindingContext.ParseResult.GetValueForOption(_chunkSizeOption),
             ClosestMatchLimit = bindingContext.ParseResult.GetValueForOption(_matchLimitOption),
-            BotToken = bindingContext.ParseResult.GetValueForOption(_botTokenOption)
+            BotToken = bindingContext.ParseResult.GetValueForOption(_botTokenOption),
+            MaxChatHistoryLength = bindingContext.ParseResult.GetValueForOption(_maxChatHistoryLengthOption)
         };
  
 

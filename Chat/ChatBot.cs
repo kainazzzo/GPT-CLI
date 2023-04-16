@@ -10,6 +10,7 @@ public class ChatBot
     private readonly GPTParameters _gptParameters;
     private readonly LinkedList<ChatMessage> _messages = new();
     private readonly List<ChatMessage> _instructions = new();
+    private uint _messageLength;
 
 
     public ChatBot(OpenAILogic openAILogic, GPTParameters gptParameters)
@@ -23,7 +24,15 @@ public class ChatBot
 
     public void AddMessage(ChatMessage message)
     {
+        if (_messageLength >= _gptParameters.MaxChatHistoryLength)
+        {
+            var removed = _messages.First();
+            var removedLength = removed.Content.Length;
+            _messageLength -= (uint)removedLength;
+            _messages.RemoveFirst();
+        }
         _messages.AddLast(message);
+        _messageLength += (uint)message.Content.Length;
     }
 
     public void AddInstruction(ChatMessage message)
