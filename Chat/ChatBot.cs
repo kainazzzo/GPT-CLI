@@ -18,6 +18,8 @@ public class ChatBot
         _gptParameters = gptParameters;
     }
 
+    public string Instructions => _instructions.Count > 0 ? string.Join("\n", _instructions.Select(x => x.Content)) : string.Empty;
+
 
     public void AddMessage(ChatMessage message)
     {
@@ -41,5 +43,15 @@ public class ChatBot
         {
             yield return response;
         }
+    }
+
+    public void ClearInstructions()
+    {
+        _instructions.Clear();
+    }
+
+    public void ClearMessages()
+    {
+        _messages.Clear();
     }
 }

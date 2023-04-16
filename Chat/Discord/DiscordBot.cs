@@ -13,7 +13,7 @@ public class DiscordBot : IHostedService
 {
     public record ChannelOptions
     {
-        public bool Enabled { get; set; } = true;
+        public bool Enabled { get; set; }
         public bool Muted { get; set; }
     }
 
@@ -71,9 +71,11 @@ public class DiscordBot : IHostedService
         await _client.LoginAsync(TokenType.Bot, token);
         await _client.StartAsync();
 
-        
 
         _client.Log += LogAsync;
+
+        _client.InteractionCreated += HandleInteractionAsync;
+
         _client.PresenceUpdated += ((user, presence, updated) => Task.CompletedTask);
         _client.MessageReceived += MessageReceivedAsync;
         _client.MessageUpdated += async (oldMessage, newMessage, channel) =>
@@ -98,62 +100,6 @@ public class DiscordBot : IHostedService
         //_client.InteractionCreated += HandleInteractionAsync;
     }
 
-
-    private Task HandleInteractionAsync(SocketInteraction arg)
-    {
-        // Get Messages from arg
-        var messages = arg.Channel.GetMessagesAsync(100).FlattenAsync().Result;
-        // get username
-        var username = arg.User.Username;
-        // get channel
-        var channel = arg.Channel;
-        if (!_channelBots.TryGetValue(channel.Name, out var chatBot))
-        {
-            chatBot = new (new (_openAILogic, Clone(_defaultParameters)), new ChannelOptions());
-            _channelBots.Add(channel.Name, chatBot);
-        }
-
-        switch (arg.Type)
-        {
-            case InteractionType.ApplicationCommand:
-                var command = (SocketSlashCommand)arg;
-                switch (command.Data.Name)
-                {
-                    case "enable":
-                        // Enable the bot in this channel.
-                        chatBot.options.Enabled = true;
-                        break;
-                    case "disable":
-                        // Disable the bot in this channel
-                        chatBot.options.Enabled = false;
-                        break;
-                    case "mute":
-                        // Mute the bot in this channel
-                        chatBot.options.Muted = true;
-                        break;
-                    case "unmute":
-                        // Unmute the bot in this channel
-                        chatBot.options.Muted = false;
-                        break;
-                }
-                break;
-            case InteractionType.MessageComponent:
-                var component = (SocketMessageComponent)arg;
-                switch (component.Data.CustomId)
-                {
-                    case "upvote":
-                        // Upvote the message
-                        break;
-                    case "downvote":
-                        // Downvote the message
-                        break;
-                }
-                break;
-        }
-
-        return Task.CompletedTask;
-    }
-
     public async Task StopAsync(CancellationToken cancellationToken)
     {
         await _client.StopAsync();
@@ -175,7 +121,7 @@ public class DiscordBot : IHostedService
         if (!_channelBots.TryGetValue(message.Channel.Name, out var channel))
         {
             channel = (new (_openAILogic, Clone(_defaultParameters)), new ());
-            channel.chatBot.AddInstruction(new (StaticValues.ChatMessageRoles.System, "You're a Discord Chat Bot, and this our conversation. Answer to the best of your ability."));
+            channel.chatBot.AddInstruction(new (StaticValues.ChatMessageRoles.System, "You're a Discord Chat Bot named GPTInfoBot. Every message to the best of your ability."));
             _channelBots.Add(message.Channel.Name, channel);
         }
 
@@ -205,5 +151,80 @@ public class DiscordBot : IHostedService
         }
 
         await Task.CompletedTask;
+    }
+
+    private Task HandleInteractionAsync(SocketInteraction arg)
+    {
+        switch (arg.Type)
+        {
+            case InteractionType.ApplicationCommand:
+                var command = (SocketSlashCommand)arg;
+                switch (command.Data.Name)
+                {
+                    case "gptcli":
+                        HandleGptCliCommand(command);
+                        break;
+                }
+                break;
+        }
+
+        return Task.CompletedTask;
+    }
+
+    private async void HandleGptCliCommand(SocketSlashCommand command)
+    {
+        var channel = command.Channel;
+        if (!_channelBots.TryGetValue(channel.Name, out var chatBot))
+        {
+            chatBot = new(new(_openAILogic, Clone(_defaultParameters)), new ChannelOptions());
+            _channelBots.Add(channel.Name, chatBot);
+        }
+
+
+        var options = command.Data.Options;
+        foreach (var option in options)
+        {
+            switch (option.Name)
+            {
+                case "clear":
+                    chatBot.chatBot.ClearMessages();
+                    await command.RespondAsync("Messages cleared.");
+                    break;
+                case "instruction":
+                    var instruction = option.Value.ToString();
+                    if (instruction == "clear")
+                    {
+                        chatBot.chatBot.ClearInstructions();
+                        await command.RespondAsync("Instructions cleared.");
+                    }
+                    else if (instruction == "get")
+                    {
+                        await command.RespondAsync($"Instructions: \n {chatBot.chatBot.Instructions}");
+                    }
+                    else if (!string.IsNullOrWhiteSpace(instruction))
+                    {
+                        chatBot.chatBot.AddInstruction(new(StaticValues.ChatMessageRoles.System, instruction));
+                        await command.RespondAsync($"Instruction added: {instruction}");
+                    }
+
+                    break;
+                case "enabled":
+                    if (option.Value is bool enabled)
+                    {
+                        chatBot.options.Enabled = enabled;
+                        await command.RespondAsync($"Chat bot {(enabled ? "enabled" : "disabled")}.");
+                    }
+                    break;
+                case "mute":
+                    if (option.Value is bool muted)
+                    {
+                        chatBot.options.Muted = muted;
+                        await command.RespondAsync($"Chat bot {(muted ? "muted" : "unmuted")}.");
+                    }
+                    break;
+                case "embed":
+                    break;
+            }
+        }
     }
 }
