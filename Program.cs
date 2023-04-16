@@ -235,12 +235,12 @@ class Program
                 });
             });
 
-            // Configure Kestrel to listen on port 80
-            webBuilder.UseKestrel(options =>
-            {
-                options.ListenAnyIP(80);
-                options.ListenAnyIP(443, configure => configure.UseHttps());
-            });
+            //// Configure Kestrel to listen on port 80
+            //webBuilder.UseKestrel(options =>
+            //{
+            //    options.ListenAnyIP(80);
+            //    options.ListenAnyIP(443, configure => configure.UseHttps());
+            //});
         });
 
         hostBuilder.ConfigureServices((hostContext, innerServices) =>
