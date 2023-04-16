@@ -22,17 +22,26 @@ public class ChatBot
     public string Instructions => _instructions.Count > 0 ? string.Join("\n", _instructions.Select(x => x.Content)) : string.Empty;
 
 
-    public void AddMessage(ChatMessage message)
+    public async Task AddMessage(ChatMessage message)
     {
-        if (_messageLength >= _gptParameters.MaxChatHistoryLength)
+        await Console.Out.WriteAsync("Message Added. ");
+        while (_messages.Count > 0 && _messageLength > _gptParameters.MaxChatHistoryLength)
         {
+            await Console.Out.WriteAsync($"Removing message. Length: {_messageLength} > Max: {_gptParameters.MaxChatHistoryLength}. ");
             var removed = _messages.First();
             var removedLength = removed.Content.Length;
             _messageLength -= (uint)removedLength;
             _messages.RemoveFirst();
         }
+
+        if (_messages.Count == 0)
+        {
+            _messageLength = 0u;
+        }
+
         _messages.AddLast(message);
         _messageLength += (uint)message.Content.Length;
+        await Console.Out.WriteLineAsync($"Message Length: {_messageLength}");
     }
 
     public void AddInstruction(ChatMessage message)

@@ -53,7 +53,7 @@ class Program
         var httpCommand = new Command("http", "Starts an HTTP server to listen for requests.");
         var discordCommand = new Command("discord", "Starts the CLI as a Discord bot that receives messages from all channels on your server.");
         var botTokenOption = new Option<string>("--bot-token", "The token for your Discord bot.");
-        var maxChatHistoryLengthOption = new Option<uint>("--max-chat-history-length", () => 10, "The maximum number of messages to keep in chat history (chat & discord modes).");
+        var maxChatHistoryLengthOption = new Option<uint>("--max-chat-history-length", () => 1024, "The maximum message length to keep in chat history (chat & discord modes).");
 
         var chunkSizeOption = new Option<int>("--chunk-size", () => 1024,
             "The size to chunk down text into embeddable documents.");
@@ -460,8 +460,7 @@ class Program
             var config = new DiscordSocketConfig
             {
                 GatewayIntents = GatewayIntents.Guilds | GatewayIntents.GuildMessages | GatewayIntents.GuildMembers | GatewayIntents.GuildPresences | 
-                                 GatewayIntents.MessageContent | GatewayIntents.DirectMessages | GatewayIntents.DirectMessageReactions,
-                MessageCacheSize = 100
+                                 GatewayIntents.MessageContent | GatewayIntents.DirectMessages | GatewayIntents.DirectMessageReactions
             };
 
             return new DiscordSocketClient(config);

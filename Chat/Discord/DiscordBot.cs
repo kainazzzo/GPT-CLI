@@ -58,7 +58,8 @@ public class DiscordBot : IHostedService
             ClosestMatchLimit = gptParameters.ClosestMatchLimit,
             EmbedDirectoryNames = gptParameters.EmbedDirectoryNames,
             Prompt = gptParameters.Prompt,
-            BotToken = gptParameters.BotToken
+            BotToken = gptParameters.BotToken,
+            MaxChatHistoryLength = gptParameters.MaxChatHistoryLength
         };
 
         return parameters;
@@ -128,8 +129,11 @@ public class DiscordBot : IHostedService
         if (!channel.options.Enabled)
             return;
 
+        if (message.Content.StartsWith("!ignore"))
+            return;
+
         // Add this message as a chat log
-        channel.chatBot.AddMessage(new ChatMessage(StaticValues.ChatMessageRoles.User, message.Content));
+        await channel.chatBot.AddMessage(new ChatMessage(StaticValues.ChatMessageRoles.User, message.Content));
 
         if (!channel.options.Muted)
         {
@@ -160,7 +164,7 @@ public class DiscordBot : IHostedService
             {
                 var responseMessage = new ChatMessage(StaticValues.ChatMessageRoles.Assistant, sb.ToString());
 
-                channel.chatBot.AddMessage(responseMessage);
+                await channel.chatBot.AddMessage(responseMessage);
                 await message.Channel.SendMessageAsync(responseMessage.Content);
             }
         }
@@ -270,7 +274,7 @@ public class DiscordBot : IHostedService
 
                         try
                         {
-                            await command.RespondAsync($"Chat bot {(muted ? "muted" : "unmuted")}.");
+                            await command.RespondAsync($"Chat bot {(muted ? "muted" : "un-muted")}.");
                         }
                         catch (Exception ex)
                         {
