@@ -172,7 +172,7 @@ public class DiscordBot : IHostedService
         foreach (var (channelId, channel) in _channelBots)
         {
             await using var stream = File.OpenWrite($"./channels/{channelId}.json");
-            WriteAsync(channelId, stream);
+            await WriteAsync(channelId, stream);
         }
     }
 
@@ -183,23 +183,18 @@ public class DiscordBot : IHostedService
             Directory.CreateDirectory("channels");
         }
         await using var stream = File.OpenWrite($"./channels/{channelId}.json");
-        WriteAsync(channelId, stream);
+        await WriteAsync(channelId, stream);
     }
 
     // Method to write state to a Stream in JSON format
-    private void WriteAsync(ulong channelId, Stream stream)
+    private async Task WriteAsync(ulong channelId, Stream stream)
     {
         if (_channelBots.TryGetValue(channelId, out var channelState))
         {
             // prepare serializer options
-            var options = new JsonSerializerOptions
-            {
-                WriteIndented = true
-            };
-
-            var str = JsonSerializer.Serialize(channelState, options);
+            var str = JsonSerializer.Serialize(channelState);
             // write string to stream
-            stream.Write(Encoding.UTF8.GetBytes(str));
+            await stream.WriteAsync(Encoding.UTF8.GetBytes(str));
         }
     }
 
@@ -208,13 +203,7 @@ public class DiscordBot : IHostedService
     {
         try
         {
-            var options = new JsonSerializerOptions
-            {
-                WriteIndented = true,
-                DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-                IncludeFields = false
-            };
-            var channelState = await JsonSerializer.DeserializeAsync<ChannelState>(stream, options);
+            var channelState = await JsonSerializer.DeserializeAsync<ChannelState>(stream);
             channelState.ChatBot = new ChatBot(_openAILogic, channelState.State.Parameters);
             _channelBots[channelId] = channelState;
         }
