@@ -250,7 +250,10 @@ public class DiscordBot : IHostedService
             // Get the response from the bot
             var responses = channel.ChatBot.GetResponseAsync();
             // Add the response as a chat log
-            
+
+
+            using var typingState = message.Channel.EnterTypingState();
+
             var sb = new StringBuilder();
             // Send the response to the channel
             await foreach (var response in responses)
@@ -265,9 +268,20 @@ public class DiscordBot : IHostedService
                 }
                 else
                 {
-                    await Console.Out.WriteLineAsync($"Error code {response.Error?.Code}: {response.Error?.Message}");
+                    await Console.Out.WriteLineAsync(
+                        $"Error code {response.Error?.Code}: {response.Error?.Message}");
                 }
 
+                // Discord has a 2000 character message limit. Leaving 50 for padding
+                if (sb.Length > 1950)
+                {
+                    var responseMessage = new ChatMessage(StaticValues.ChatMessageRoles.Assistant, sb.ToString());
+
+                    await channel.ChatBot.AddMessage(responseMessage);
+                    await message.Channel.SendMessageAsync(responseMessage.Content);
+
+                    sb.Clear();
+                }
             }
 
             if (sb.Length > 0)
