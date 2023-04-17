@@ -178,76 +178,13 @@ class Program
 
     private static async Task HandleDiscordMode(OpenAILogic openAILogic, GPTParameters gptParameters, IServiceCollection services)
     {
-        var hostBuilder = new HostBuilder().ConfigureWebHostDefaults(webBuilder =>
+        var hostBuilder = new HostBuilder().ConfigureServices(innerServices =>
         {
-            webBuilder.ConfigureServices(servicesCollection =>
+            foreach (var service in services)
             {
-                foreach (var service in services)
-                {
-                    servicesCollection.Add(service);
-                }
-            });
+                innerServices.Add(service);
+            }
 
-            webBuilder.Configure(app =>
-            {
-                app.UseHttpsRedirection(); // Add HTTPS redirection
-                app.UseRouting();
-                
-                //app.UseAuthentication();
-                //app.UseAuthorization();
-
-                app.UseEndpoints(endpoints =>
-                {
-                    endpoints.MapPost("/", async (context) =>
-                    {
-                        // Read the request body
-                        var request  = context.Request;
-                        var response = context.Response;
-                        using var reader = new StreamReader(request.Body, Encoding.UTF8);
-                        string requestBody = await reader.ReadToEndAsync();
-
-                        // Get the signature and timestamp from headers
-                        string signature = request.Headers["X-Signature-Ed25519"];
-                        string timestamp = request.Headers["X-Signature-Timestamp"];
-
-                        // Verify the signature
-                        if (!VerifySignature("f35df98f5bfd306aed9f224c9dc8ee06840203ca6cd6c5f9369ae26f21d61032", signature, timestamp, requestBody))
-                        {
-                            response.StatusCode = StatusCodes.Status401Unauthorized;
-                            return;
-                        }
-
-                        // Parse the request body
-                        var json = JsonDocument.Parse(requestBody);
-                        var interactionType = json.RootElement.GetProperty("type").GetInt32();
-
-                        // Handle PING (type 1) interaction
-                        if (interactionType == 1)
-                        {
-                            response.ContentType = "application/json";
-                            await response.WriteAsync("{\"type\": 1}");
-                            return;
-                        }
-
-                        // Handle other interaction types as needed
-                        // ...
-
-                        response.StatusCode = StatusCodes.Status400BadRequest;
-
-                    } );
-                });
-            });
-
-            //// Configure Kestrel to listen on port 80
-            //webBuilder.UseKestrel(options =>
-            //{
-            //    options.ListenAnyIP(80);
-            //    options.ListenAnyIP(443, configure => configure.UseHttps());
-            //});
-        });
-
-        hostBuilder.ConfigureServices((hostContext, innerServices) =>
-        {
             innerServices.AddHostedService<DiscordBot>();
         });
 
