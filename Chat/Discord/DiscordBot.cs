@@ -82,15 +82,22 @@ public class DiscordBot : IHostedService
     // Method to read state from a Stream in JSON format
     private async Task ReadAsync(ulong channelId, Stream stream)
     {
-        var options = new JsonSerializerOptions
+        try
         {
-            WriteIndented = true,
-            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-            IncludeFields = false
-        };
-        var channelState = await JsonSerializer.DeserializeAsync<ChannelState>(stream, options);
-        channelState.ChatBot = new ChatBot(_openAILogic, channelState.State.Parameters);
-        _channelBots[channelId] = channelState;
+            var options = new JsonSerializerOptions
+            {
+                WriteIndented = true,
+                DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+                IncludeFields = false
+            };
+            var channelState = await JsonSerializer.DeserializeAsync<ChannelState>(stream, options);
+            channelState.ChatBot = new ChatBot(_openAILogic, channelState.State.Parameters);
+            _channelBots[channelId] = channelState;
+        }
+        catch (Exception ex)
+        {
+            await Console.Out.WriteLineAsync(ex.ToString());
+        }
     }
 
     public DiscordBot(DiscordSocketClient client, IConfiguration configuration, OpenAILogic openAILogic, GPTParameters defaultParameters)
@@ -271,26 +278,23 @@ public class DiscordBot : IHostedService
                     await Console.Out.WriteLineAsync(
                         $"Error code {response.Error?.Code}: {response.Error?.Message}");
                 }
-
-                // Discord has a 2000 character message limit. Leaving 50 for padding
-                if (sb.Length > 1950)
-                {
-                    var responseMessage = new ChatMessage(StaticValues.ChatMessageRoles.Assistant, sb.ToString());
-
-                    await channel.ChatBot.AddMessage(responseMessage);
-                    await message.Channel.SendMessageAsync(responseMessage.Content);
-
-                    sb.Clear();
-                }
             }
 
-            if (sb.Length > 0)
+            int chunkSize = 2000;
+            int currentPosition = 0;
+
+            while (currentPosition < sb.Length)
             {
-                var responseMessage = new ChatMessage(StaticValues.ChatMessageRoles.Assistant, sb.ToString());
+                var size = Math.Min(chunkSize, sb.Length - currentPosition);
+                var chunk = sb.ToString(currentPosition, size);
+                currentPosition += size;
+
+                var responseMessage = new ChatMessage(StaticValues.ChatMessageRoles.Assistant, chunk);
 
                 await channel.ChatBot.AddMessage(responseMessage);
                 await message.Channel.SendMessageAsync(responseMessage.Content);
             }
+        
         }
 
         await SaveChannelState(message.Channel.Id);

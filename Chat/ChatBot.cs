@@ -47,9 +47,12 @@ public class ChatBot
         await Console.Out.WriteAsync("Message Added. ");
         while (State.Messages.Count > 0 && State.MessageLength > State.Parameters.MaxChatHistoryLength)
         {
-            await Console.Out.WriteAsync($"Removing message. Length: {State.MessageLength} > Max: {State.Parameters.MaxChatHistoryLength}. ");
+            
             var removed = State.Messages.First();
             var removedLength = removed.Content.Length;
+
+            await Console.Out.WriteAsync($"Length: {State.MessageLength} > Max: {State.Parameters.MaxChatHistoryLength}. Removing top message for: -{removedLength} ");
+
             State.MessageLength -= (uint)removedLength;
             State.Messages.RemoveFirst();
         }
