@@ -113,13 +113,11 @@ public class DiscordBot : IHostedService
         _client.InteractionCreated += HandleInteractionAsync;
 
         _client.PresenceUpdated += ((user, presence, updated) => Task.CompletedTask);
-        _client.MessageReceived += async message =>
-        {
-            Task.Run(async () =>
+        _client.MessageReceived += message => Task.Run(async () =>
             {
                 await MessageReceivedAsync(message);
             }, cancellationToken);
-        };
+        
 
         _client.MessageUpdated += async (oldMessage, newMessage, channel) =>
         {
@@ -189,11 +187,8 @@ public class DiscordBot : IHostedService
             // prepare serializer options
             // Serialize channelState to stream using Newtonsoft
             var serializer = new JsonSerializer();
-            var str = JsonConvert.SerializeObject(channelState);
-
-            // write string to stream
             using var writer = new StreamWriter(stream);
-            writer.Write(str);
+            serializer.Serialize(writer, channelState);
         }
     }
 

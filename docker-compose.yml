@@ -4,7 +4,4 @@ services:
   gpt:
     build: .
     volumes:
-      - channels:/app/channels
-
-volumes:
-  channels:
+      - /usr/local/discord/channels:/app/channels
