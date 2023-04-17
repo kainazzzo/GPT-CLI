@@ -1,4 +1,6 @@
-﻿namespace GPT.CLI;
+﻿using Newtonsoft.Json;
+
+namespace GPT.CLI;
 
 public class GPTParameters
 {
@@ -17,7 +19,9 @@ public class GPTParameters
     public double? FrequencyPenalty { get; set; }
     public string LogitBias { get; set; }
     public string User { get; set; }
+    [JsonIgnore]
     public Stream Input { get; set; }
+
     public string[] EmbedFilenames { get; set; }
     public int ChunkSize { get; set; }
     public int ClosestMatchLimit { get; set; }
