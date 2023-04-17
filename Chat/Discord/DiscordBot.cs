@@ -1,6 +1,7 @@
 ﻿using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using Discord;
-using Discord.Rest;
 using Discord.WebSocket;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
@@ -11,9 +12,44 @@ namespace GPT.CLI.Chat.Discord;
 
 public class DiscordBot : IHostedService
 {
+    public record ChannelState
+    {
+        private ChatBot.ChatState _state;
+
+        [JsonIgnore]
+        public ChatBot ChatBot { get; set; }
+
+        [JsonPropertyName("state")]
+        public ChatBot.ChatState State
+        {
+            get
+            {
+                if (ChatBot != null)
+                {
+                    return ChatBot.State;
+                }
+
+                return _state;
+            }
+            set
+            {
+                if (ChatBot != null)
+                {
+                    ChatBot.State = value;
+                }
+                _state = value;
+            }
+        }
+
+        [JsonPropertyName("options")]
+        public ChannelOptions Options { get; set; }
+    }
+
     public record ChannelOptions
     {
+        [JsonPropertyName("enabled")]
         public bool Enabled { get; set; }
+        [JsonPropertyName("muted")]
         public bool Muted { get; set; }
     }
 
@@ -22,7 +58,40 @@ public class DiscordBot : IHostedService
     private readonly IConfiguration _configuration;
     private readonly OpenAILogic _openAILogic;
     private readonly GPTParameters _defaultParameters;
-    private readonly Dictionary<ulong, (ChatBot chatBot, ChannelOptions options)> _channelBots = new();
+    private readonly Dictionary<ulong, ChannelState> _channelBots = new();
+
+    // Method to write state to a Stream in JSON format
+    private async Task WriteAsync(ulong channelId, Stream stream)
+    {
+        if (_channelBots.TryGetValue(channelId, out var channelState))
+        {
+            // prepare serializer options with JsonSerializerOptions.IncludeFields = false
+            var options = new JsonSerializerOptions
+            {
+                WriteIndented = true,
+                DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+                IncludeFields = false
+            };
+
+            var str = JsonSerializer.Serialize(channelState, options);
+            // write string to stream
+            await stream.WriteAsync(Encoding.UTF8.GetBytes(str));
+        }
+    }
+
+    // Method to read state from a Stream in JSON format
+    private async Task ReadAsync(ulong channelId, Stream stream)
+    {
+        var options = new JsonSerializerOptions
+        {
+            WriteIndented = true,
+            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+            IncludeFields = false
+        };
+        var channelState = await JsonSerializer.DeserializeAsync<ChannelState>(stream, options);
+        channelState.ChatBot = new ChatBot(_openAILogic, channelState.State.Parameters);
+        _channelBots[channelId] = channelState;
+    }
 
     public DiscordBot(DiscordSocketClient client, IConfiguration configuration, OpenAILogic openAILogic, GPTParameters defaultParameters)
     {
@@ -69,6 +138,9 @@ public class DiscordBot : IHostedService
     {
         // Use _configuration to access your configuration settings
         string token = _configuration["Discord:BotToken"];
+        
+        // Load state from discordState.json
+        await LoadState();
 
         await _client.LoginAsync(TokenType.Bot, token);
         await _client.StartAsync();
@@ -82,7 +154,7 @@ public class DiscordBot : IHostedService
         _client.MessageReceived += MessageReceivedAsync;
         _client.MessageUpdated += async (oldMessage, newMessage, channel) =>
         {
-            if (oldMessage.Value.Content != newMessage.Content)
+            if (newMessage.Content != null && oldMessage.Value?.Content != newMessage.Content)
             {
                 await MessageReceivedAsync(newMessage);
             }
@@ -102,8 +174,48 @@ public class DiscordBot : IHostedService
         //_client.InteractionCreated += HandleInteractionAsync;
     }
 
+    private async Task LoadState()
+    {
+        if (Directory.Exists("channels"))
+        {
+            var files = Directory.GetFiles("channels");
+            foreach (var file in files)
+            {
+                ulong channelId = Convert.ToUInt64(Path.GetFileNameWithoutExtension(file));
+                await using var stream = File.OpenRead(file);
+                await ReadAsync(channelId, stream);
+            }
+        }
+    }
+
+    private async Task SaveState()
+    {
+        if (!Directory.Exists("channels"))
+        {
+            Directory.CreateDirectory("channels");
+        }
+
+        foreach (var (channelId, channel) in _channelBots)
+        {
+            await using var stream = File.OpenWrite($"./channels/{channelId}.json");
+            await WriteAsync(channelId, stream);
+        }
+    }
+
+    private async Task SaveChannelState(ulong channelId)
+    {
+        if (!Directory.Exists("channels"))
+        {
+            Directory.CreateDirectory("channels");
+        }
+        await using var stream = File.OpenWrite($"./channels/{channelId}.json");
+        await WriteAsync(channelId, stream);
+    }
+
     public async Task StopAsync(CancellationToken cancellationToken)
     {
+        // Save state to discordState.json
+        await SaveState();
         await _client.StopAsync();
     }
 
@@ -121,24 +233,22 @@ public class DiscordBot : IHostedService
         // ...
         if (!_channelBots.TryGetValue(message.Channel.Id, out var channel))
         {
-            channel = (new (_openAILogic, Clone(_defaultParameters)), new ());
-            channel.chatBot.AddInstruction(new (StaticValues.ChatMessageRoles.System, "You're a Discord Chat Bot named GPTInfoBot. Every message to the best of your ability."));
-            _channelBots.Add(message.Channel.Id, channel);
+            channel = InitializeChannel(message.Channel.Id);
         }
 
-        if (!channel.options.Enabled)
+        if (!channel.Options.Enabled)
             return;
 
         if (message.Content.StartsWith("!ignore"))
             return;
 
         // Add this message as a chat log
-        await channel.chatBot.AddMessage(new ChatMessage(StaticValues.ChatMessageRoles.User, message.Content));
+        await channel.ChatBot.AddMessage(new ChatMessage(StaticValues.ChatMessageRoles.User, message.Content));
 
-        if (!channel.options.Muted)
+        if (!channel.Options.Muted)
         {
             // Get the response from the bot
-            var responses = channel.chatBot.GetResponseAsync();
+            var responses = channel.ChatBot.GetResponseAsync();
             // Add the response as a chat log
             
             var sb = new StringBuilder();
@@ -164,10 +274,27 @@ public class DiscordBot : IHostedService
             {
                 var responseMessage = new ChatMessage(StaticValues.ChatMessageRoles.Assistant, sb.ToString());
 
-                await channel.chatBot.AddMessage(responseMessage);
+                await channel.ChatBot.AddMessage(responseMessage);
                 await message.Channel.SendMessageAsync(responseMessage.Content);
             }
         }
+
+        await SaveChannelState(message.Channel.Id);
+    }
+
+    private ChannelState InitializeChannel(ulong channelId)
+    {
+        ChannelState channel = new()
+        {
+            ChatBot = new(_openAILogic, Clone(_defaultParameters)),
+            Options = new()
+        };
+
+        channel.ChatBot.State.PrimeDirective = new(StaticValues.ChatMessageRoles.System,
+            "I'm a Discord Chat Bot named GPTInfoBot. Every message to the best of your ability.");
+        _channelBots[channelId] = channel;
+
+        return channel;
     }
 
     private Task HandleInteractionAsync(SocketInteraction arg)
@@ -193,8 +320,7 @@ public class DiscordBot : IHostedService
         var channel = command.Channel;
         if (!_channelBots.TryGetValue(channel.Id, out var chatBot))
         {
-            chatBot = new(new(_openAILogic, Clone(_defaultParameters)), new ChannelOptions());
-            _channelBots.Add(channel.Id, chatBot);
+            chatBot = InitializeChannel(channel.Id);
         }
 
 
@@ -207,16 +333,16 @@ public class DiscordBot : IHostedService
                     var clearOptionValue = option.Value.ToString();
                     if (clearOptionValue == "messages")
                     {
-                        chatBot.chatBot.ClearMessages();
+                        chatBot.ChatBot.ClearMessages();
                     }
                     else if (clearOptionValue == "instructions")
                     {
-                        chatBot.chatBot.ClearInstructions();
+                        chatBot.ChatBot.ClearInstructions();
                     }
                     else if (clearOptionValue == "all")
                     {
-                        chatBot.chatBot.ClearMessages();
-                        chatBot.chatBot.ClearInstructions();
+                        chatBot.ChatBot.ClearMessages();
+                        chatBot.ChatBot.ClearInstructions();
                     }
 
                     if (clearOptionValue != null)
@@ -237,7 +363,7 @@ public class DiscordBot : IHostedService
                     var instruction = option.Value.ToString();
                     if (!string.IsNullOrWhiteSpace(instruction))
                     {
-                        chatBot.chatBot.AddInstruction(new(StaticValues.ChatMessageRoles.System, instruction));
+                        chatBot.ChatBot.AddInstruction(new(StaticValues.ChatMessageRoles.System, instruction));
 
                         try
                         {
@@ -250,13 +376,19 @@ public class DiscordBot : IHostedService
                     }
                     break;
                 case "instructions":
-                    
-                    await command.RespondAsync($"Instructions: {chatBot.chatBot.Instructions}");
+                    try
+                    {
+                        await command.RespondAsync($"InstructionStr: {chatBot.ChatBot.InstructionStr}");
+                    }
+                    catch (Exception ex)
+                    {
+                        await Console.Out.WriteLineAsync(ex.Message);
+                    }
                     break;
                 case "enabled":
                     if (option.Value is bool enabled)
                     {
-                        chatBot.options.Enabled = enabled;
+                        chatBot.Options.Enabled = enabled;
                         try
                         {
                             await command.RespondAsync($"Chat bot {(enabled ? "enabled" : "disabled")}.");
@@ -270,7 +402,7 @@ public class DiscordBot : IHostedService
                 case "mute":
                     if (option.Value is bool muted)
                     {
-                        chatBot.options.Muted = muted;
+                        chatBot.Options.Muted = muted;
 
                         try
                         {
@@ -297,5 +429,7 @@ public class DiscordBot : IHostedService
                     break;
             }
         }
+
+        await SaveChannelState(channel.Id);
     }
 }

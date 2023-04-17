@@ -1,4 +1,4 @@
-﻿using Discord.WebSocket;
+﻿using System.Text.Json.Serialization;
 using OpenAI.GPT3.ObjectModels.RequestModels;
 using OpenAI.GPT3.ObjectModels.ResponseModels;
 
@@ -6,10 +6,19 @@ namespace GPT.CLI.Chat;
 
 public class ChatBot
 {
+    [JsonIgnore]
     private readonly OpenAILogic _openAILogic;
+
+    [JsonPropertyName("parameters")]
     private readonly GPTParameters _gptParameters;
+
+    [JsonPropertyName("messages")]
     private readonly LinkedList<ChatMessage> _messages = new();
+
+    [JsonPropertyName("instructions")]
     private readonly List<ChatMessage> _instructions = new();
+
+    [JsonPropertyName("messageLength")]
     private uint _messageLength;
 
 
@@ -19,6 +28,7 @@ public class ChatBot
         _gptParameters = gptParameters;
     }
 
+    [JsonIgnore]
     public string Instructions => _instructions.Count > 0 ? string.Join("\n", _instructions.Select(x => x.Content)) : string.Empty;
 
 
