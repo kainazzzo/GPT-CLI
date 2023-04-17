@@ -1,4 +1,5 @@
 ﻿using System.Text.Json.Serialization;
+using OpenAI.GPT3.ObjectModels;
 using OpenAI.GPT3.ObjectModels.RequestModels;
 using OpenAI.GPT3.ObjectModels.ResponseModels;
 
@@ -6,67 +7,77 @@ namespace GPT.CLI.Chat;
 
 public class ChatBot
 {
-    [JsonIgnore]
+    public record ChatState
+    {
+        [JsonPropertyName("parameters")]
+        public GPTParameters Parameters { get; set; }
+
+        [JsonPropertyName("messages")]
+        public LinkedList<ChatMessage> Messages { get; } = new();
+
+        [JsonPropertyName("instructions")] 
+        public readonly List<ChatMessage> Instructions = new();
+
+        [JsonPropertyName("messageLength")]
+        public uint MessageLength { get; set; }
+
+        [JsonPropertyName("primeDirective")]
+        public ChatMessage PrimeDirective { get; set; } = new(StaticValues.ChatMessageRoles.System,
+            "You are a chat bot running in GPT-CLI. Answer every message to the best of your ability.");
+    }
+
     private readonly OpenAILogic _openAILogic;
 
-    [JsonPropertyName("parameters")]
-    private readonly GPTParameters _gptParameters;
-
-    [JsonPropertyName("messages")]
-    private readonly LinkedList<ChatMessage> _messages = new();
-
-    [JsonPropertyName("instructions")]
-    private readonly List<ChatMessage> _instructions = new();
-
-    [JsonPropertyName("messageLength")]
-    private uint _messageLength;
-
+    [JsonIgnore]
+    public ChatState State { get; set; } = new();
+    
 
     public ChatBot(OpenAILogic openAILogic, GPTParameters gptParameters)
     {
         _openAILogic = openAILogic;
-        _gptParameters = gptParameters;
+        State.Parameters = gptParameters;
     }
 
     [JsonIgnore]
-    public string Instructions => _instructions.Count > 0 ? string.Join("\n", _instructions.Select(x => x.Content)) : string.Empty;
+    public string InstructionStr => State.Instructions.Count > 0 ? string.Join("\n", State.Instructions.Select(x => x.Content)) : string.Empty;
 
 
     public async Task AddMessage(ChatMessage message)
     {
         await Console.Out.WriteAsync("Message Added. ");
-        while (_messages.Count > 0 && _messageLength > _gptParameters.MaxChatHistoryLength)
+        while (State.Messages.Count > 0 && State.MessageLength > State.Parameters.MaxChatHistoryLength)
         {
-            await Console.Out.WriteAsync($"Removing message. Length: {_messageLength} > Max: {_gptParameters.MaxChatHistoryLength}. ");
-            var removed = _messages.First();
+            await Console.Out.WriteAsync($"Removing message. Length: {State.MessageLength} > Max: {State.Parameters.MaxChatHistoryLength}. ");
+            var removed = State.Messages.First();
             var removedLength = removed.Content.Length;
-            _messageLength -= (uint)removedLength;
-            _messages.RemoveFirst();
+            State.MessageLength -= (uint)removedLength;
+            State.Messages.RemoveFirst();
         }
 
-        if (_messages.Count == 0)
+        if (State.Messages.Count == 0)
         {
-            _messageLength = 0u;
+            State.MessageLength = 0u;
         }
 
-        _messages.AddLast(message);
-        _messageLength += (uint)message.Content.Length;
-        await Console.Out.WriteLineAsync($"Message Length: {_messageLength}");
+        State.Messages.AddLast(message);
+        State.MessageLength += (uint)message.Content.Length;
+        await Console.Out.WriteLineAsync($"Message Length: {State.MessageLength}");
     }
 
     public void AddInstruction(ChatMessage message)
     {
-        _instructions.Add(message);
+        State.Instructions.Add(message);
     }
+
 
     public async IAsyncEnumerable<ChatCompletionCreateResponse> GetResponseAsync()
     {
         await foreach (var response in _openAILogic.CreateChatCompletionAsyncEnumerable(
                            await ParameterMapping.MapCommon(
-                               _gptParameters,
+                               State.Parameters,
                                _openAILogic, new ChatCompletionCreateRequest()
                                {
-                                   Messages = _instructions.Concat(_messages).ToList()
+                                   Messages = (new List<ChatMessage> {State.PrimeDirective}).Concat(State.Instructions.Concat(State.Messages)).ToList()
                                }, ParameterMapping.Mode.Discord)))
         {
             yield return response;
@@ -75,11 +86,11 @@ public class ChatBot
 
     public void ClearInstructions()
     {
-        _instructions.Clear();
+        State.Instructions.Clear();
     }
 
     public void ClearMessages()
     {
-        _messages.Clear();
+        State.Messages.Clear();
     }
 }
