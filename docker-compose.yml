@@ -1,0 +1,10 @@
+version: '3.8'
+
+services:
+  gpt:
+    build: .
+    volumes:
+      - channels:/app/channels
+
+volumes:
+  channels:

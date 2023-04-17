@@ -60,46 +60,6 @@ public class DiscordBot : IHostedService
     private readonly GPTParameters _defaultParameters;
     private readonly Dictionary<ulong, ChannelState> _channelBots = new();
 
-    // Method to write state to a Stream in JSON format
-    private async Task WriteAsync(ulong channelId, Stream stream)
-    {
-        if (_channelBots.TryGetValue(channelId, out var channelState))
-        {
-            // prepare serializer options with JsonSerializerOptions.IncludeFields = false
-            var options = new JsonSerializerOptions
-            {
-                WriteIndented = true,
-                DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-                IncludeFields = false
-            };
-
-            var str = JsonSerializer.Serialize(channelState, options);
-            // write string to stream
-            await stream.WriteAsync(Encoding.UTF8.GetBytes(str));
-        }
-    }
-
-    // Method to read state from a Stream in JSON format
-    private async Task ReadAsync(ulong channelId, Stream stream)
-    {
-        try
-        {
-            var options = new JsonSerializerOptions
-            {
-                WriteIndented = true,
-                DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-                IncludeFields = false
-            };
-            var channelState = await JsonSerializer.DeserializeAsync<ChannelState>(stream, options);
-            channelState.ChatBot = new ChatBot(_openAILogic, channelState.State.Parameters);
-            _channelBots[channelId] = channelState;
-        }
-        catch (Exception ex)
-        {
-            await Console.Out.WriteLineAsync(ex.ToString());
-        }
-    }
-
     public DiscordBot(DiscordSocketClient client, IConfiguration configuration, OpenAILogic openAILogic, GPTParameters defaultParameters)
     {
         _client = client;
@@ -212,7 +172,7 @@ public class DiscordBot : IHostedService
         foreach (var (channelId, channel) in _channelBots)
         {
             await using var stream = File.OpenWrite($"./channels/{channelId}.json");
-            await WriteAsync(channelId, stream);
+            WriteAsync(channelId, stream);
         }
     }
 
@@ -223,7 +183,45 @@ public class DiscordBot : IHostedService
             Directory.CreateDirectory("channels");
         }
         await using var stream = File.OpenWrite($"./channels/{channelId}.json");
-        await WriteAsync(channelId, stream);
+        WriteAsync(channelId, stream);
+    }
+
+    // Method to write state to a Stream in JSON format
+    private void WriteAsync(ulong channelId, Stream stream)
+    {
+        if (_channelBots.TryGetValue(channelId, out var channelState))
+        {
+            // prepare serializer options
+            var options = new JsonSerializerOptions
+            {
+                WriteIndented = true
+            };
+
+            var str = JsonSerializer.Serialize(channelState, options);
+            // write string to stream
+            stream.Write(Encoding.UTF8.GetBytes(str));
+        }
+    }
+
+    // Method to read state from a Stream in JSON format
+    private async Task ReadAsync(ulong channelId, Stream stream)
+    {
+        try
+        {
+            var options = new JsonSerializerOptions
+            {
+                WriteIndented = true,
+                DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+                IncludeFields = false
+            };
+            var channelState = await JsonSerializer.DeserializeAsync<ChannelState>(stream, options);
+            channelState.ChatBot = new ChatBot(_openAILogic, channelState.State.Parameters);
+            _channelBots[channelId] = channelState;
+        }
+        catch (Exception ex)
+        {
+            await Console.Out.WriteLineAsync(ex.ToString());
+        }
     }
 
     public async Task StopAsync(CancellationToken cancellationToken)
