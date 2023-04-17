@@ -158,7 +158,14 @@ public class DiscordBot : IHostedService
         _client.InteractionCreated += HandleInteractionAsync;
 
         _client.PresenceUpdated += ((user, presence, updated) => Task.CompletedTask);
-        _client.MessageReceived += MessageReceivedAsync;
+        _client.MessageReceived += async message =>
+        {
+            Task.Run(async () =>
+            {
+                await MessageReceivedAsync(message);
+            }, cancellationToken);
+        };
+
         _client.MessageUpdated += async (oldMessage, newMessage, channel) =>
         {
             if (newMessage.Content != null && oldMessage.Value?.Content != newMessage.Content)
