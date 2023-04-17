@@ -1,10 +1,9 @@
 ﻿using System.Text;
-using System.Text.Json;
-using System.Text.Json.Serialization;
 using Discord;
 using Discord.WebSocket;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
+using Newtonsoft.Json;
 using OpenAI.GPT3.ObjectModels;
 using OpenAI.GPT3.ObjectModels.RequestModels;
 
@@ -19,7 +18,6 @@ public class DiscordBot : IHostedService
         [JsonIgnore]
         public ChatBot ChatBot { get; set; }
 
-        [JsonPropertyName("state")]
         public ChatBot.ChatState State
         {
             get
@@ -41,15 +39,12 @@ public class DiscordBot : IHostedService
             }
         }
 
-        [JsonPropertyName("options")]
         public ChannelOptions Options { get; set; }
     }
 
     public record ChannelOptions
     {
-        [JsonPropertyName("enabled")]
         public bool Enabled { get; set; }
-        [JsonPropertyName("muted")]
         public bool Muted { get; set; }
     }
 
@@ -172,7 +167,7 @@ public class DiscordBot : IHostedService
         foreach (var (channelId, channel) in _channelBots)
         {
             await using var stream = File.OpenWrite($"./channels/{channelId}.json");
-            await WriteAsync(channelId, stream);
+            WriteAsync(channelId, stream);
         }
     }
 
@@ -183,18 +178,22 @@ public class DiscordBot : IHostedService
             Directory.CreateDirectory("channels");
         }
         await using var stream = File.OpenWrite($"./channels/{channelId}.json");
-        await WriteAsync(channelId, stream);
+        WriteAsync(channelId, stream);
     }
 
     // Method to write state to a Stream in JSON format
-    private async Task WriteAsync(ulong channelId, Stream stream)
+    private void WriteAsync(ulong channelId, Stream stream)
     {
         if (_channelBots.TryGetValue(channelId, out var channelState))
         {
             // prepare serializer options
-            var str = JsonSerializer.Serialize(channelState);
+            // Serialize channelState to stream using Newtonsoft
+            var serializer = new JsonSerializer();
+            var str = JsonConvert.SerializeObject(channelState);
+
             // write string to stream
-            await stream.WriteAsync(Encoding.UTF8.GetBytes(str));
+            using var writer = new StreamWriter(stream);
+            writer.Write(str);
         }
     }
 
@@ -203,9 +202,15 @@ public class DiscordBot : IHostedService
     {
         try
         {
-            var channelState = await JsonSerializer.DeserializeAsync<ChannelState>(stream);
-            channelState.ChatBot = new ChatBot(_openAILogic, channelState.State.Parameters);
-            _channelBots[channelId] = channelState;
+            // Deserialize channelState from stream using Newtonsoft
+            
+            var channelState = JsonConvert.DeserializeObject<ChannelState>(await new StreamReader(stream).ReadToEndAsync());
+
+            if (channelState != null)
+            {
+                channelState.ChatBot = new ChatBot(_openAILogic, channelState.State.Parameters);
+                _channelBots[channelId] = channelState;
+            }
         }
         catch (Exception ex)
         {
