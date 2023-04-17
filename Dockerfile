@@ -5,6 +5,7 @@ RUN dotnet publish gpt.csproj -c Release -r linux-x64 -o /app/publish --self-con
 
 FROM redhat/ubi9
 WORKDIR /app
+RUN yum install -y libicu
 COPY --from=build /app/publish .
 COPY --from=build /src/appSettings.json .
 ENV MODEL=""
