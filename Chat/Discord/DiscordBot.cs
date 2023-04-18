@@ -1,9 +1,11 @@
 ﻿using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using Discord;
 using Discord.WebSocket;
+using Mapster;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
-using Newtonsoft.Json;
 using OpenAI.GPT3.ObjectModels;
 using OpenAI.GPT3.ObjectModels.RequestModels;
 
@@ -67,33 +69,7 @@ public class DiscordBot : IHostedService
     private GPTParameters Clone(GPTParameters gptParameters)
     {
         // Clone gptParameters to a new instance and copy all properties one by one
-        GPTParameters parameters = new()
-        {
-            ApiKey = gptParameters.ApiKey,
-            BaseDomain = gptParameters.BaseDomain,
-            Config = gptParameters.Config,
-            Model = gptParameters.Model,
-            MaxTokens = gptParameters.MaxTokens,
-            Temperature = gptParameters.Temperature,
-            TopP = gptParameters.TopP,
-            N = gptParameters.N,
-            Stream = gptParameters.Stream,
-            Stop = gptParameters.Stop,
-            PresencePenalty = gptParameters.PresencePenalty,
-            FrequencyPenalty = gptParameters.FrequencyPenalty,
-            LogitBias = gptParameters.LogitBias,
-            User = gptParameters.User,
-            Input = gptParameters.Input,
-            EmbedFilenames = gptParameters.EmbedFilenames,
-            ChunkSize = gptParameters.ChunkSize,
-            ClosestMatchLimit = gptParameters.ClosestMatchLimit,
-            EmbedDirectoryNames = gptParameters.EmbedDirectoryNames,
-            Prompt = gptParameters.Prompt,
-            BotToken = gptParameters.BotToken,
-            MaxChatHistoryLength = gptParameters.MaxChatHistoryLength
-        };
-
-        return parameters;
+        return gptParameters.Adapt(new GPTParameters());
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
@@ -164,8 +140,8 @@ public class DiscordBot : IHostedService
 
         foreach (var (channelId, channel) in _channelBots)
         {
-            await using var stream = File.OpenWrite($"./channels/{channelId}.json");
-            WriteAsync(channelId, stream);
+            await using var stream = File.Create($"./channels/{channelId}.json");
+            await WriteAsync(channelId, stream);
         }
     }
 
@@ -175,20 +151,22 @@ public class DiscordBot : IHostedService
         {
             Directory.CreateDirectory("channels");
         }
-        await using var stream = File.OpenWrite($"./channels/{channelId}.json");
-        WriteAsync(channelId, stream);
+        await using var stream = File.Create($"./channels/{channelId}.json");
+        await WriteAsync(channelId, stream);
     }
 
     // Method to write state to a Stream in JSON format
-    private void WriteAsync(ulong channelId, Stream stream)
+    private async Task WriteAsync(ulong channelId, Stream stream)
     {
         if (_channelBots.TryGetValue(channelId, out var channelState))
         {
             // prepare serializer options
-            // Serialize channelState to stream using Newtonsoft
-            var serializer = new JsonSerializer();
-            using var writer = new StreamWriter(stream);
-            serializer.Serialize(writer, channelState);
+            var options = new JsonSerializerOptions
+            {
+                WriteIndented = true
+            };
+            // Serialize channelState to stream
+            await JsonSerializer.SerializeAsync(stream, channelState, options);
         }
     }
 
@@ -197,13 +175,15 @@ public class DiscordBot : IHostedService
     {
         try
         {
-            // Deserialize channelState from stream using Newtonsoft
-            
-            var channelState = JsonConvert.DeserializeObject<ChannelState>(await new StreamReader(stream).ReadToEndAsync());
+            // Deserialize channelState from stream
+            var channelState = await JsonSerializer.DeserializeAsync<ChannelState>(stream);
 
             if (channelState != null)
             {
-                channelState.ChatBot = new ChatBot(_openAILogic, channelState.State.Parameters);
+                channelState.ChatBot = new ChatBot(_openAILogic, channelState.State.Parameters)
+                {
+                    State = channelState.State
+                };
                 _channelBots[channelId] = channelState;
             }
         }

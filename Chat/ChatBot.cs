@@ -18,10 +18,10 @@ public class ChatBot
         [JsonPropertyName("instructions")] 
         public readonly List<ChatMessage> Instructions = new();
 
-        [JsonPropertyName("messageLength")]
+        [JsonPropertyName("message-length")]
         public uint MessageLength { get; set; }
 
-        [JsonPropertyName("primeDirective")]
+        [JsonPropertyName("prime-directive")]
         public ChatMessage PrimeDirective { get; set; } = new(StaticValues.ChatMessageRoles.System,
             "You are a chat bot running in GPT-CLI. Answer every message to the best of your ability.");
     }
