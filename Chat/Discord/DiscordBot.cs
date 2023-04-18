@@ -68,14 +68,31 @@ public class DiscordBot : IHostedService
     private GPTParameters Clone(GPTParameters gptParameters)
     {
         // Clone gptParameters to a new instance and copy all properties one by one
-        var newGptParameters = new GPTParameters();
-        foreach (var property in gptParameters.GetType().GetProperties())
+        var newGptParameters = new GPTParameters
         {
-            if (property.Name != "Stream")
-            {
-                property.SetValue(newGptParameters, property.GetValue(gptParameters));
-            }
-        }
+            MaxTokens = gptParameters.MaxTokens,
+            Temperature = gptParameters.Temperature,
+            TopP = gptParameters.TopP,
+            PresencePenalty = gptParameters.PresencePenalty,
+            FrequencyPenalty = gptParameters.FrequencyPenalty,
+            N = gptParameters.N,
+            Stop = gptParameters.Stop,
+            LogitBias = gptParameters.LogitBias,
+            User = gptParameters.User,
+            Input = gptParameters.Input,
+            EmbedFilenames = gptParameters.EmbedFilenames,
+            ChunkSize = gptParameters.ChunkSize,
+            ClosestMatchLimit = gptParameters.ClosestMatchLimit,
+            EmbedDirectoryNames = gptParameters.EmbedDirectoryNames,
+            BotToken = gptParameters.BotToken,
+            MaxChatHistoryLength = gptParameters.MaxChatHistoryLength,
+            ApiKey = gptParameters.ApiKey,
+            BaseDomain = gptParameters.BaseDomain,
+            Prompt = gptParameters.Prompt,
+            Config = gptParameters.Config,
+            Model = gptParameters.Model
+        };
+
 
         return newGptParameters;
     }
