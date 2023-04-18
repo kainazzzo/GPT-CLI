@@ -244,6 +244,7 @@ public class DiscordBot : IHostedService
                 {
                     State = channelState.State
                 };
+                channelState.State = channelState.State;
                 _channelBots[channelId] = channelState;
             }
         }
@@ -351,15 +352,19 @@ public class DiscordBot : IHostedService
 
     public IEnumerable<ChatMessage> PrimeDirective => _defaultPrimeDirective;
 
-    private DiscordBot.ChannelState InitializeChannel(ulong channelId)
+    private ChannelState InitializeChannel(ulong channelId)
     {
-        DiscordBot.ChannelState channel = new()
+        ChannelState channel = new()
         {
-            ChatBot = new(_openAILogic, Clone(_defaultParameters)),
+            ChatBot = new(_openAILogic, Clone(_defaultParameters))
+            {
+                State = new()
+                    { PrimeDirectives = PrimeDirective.ToList() }
+            },
             Options = new(),
-            State = new()
-                {PrimeDirectives = PrimeDirective.ToList() }
         };
+        channel.State = channel.ChatBot.State;
+        channel.State.Parameters = Clone(_defaultParameters);
 
         _channelBots[channelId] = channel;
 
