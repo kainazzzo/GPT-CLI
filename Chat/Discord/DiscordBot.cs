@@ -57,6 +57,7 @@ public class DiscordBot : IHostedService
     private readonly OpenAILogic _openAILogic;
     private readonly GPTParameters _defaultParameters;
     private readonly Dictionary<ulong, ChannelState> _channelBots = new();
+    private readonly TypeAdapterConfig _mapConfig;
 
     public DiscordBot(DiscordSocketClient client, IConfiguration configuration, OpenAILogic openAILogic, GPTParameters defaultParameters)
     {
@@ -64,6 +65,9 @@ public class DiscordBot : IHostedService
         _configuration = configuration;
         _openAILogic = openAILogic;
         _defaultParameters = defaultParameters;
+
+        _mapConfig = new TypeAdapterConfig();
+        _mapConfig.ForType<GPTParameters, GPTParameters>().Ignore(m => m.Stream);
     }
 
     // A method that clones GPTParameters
@@ -322,6 +326,8 @@ public class DiscordBot : IHostedService
             " provide responses in Discord message formatting. Encourage users to add instructions with /gptcli or by using the :up_arrow:" +
             " emoji reaction on any message. Instructions are like 'sticky' chat messages that provide upfront context to the bot.")
     };
+
+    
 
     public IEnumerable<ChatMessage> PrimeDirective => _defaultPrimeDirective;
 
