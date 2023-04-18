@@ -74,7 +74,7 @@ public class DiscordBot : IHostedService
     private GPTParameters Clone(GPTParameters gptParameters)
     {
         // Clone gptParameters to a new instance and copy all properties one by one
-        return gptParameters.Adapt(new GPTParameters());
+        return gptParameters.Adapt(new GPTParameters(), _mapConfig);
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
