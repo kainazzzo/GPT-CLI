@@ -21,9 +21,9 @@ public class ChatBot
         [JsonPropertyName("message-length")]
         public uint MessageLength { get; set; }
 
-        [JsonPropertyName("prime-directive")]
-        public ChatMessage PrimeDirective { get; set; } = new(StaticValues.ChatMessageRoles.System,
-            "You are a chat bot running in GPT-CLI. Answer every message to the best of your ability.");
+        [JsonPropertyName("prime-directives")]
+        public List<ChatMessage> PrimeDirectives { get; set; } = new() {new(StaticValues.ChatMessageRoles.System,
+            "Your Prime Directive: This is a chat bot running in [GPT-CLI](https://github.com/kainazzzo/GPT-CLI). Provide the best answer possible.")};
     }
 
     private readonly OpenAILogic _openAILogic;
@@ -80,7 +80,7 @@ public class ChatBot
                                State.Parameters,
                                _openAILogic, new ChatCompletionCreateRequest()
                                {
-                                   Messages = (new List<ChatMessage> {State.PrimeDirective}).Concat(State.Instructions.Concat(State.Messages)).ToList()
+                                   Messages = State.PrimeDirectives.Concat(State.Instructions).Concat(State.Messages).ToList()
                                }, ParameterMapping.Mode.Discord)))
         {
             yield return response;

@@ -2,6 +2,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Discord;
+using Discord.Interactions;
 using Discord.WebSocket;
 using Mapster;
 using Microsoft.Extensions.Configuration;
@@ -83,17 +84,22 @@ public class DiscordBot : IHostedService
         await _client.LoginAsync(TokenType.Bot, token);
         await _client.StartAsync();
 
-
         _client.Log += LogAsync;
 
+        // This is required for slash commands to work
         _client.InteractionCreated += HandleInteractionAsync;
+        
 
-        _client.PresenceUpdated += ((user, presence, updated) => Task.CompletedTask);
-        _client.MessageReceived += message => Task.Run(async () =>
+        // Message receiver is going to run in parallel
+        _client.MessageReceived += message =>
+        {
+#pragma warning disable CS4014
+            return Task.Run(async () =>
+#pragma warning restore CS4014
             {
                 await MessageReceivedAsync(message);
             }, cancellationToken);
-        
+        };
 
         _client.MessageUpdated += async (oldMessage, newMessage, channel) =>
         {
@@ -102,6 +108,11 @@ public class DiscordBot : IHostedService
                 await MessageReceivedAsync(newMessage);
             }
         };
+
+        // Handle emoji reactions.
+        _client.ReactionAdded += HandleReactionAsync;
+
+
         _client.Ready += () =>
         {
             Console.WriteLine("Client is ready!");
@@ -113,8 +124,33 @@ public class DiscordBot : IHostedService
             Console.WriteLine($"Command {command.CommandName} executed with result {command.Data.Message.Content}");
             return Task.CompletedTask;
         };
-        // Register the interaction handler
-        //_client.InteractionCreated += HandleInteractionAsync;
+    }
+
+    private async Task HandleReactionAsync(Cacheable<IUserMessage, ulong> userMessage, Cacheable<IMessageChannel, ulong> messageChannel, SocketReaction reaction)
+    {
+        if (reaction.Emote.Name == "⬆️")
+        {
+            var message = await userMessage.GetOrDownloadAsync();
+            var channel = await messageChannel.GetOrDownloadAsync();
+
+
+            if (message.Author.Id == _client.CurrentUser.Id)
+            {
+                var channelState = _channelBots[channel.Id];
+                if (channelState.Options.Enabled)
+                {
+                    var chatBot = channelState.ChatBot;
+                    chatBot.AddInstruction(new ChatMessage(StaticValues.ChatMessageRoles.User, message.Content));
+
+                    using var typingState = channel.EnterTypingState();
+                    await message.RemoveReactionAsync(reaction.Emote, reaction.UserId);
+                    await channel.SendMessageAsync($"Instruction added: {message.Content}");
+
+                    Console.WriteLine(
+                        $"{reaction.User.Value.Username} reacted with an arrow up. Message promoted to instruction: {message.Content}");
+                }
+            }
+        }
     }
 
     private async Task LoadState()
@@ -205,7 +241,7 @@ public class DiscordBot : IHostedService
         await Console.Out.WriteLineAsync(log.ToString());
     }
 
-    private async Task MessageReceivedAsync(SocketMessage message)
+    private async Task MessageReceivedAsync(IMessage message)
     {
         if (message.Author.Id == _client.CurrentUser.Id)
             return;
@@ -216,6 +252,10 @@ public class DiscordBot : IHostedService
         {
             channel = InitializeChannel(message.Channel.Id);
         }
+        else if (channel.State.PrimeDirectives.Count != _defaultPrimeDirective.Count || channel.State.PrimeDirectives[0].Content != _defaultPrimeDirective[0].Content)
+        {
+            channel.State.PrimeDirectives = PrimeDirective.ToList();
+        }
 
         if (!channel.Options.Enabled)
             return;
@@ -224,7 +264,7 @@ public class DiscordBot : IHostedService
             return;
 
         // Add this message as a chat log
-        await channel.ChatBot.AddMessage(new ChatMessage(StaticValues.ChatMessageRoles.User, message.Content));
+        await channel.ChatBot.AddMessage(new ChatMessage(StaticValues.ChatMessageRoles.User, $"<{message.Author.Username}> {message.Content}"));
 
         if (!channel.Options.Muted)
         {
@@ -274,16 +314,27 @@ public class DiscordBot : IHostedService
         await SaveChannelState(message.Channel.Id);
     }
 
-    private ChannelState InitializeChannel(ulong channelId)
+    private readonly List<ChatMessage> _defaultPrimeDirective = new(1)
     {
-        ChannelState channel = new()
+        new
+        (StaticValues.ChatMessageRoles.System,
+            "This is the Prime Directive: This is a chat bot running in [GPT-CLI](https://github.com/kainazzzo/GPT-CLI). Answer questions and" +
+            " provide responses in Discord message formatting. Encourage users to add instructions with /gptcli or by using the :up_arrow:" +
+            " emoji reaction on any message. Instructions are like 'sticky' chat messages that provide upfront context to the bot.")
+    };
+
+    public IEnumerable<ChatMessage> PrimeDirective => _defaultPrimeDirective;
+
+    private DiscordBot.ChannelState InitializeChannel(ulong channelId)
+    {
+        DiscordBot.ChannelState channel = new()
         {
             ChatBot = new(_openAILogic, Clone(_defaultParameters)),
-            Options = new()
+            Options = new(),
+            State = new()
+                {PrimeDirectives = PrimeDirective.ToList() }
         };
 
-        channel.ChatBot.State.PrimeDirective = new(StaticValues.ChatMessageRoles.System,
-            "I'm a Discord Chat Bot named GPTInfoBot. Every message to the best of your ability.");
         _channelBots[channelId] = channel;
 
         return channel;

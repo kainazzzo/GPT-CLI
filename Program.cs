@@ -397,7 +397,9 @@ class Program
             var config = new DiscordSocketConfig
             {
                 GatewayIntents = GatewayIntents.Guilds | GatewayIntents.GuildMessages | GatewayIntents.GuildMembers | GatewayIntents.GuildPresences | 
-                                 GatewayIntents.MessageContent | GatewayIntents.DirectMessages | GatewayIntents.DirectMessageReactions
+                                 GatewayIntents.MessageContent | GatewayIntents.DirectMessages | GatewayIntents.DirectMessageReactions | 
+                                 GatewayIntents.GuildMessageReactions | GatewayIntents.GuildEmojis,
+                MessageCacheSize = 100
             };
 
             return new DiscordSocketClient(config);
