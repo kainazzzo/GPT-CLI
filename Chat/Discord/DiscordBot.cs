@@ -2,9 +2,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Discord;
-using Discord.Interactions;
 using Discord.WebSocket;
-using Mapster;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 using OpenAI.GPT3.ObjectModels;
@@ -57,7 +55,6 @@ public class DiscordBot : IHostedService
     private readonly OpenAILogic _openAILogic;
     private readonly GPTParameters _defaultParameters;
     private readonly Dictionary<ulong, ChannelState> _channelBots = new();
-    private readonly TypeAdapterConfig _mapConfig;
 
     public DiscordBot(DiscordSocketClient client, IConfiguration configuration, OpenAILogic openAILogic, GPTParameters defaultParameters)
     {
@@ -65,16 +62,22 @@ public class DiscordBot : IHostedService
         _configuration = configuration;
         _openAILogic = openAILogic;
         _defaultParameters = defaultParameters;
-
-        _mapConfig = new TypeAdapterConfig();
-        _mapConfig.ForType<GPTParameters, GPTParameters>().Ignore(m => m.Stream);
     }
 
     // A method that clones GPTParameters
     private GPTParameters Clone(GPTParameters gptParameters)
     {
         // Clone gptParameters to a new instance and copy all properties one by one
-        return gptParameters.Adapt(new GPTParameters(), _mapConfig);
+        var newGptParameters = new GPTParameters();
+        foreach (var property in gptParameters.GetType().GetProperties())
+        {
+            if (property.Name != "Stream")
+            {
+                property.SetValue(newGptParameters, property.GetValue(gptParameters));
+            }
+        }
+
+        return newGptParameters;
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
