@@ -140,11 +140,9 @@ public class DiscordBot : IHostedService
         await Console.Out.WriteLineAsync("Loading state...");
         Directory.CreateDirectory("channels");
         var files = Directory.GetFiles("channels", "*.state.json", SearchOption.AllDirectories);
-        await Console.Out.WriteLineAsync($"Found {files.Length} state files");
         foreach (var file in files)
         {
-            await Console.Out.WriteLineAsync($"Loading state from {file}");
-            var tokens = file.Split("\\.".ToCharArray());
+            var tokens = file.Split("\\./".ToCharArray());
             if (tokens.Length == 5 && tokens[3] == "state")
             {
                 ulong channelId = Convert.ToUInt64(tokens[1]);
