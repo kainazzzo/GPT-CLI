@@ -129,7 +129,6 @@ public class DiscordBot : IHostedService
         {
             case "📌":
             {
-
                 var channelState = _channelBots[channel.Id];
                 if (channelState.Options.Enabled)
                 {
@@ -138,7 +137,7 @@ public class DiscordBot : IHostedService
 
                     using var typingState = channel.EnterTypingState();
                     await message.RemoveReactionAsync(reaction.Emote, reaction.UserId);
-                    await channel.SendMessageAsync($"Instruction added: {message.Content}");
+                    await message.ReplyAsync("Instruction added.");
 
                     Console.WriteLine(
                         $"{reaction.User.Value.Username} reacted with an arrow up. Message promoted to instruction: {message.Content}");
@@ -150,7 +149,7 @@ public class DiscordBot : IHostedService
                 // remove the emoji
                 await message.RemoveReactionAsync(reaction.Emote, reaction.UserId);
 
-                await channel.SendMessageAsync("Replaying message...");
+                await message.ReplyAsync("Using as a prompt.");
 
                 // Replay the message as a new message
 #pragma warning disable CS4014
