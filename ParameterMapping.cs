@@ -54,11 +54,11 @@ internal static class ParameterMapping
         return request;
     }
 
-    public static async Task<ChatCompletionCreateRequest> MapChatEdit(GPTParameters parameters, OpenAILogic openAILogic)
+    public static async Task<ChatCompletionCreateRequest> MapChatEdit(GPTParameters parameters, OpenAILogic openAILogic, Stream inputStream)
     {
-        using var streamReader = new StreamReader(parameters.Input);
+        using var streamReader = new StreamReader(inputStream);
         var input = await streamReader.ReadToEndAsync();
-        await parameters.Input.DisposeAsync();
+        await inputStream.DisposeAsync();
 
         var request = await ParameterMapping.MapCommon(parameters, openAILogic, new ChatCompletionCreateRequest
         {

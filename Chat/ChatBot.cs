@@ -26,16 +26,21 @@ public class ChatBot
             "Your Prime Directive: This is a chat bot running in [GPT-CLI](https://github.com/kainazzzo/GPT-CLI). Provide the best answer possible.")};
     }
 
-    private readonly OpenAILogic _openAILogic;
+    [JsonIgnore] internal OpenAILogic OpenAILogic;
 
-    [JsonIgnore]
+    [JsonPropertyName("state")]
     public ChatState State { get; set; } = new();
     
 
     public ChatBot(OpenAILogic openAILogic, GPTParameters gptParameters)
     {
-        _openAILogic = openAILogic;
+        OpenAILogic = openAILogic;
         State.Parameters = gptParameters;
+    }
+
+    public ChatBot()
+    {
+
     }
 
     [JsonIgnore]
@@ -75,10 +80,10 @@ public class ChatBot
 
     public async IAsyncEnumerable<ChatCompletionCreateResponse> GetResponseAsync()
     {
-        await foreach (var response in _openAILogic.CreateChatCompletionAsyncEnumerable(
+        await foreach (var response in OpenAILogic.CreateChatCompletionAsyncEnumerable(
                            await ParameterMapping.MapCommon(
                                State.Parameters,
-                               _openAILogic, new ChatCompletionCreateRequest()
+                               OpenAILogic, new ChatCompletionCreateRequest()
                                {
                                    Messages = State.PrimeDirectives.Concat(State.Instructions).Concat(State.Messages).ToList()
                                }, ParameterMapping.Mode.Discord)))

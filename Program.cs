@@ -204,7 +204,7 @@ class Program
     private static async Task HandleCompletionMode(OpenAILogic openAILogic, GPTParameters gptParameters)
     {
         var chatRequest = Console.IsInputRedirected
-            ? await ParameterMapping.MapChatEdit(gptParameters, openAILogic)
+            ? await ParameterMapping.MapChatEdit(gptParameters, openAILogic, Console.OpenStandardInput())
             : await ParameterMapping.MapChatCreate(gptParameters, openAILogic);
 
         var responses = gptParameters.Stream == true
@@ -378,11 +378,6 @@ class Program
 
         gptParameters.ApiKey ??= Configuration["OpenAI:api-key"];
         gptParameters.BaseDomain ??= Configuration["OpenAI:base-domain"];
-
-        if (Console.IsInputRedirected)
-        {
-            gptParameters.Input = Console.OpenStandardInput();
-        }
 
         // Add the configuration object to the services
         services.AddSingleton<IConfiguration>(Configuration);
