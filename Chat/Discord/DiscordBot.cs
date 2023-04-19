@@ -146,8 +146,10 @@ public class DiscordBot : IHostedService
                 if (tokens.Length == 5 && tokens[3] == "state")
                 {
                     ulong channelId = Convert.ToUInt64(tokens[1]);
+                    await Console.Out.WriteLineAsync($"Loading state for channel {channelId}");
                     await using var stream = File.OpenRead(file);
                     var channelState = await ReadAsync(channelId, stream);
+
                     channelState.Chat ??= new(_openAILogic, _defaultParameters);
                     channelState.Chat.State ??= new() { PrimeDirectives = PrimeDirective.ToList() };
                     channelState.Chat.OpenAILogic = _openAILogic;
@@ -195,8 +197,10 @@ public class DiscordBot : IHostedService
     {
         try
         {
+            var str = await new StreamReader(stream).ReadToEndAsync();
+            await Console.Out.WriteLineAsync($"State read for {channelId}: {str}");
             // Deserialize channelState from stream
-            var channelState = await JsonSerializer.DeserializeAsync<ChannelState>(stream);
+            var channelState = JsonSerializer.Deserialize<ChannelState>(str);
 
             if (channelState != null)
             {
