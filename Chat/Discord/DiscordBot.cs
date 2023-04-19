@@ -255,7 +255,7 @@ public class DiscordBot : IHostedService
 
     private async Task HandleMessageReceivedAsync(IMessage message, IEmote emote = null)
     {
-        if (message.Author.Id == _client.CurrentUser.Id)
+        if (message.Author.Id == _client.CurrentUser.Id && emote == null)
             return;
 
         // Handle the received message here
@@ -324,7 +324,8 @@ public class DiscordBot : IHostedService
                     var responseMessage = new ChatMessage(StaticValues.ChatMessageRoles.Assistant, chunk);
 
                     await channel.Chat.AddMessage(responseMessage);
-                    await message.Channel.SendMessageAsync(responseMessage.Content);
+                    var newMessage = await message.Channel.SendMessageAsync(responseMessage.Content);
+                    await AddStandardReactions(newMessage);
                 }
             }
             finally
