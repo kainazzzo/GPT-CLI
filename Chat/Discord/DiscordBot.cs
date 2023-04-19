@@ -323,7 +323,19 @@ public class DiscordBot : IHostedService
                     var responseMessage = new ChatMessage(StaticValues.ChatMessageRoles.Assistant, chunk);
 
                     await channel.Chat.AddMessage(responseMessage);
-                    var newMessage = await message.Channel.SendMessageAsync(responseMessage.Content);
+                    // Convert message to SocketMessage
+                    IMessage newMessage;
+
+                    if (message is IUserMessage userMessage)
+                    {
+                        newMessage = await userMessage.ReplyAsync(responseMessage.Content);
+                    }
+                    else
+                    {
+
+                        newMessage = await message.Channel.SendMessageAsync(responseMessage.Content);
+                    }
+
                     await AddStandardReactions(newMessage);
                 }
             }
