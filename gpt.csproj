@@ -5,9 +5,9 @@
     <RootNamespace>GPT.CLI</RootNamespace>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>disable</Nullable>
-    <FileVersion>0.13.2</FileVersion>
-    <AssemblyVersion>0.13.2</AssemblyVersion>
-    <Version>0.13.2-beta</Version>
+    <FileVersion>0.13.3</FileVersion>
+    <AssemblyVersion>0.13.3</AssemblyVersion>
+    <Version>0.13.3-beta</Version>
   </PropertyGroup>
   <ItemGroup>
     <None Include=".github\workflows\release.yml" />
