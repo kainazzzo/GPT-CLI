@@ -79,7 +79,7 @@ public class DiscordBot : IHostedService
             return Task.Run(async () =>
 #pragma warning restore CS4014
             {
-                await MessageReceivedAsync(message);
+                await HandleMessageReceivedAsync(message);
             }, cancellationToken);
         };
 
@@ -87,12 +87,13 @@ public class DiscordBot : IHostedService
         {
             if (newMessage.Content != null && oldMessage.Value?.Content != newMessage.Content)
             {
-                await MessageReceivedAsync(newMessage);
+                await HandleMessageReceivedAsync(newMessage);
             }
         };
 
         // Handle emoji reactions.
         _client.ReactionAdded += HandleReactionAsync;
+
 
 
         _client.Ready += () =>
@@ -108,16 +109,27 @@ public class DiscordBot : IHostedService
         };
     }
 
+    private async Task AddStandardReactions(IMessage message)
+    {
+        await message.AddReactionAsync(new Emoji("📌"));
+        await message.AddReactionAsync(new Emoji("🔄"));
+    }
+
     private async Task HandleReactionAsync(Cacheable<IUserMessage, ulong> userMessage, Cacheable<IMessageChannel, ulong> messageChannel, SocketReaction reaction)
     {
-        if (reaction.Emote.Name == "⬆️")
+        if (reaction.UserId == _client.CurrentUser.Id)
         {
-            var message = await userMessage.GetOrDownloadAsync();
-            var channel = await messageChannel.GetOrDownloadAsync();
+            return;
+        }
 
+        var message = await userMessage.GetOrDownloadAsync();
+        var channel = await messageChannel.GetOrDownloadAsync();
 
-            if (message.Author.Id == _client.CurrentUser.Id)
+        switch (reaction.Emote.Name)
+        {
+            case "📌":
             {
+
                 var channelState = _channelBots[channel.Id];
                 if (channelState.Options.Enabled)
                 {
@@ -131,6 +143,20 @@ public class DiscordBot : IHostedService
                     Console.WriteLine(
                         $"{reaction.User.Value.Username} reacted with an arrow up. Message promoted to instruction: {message.Content}");
                 }
+                break;
+            }
+            case "🔄":
+            {
+                // remove the emoji
+                await message.RemoveReactionAsync(reaction.Emote, reaction.UserId);
+
+                await channel.SendMessageAsync("Replaying message...");
+
+                // Replay the message as a new message
+#pragma warning disable CS4014
+                Task.Run(async () => await HandleMessageReceivedAsync(message, reaction.Emote));
+#pragma warning restore CS4014
+                break;
             }
         }
     }
@@ -227,7 +253,7 @@ public class DiscordBot : IHostedService
         await Console.Out.WriteLineAsync(log.ToString());
     }
 
-    private async Task MessageReceivedAsync(IMessage message)
+    private async Task HandleMessageReceivedAsync(IMessage message, IEmote emote = null)
     {
         if (message.Author.Id == _client.CurrentUser.Id)
             return;
@@ -249,52 +275,62 @@ public class DiscordBot : IHostedService
         if (message.Content.StartsWith("!ignore"))
             return;
 
+        await message.AddReactionAsync(new Emoji("🤔"));
+
+        await AddStandardReactions(message);
+
         // Add this message as a chat log
         await channel.Chat.AddMessage(new ChatMessage(StaticValues.ChatMessageRoles.User, $"<{message.Author.Username}> {message.Content}"));
 
         if (!channel.Options.Muted)
         {
-            // Get the response from the bot
-            var responses = channel.Chat.GetResponseAsync();
-            // Add the response as a chat log
-
-
-            using var typingState = message.Channel.EnterTypingState();
-
-            var sb = new StringBuilder();
-            // Send the response to the channel
-            await foreach (var response in responses)
+            try
             {
-                if (response.Successful)
+                
+                // Get the response from the bot
+                var responses = channel.Chat.GetResponseAsync();
+                // Add the response as a chat 
+                
+                using var typingState = message.Channel.EnterTypingState();
+
+                var sb = new StringBuilder();
+                // Send the response to the channel
+                await foreach (var response in responses)
                 {
-                    var content = response?.Choices?.FirstOrDefault()?.Message.Content;
-                    if (content is not null)
+                    if (response.Successful)
                     {
-                        sb.Append(content);
+                        var content = response?.Choices?.FirstOrDefault()?.Message.Content;
+                        if (content is not null)
+                        {
+                            sb.Append(content);
+                        }
+                    }
+                    else
+                    {
+                        await Console.Out.WriteLineAsync(
+                            $"Error code {response.Error?.Code}: {response.Error?.Message}");
                     }
                 }
-                else
+
+                int chunkSize = 2000;
+                int currentPosition = 0;
+
+                while (currentPosition < sb.Length)
                 {
-                    await Console.Out.WriteLineAsync(
-                        $"Error code {response.Error?.Code}: {response.Error?.Message}");
+                    var size = Math.Min(chunkSize, sb.Length - currentPosition);
+                    var chunk = sb.ToString(currentPosition, size);
+                    currentPosition += size;
+
+                    var responseMessage = new ChatMessage(StaticValues.ChatMessageRoles.Assistant, chunk);
+
+                    await channel.Chat.AddMessage(responseMessage);
+                    await message.Channel.SendMessageAsync(responseMessage.Content);
                 }
             }
-
-            int chunkSize = 2000;
-            int currentPosition = 0;
-
-            while (currentPosition < sb.Length)
+            finally
             {
-                var size = Math.Min(chunkSize, sb.Length - currentPosition);
-                var chunk = sb.ToString(currentPosition, size);
-                currentPosition += size;
-
-                var responseMessage = new ChatMessage(StaticValues.ChatMessageRoles.Assistant, chunk);
-
-                await channel.Chat.AddMessage(responseMessage);
-                await message.Channel.SendMessageAsync(responseMessage.Content);
+                await message.RemoveReactionAsync(new Emoji("🤔"), _client.CurrentUser);
             }
-        
         }
 
         await SaveCachedChannelState(message.Channel.Id);
