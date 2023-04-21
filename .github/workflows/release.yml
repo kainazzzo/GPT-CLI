@@ -34,6 +34,12 @@ jobs:
       uses: actions/setup-dotnet@v3
       with:
         dotnet-version: 7.0.x
+    - name: Clean build directory
+      run: |
+        rm -rf build/${{ matrix.artifact_name }}
+    - name: List build directory contents
+      run: |
+        ls -la build
     - name: Build and Publish
       shell: bash
       run: |
