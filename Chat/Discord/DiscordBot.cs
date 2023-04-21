@@ -2,6 +2,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Threading.Channels;
 using Discord;
 using Discord.WebSocket;
 using Mapster;
@@ -9,6 +10,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 using OpenAI.GPT3.ObjectModels;
 using OpenAI.GPT3.ObjectModels.RequestModels;
+using static GPT.CLI.Chat.Discord.DiscordBot;
 
 namespace GPT.CLI.Chat.Discord;
 
@@ -260,7 +262,6 @@ public class DiscordBot : IHostedService
         if (message.Content.StartsWith("!ignore"))
             return;
 
-
         // Add this message as a chat log
         await channel.Chat.AddMessage(new ChatMessage(StaticValues.ChatMessageRoles.User, $"<{message.Author.Username}> {message.Content}"));
 
@@ -306,16 +307,24 @@ public class DiscordBot : IHostedService
 
                 if (message is IUserMessage userMessage)
                 {
-                    _ = await userMessage.ReplyAsync(responseMessage.Content);
+                    _ = await userMessage.ReplyAsync(responseMessage.Content, components: BuildStandardComponents());
                 }
                 else
                 {
-                    _ = await message.Channel.SendMessageAsync(responseMessage.Content);
+                    _ = await message.Channel.SendMessageAsync(responseMessage.Content, components: BuildStandardComponents());
                 }
             }
         }
 
         await SaveCachedChannelState(message.Channel.Id);
+    }
+
+    private MessageComponent BuildStandardComponents()
+    {
+        // pushpin unicode escape: \U0001F4CC
+        var builder = new ComponentBuilder()
+            .WithButton("📌Instruct", "instruction");
+        return builder.Build();
     }
 
     private readonly List<ChatMessage> _defaultPrimeDirective = new(1)
@@ -349,25 +358,42 @@ public class DiscordBot : IHostedService
         return channel;
     }
 
-    private Task HandleInteractionAsync(SocketInteraction arg)
+    private async Task HandleInteractionAsync(SocketInteraction arg)
     {
-        switch (arg.Type)
+        if (arg is SocketSlashCommand { CommandName: "gptcli" } socketSlashCommand)
         {
-            case InteractionType.ApplicationCommand:
-                var command = (SocketSlashCommand)arg;
-                switch (command.Data.Name)
-                {
-                    case "gptcli":
-                        HandleGptCliCommand(command);
-                        break;
-                }
-                break;
+            await HandleGptCliCommand(socketSlashCommand);
         }
+        else if (arg is SocketMessageComponent command)
+        {
+            switch (command.Data.CustomId)
+            {
+                case "instruction":
+                    await HandleInstructionCommand(command);
+                    break;
+            }
 
-        return Task.CompletedTask;
+            await Console.Out.WriteLineAsync(
+                $"Interaction: {arg.Type} {arg.Id} {arg} {arg.Channel.Id} {arg.Channel.Name} {arg.User.Id} {arg.User.Username}");
+        }
     }
 
-    private async void HandleGptCliCommand(SocketSlashCommand command)
+    private async Task HandleInstructionCommand(SocketMessageComponent command)
+    {
+        var channelState = _channelBots.GetOrAdd(command.Channel.Id, InitializeChannel);
+        if (channelState.Options.Enabled)
+        {
+            var chatBot = channelState.Chat;
+            chatBot.AddInstruction(new ChatMessage(StaticValues.ChatMessageRoles.User, command.Message.Content));
+
+
+            using var typingState = command.Channel.EnterTypingState();
+            await command.RespondAsync("Instruction added");
+        }
+        
+    }
+
+    private async Task HandleGptCliCommand(SocketSlashCommand command)
     {
         var channel = command.Channel;
         if (!_channelBots.TryGetValue(channel.Id, out var chatBot))
