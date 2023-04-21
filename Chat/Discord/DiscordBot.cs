@@ -10,7 +10,6 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 using OpenAI.GPT3.ObjectModels;
 using OpenAI.GPT3.ObjectModels.RequestModels;
-using static GPT.CLI.Chat.Discord.DiscordBot;
 
 namespace GPT.CLI.Chat.Discord;
 

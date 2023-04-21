@@ -49,15 +49,11 @@ public class ChatBot
 
     public async Task AddMessage(ChatMessage message)
     {
-        await Console.Out.WriteAsync("Message Added. ");
         while (State.Messages.Count > 0 && State.MessageLength > State.Parameters.MaxChatHistoryLength)
         {
             
             var removed = State.Messages.First();
             var removedLength = removed.Content.Length;
-
-            await Console.Out.WriteAsync($"Length: {State.MessageLength} > Max: {State.Parameters.MaxChatHistoryLength}. Removing top message for: -{removedLength} ");
-
             State.MessageLength -= (uint)removedLength;
             State.Messages.RemoveFirst();
         }
@@ -69,7 +65,6 @@ public class ChatBot
 
         State.Messages.AddLast(message);
         State.MessageLength += (uint)message.Content.Length;
-        await Console.Out.WriteLineAsync($"Message Length: {State.MessageLength}");
     }
 
     public void AddInstruction(ChatMessage message)

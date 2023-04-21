@@ -1,5 +1,4 @@
-﻿using System.Collections.Concurrent;
-using System.CommandLine;
+﻿using System.CommandLine;
 using System.CommandLine.Builder;
 using System.CommandLine.Parsing;
 using System.Text;
@@ -7,22 +6,15 @@ using System.Text.Json;
 using Discord;
 using Discord.WebSocket;
 using GPT.CLI.Embeddings;
-using Microsoft.AspNetCore.Authentication.JwtBearer;
-using Microsoft.AspNetCore.Builder;
-using Microsoft.AspNetCore.Hosting;
-using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
-using Microsoft.Identity.Web;
-using Microsoft.OpenApi.Models;
 using OpenAI.GPT3.Extensions;
 using OpenAI.GPT3.ObjectModels;
 using OpenAI.GPT3.ObjectModels.RequestModels;
 using OpenAI.GPT3.ObjectModels.ResponseModels;
-using Org.BouncyCastle.Crypto.Parameters;
-using Org.BouncyCastle.Security;
 using GPT.CLI.Chat.Discord;
+using GPT.CLI.Chat;
 
 namespace GPT.CLI;
 
@@ -51,7 +43,6 @@ class Program
         var userOption = new Option<string>("--user", "A unique identifier representing your end-user");
         var chatCommand = new Command("chat", "Starts listening in chat mode.");
         var embedCommand = new Command("embed", "Create an embedding for data redirected via STDIN.");
-        var httpCommand = new Command("http", "Starts an HTTP server to listen for requests.");
         var discordCommand = new Command("discord", "Starts the CLI as a Discord bot that receives messages from all channels on your server.");
         var botTokenOption = new Option<string>("--bot-token", "The token for your Discord bot.");
         var maxChatHistoryLengthOption = new Option<uint>("--max-chat-history-length", () => 1024, "The maximum message length to keep in chat history (chat & discord modes).");
@@ -65,9 +56,6 @@ class Program
         {
             AllowMultipleArgumentsPerToken = true, Arity = ArgumentArity.OneOrMore
         };
-
-        var httpPortOption = new Option<int>("--port", () => 5000, "The port to listen on for HTTP requests.");
-        var sslPortOption = new Option<int>("--ssl-port", () => 5001, "The port to listen on for HTTPS requests.");
 
         var matchLimitOption = new Option<int>("--match-limit", () => 3,
             "Limits the number of embedding chunks to use when applying context.");
@@ -107,8 +95,6 @@ class Program
 
         rootCommand.AddCommand(chatCommand);
         rootCommand.AddCommand(embedCommand);
-        // We'll add this later when I have an api idea.
-        //rootCommand.AddCommand(httpCommand);
         rootCommand.AddCommand(discordCommand);
         rootCommand.AddOption(botTokenOption);
         chatCommand.AddOption(maxChatHistoryLengthOption);
@@ -128,7 +114,6 @@ class Program
         rootCommand.SetHandler(_ => {}, binder);
         chatCommand.SetHandler(_ => mode = ParameterMapping.Mode.Chat, binder);
         embedCommand.SetHandler(_ => mode = ParameterMapping.Mode.Embed, binder);
-        httpCommand.SetHandler(_ => mode = ParameterMapping.Mode.Http, binder);
         discordCommand.SetHandler(_ => mode = ParameterMapping.Mode.Discord, binder);
 
         // Invoke the command
@@ -247,13 +232,10 @@ class Program
         var prompts = new List<string>();
         var promptResponses = new List<string>();
 
+        var chatBot = new ChatBot(openAILogic, gptParameters);
+        
         do
         {
-            // Keeping track of all the prompts and responses means we can rebuild the chat message history
-            // without including the old context every time, saving on tokens
-            var chatGpt = new ChatGPTLogic(openAILogic, initialRequest);
-            chatGpt.ClearMessages();
-
             await Console.Out.WriteAsync("\r\n? ");
             var chatInput = await Console.In.ReadLineAsync();
 
@@ -264,11 +246,21 @@ class Program
                     break;
                 }
 
+                if (chatInput.StartsWith("!instruction "))
+                {
+                    
+                    // add instruction:
+                    chatBot.AddInstruction(new ChatMessage(StaticValues.ChatMessageRoles.User,
+                        chatInput.Substring(13)));
+                    await Console.Out.WriteLineAsync($"Instructions added: {chatInput.Substring(13)}");
+                    continue;
+                }
+
 
                 for (int i = 0; i < prompts.Count; i++)
                 {
-                    chatGpt.AppendMessage(new(StaticValues.ChatMessageRoles.User, prompts[i]));
-                    chatGpt.AppendMessage(new(StaticValues.ChatMessageRoles.Assistant, promptResponses[i]));
+                    await chatBot.AddMessage(new(StaticValues.ChatMessageRoles.User, prompts[i]));
+                    await chatBot.AddMessage(new(StaticValues.ChatMessageRoles.Assistant, promptResponses[i]));
                 }
 
                 
@@ -282,17 +274,17 @@ class Program
                     {
                         foreach (var closestDocument in closestDocuments)
                         {
-                            chatGpt.AppendMessage(new(StaticValues.ChatMessageRoles.User, 
+                            await chatBot.AddMessage(new(StaticValues.ChatMessageRoles.User, 
                                     $"Embedding context for the next prompt: {closestDocument.Text}"));
                         }
                     }
                 }
 
                 prompts.Add(chatInput);
-                chatGpt.AppendMessage(new(StaticValues.ChatMessageRoles.User, chatInput));
+                await chatBot.AddMessage(new(StaticValues.ChatMessageRoles.User, chatInput));
 
                 // Get the new response:
-                var responses = chatGpt.SendMessages();
+                var responses = chatBot.GetResponseAsync();
                 sb.Clear();
                 await foreach (var response in responses)
                 {
@@ -403,47 +395,6 @@ class Program
         
         services.AddSingleton<DiscordBot>();
         services.AddSingleton(_ => gptParameters);
-
-
-
-        if (mode == ParameterMapping.Mode.Http)
-        {
-            // Add OpenAPI/Swagger document generation
-            //services.AddSwaggerGen(c =>
-            //{
-            //    c.SwaggerDoc("v1", new OpenApiInfo { Title = "GPT-CLI API", Version = "v1" });
-
-            //    // Set the comments path for the Swagger JSON and UI
-            //    var xmlFile = $"{Assembly.GetExecutingAssembly().GetName().Name}.xml";
-            //    var xmlPath = Path.Combine(AppContext.BaseDirectory, xmlFile);
-            //    c.IncludeXmlComments(xmlPath);
-
-            //    // Include custom API descriptions
-            //    var apiDescriptionsFile = "ApiDescriptions.xml";
-            //    var apiDescriptionsPath = Path.Combine(AppContext.BaseDirectory, apiDescriptionsFile);
-            //    c.IncludeXmlComments(apiDescriptionsPath);
-            //});
-
-            // Add Azure AD B2C authentication
-            // Add authentication with Azure AD B2C
-            services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-                .AddMicrosoftIdentityWebApi(options =>
-                {
-                    Configuration.Bind("AzureAdB2C", options);
-                    options.TokenValidationParameters.NameClaimType = "name";
-                },options => Configuration.Bind("AzureAdB2C", options));
-
-            
-            // Add minimal API
-            services.AddEndpointsApiExplorer();
-            services.AddRouting();
-
-            // Add Swagger
-            services.AddSwaggerGen(c =>
-            {
-                c.SwaggerDoc("v1", new OpenApiInfo { Title = "My API", Version = "v1" });
-            });
-        }
     }
 
     public static IConfigurationRoot Configuration { get; set; }
