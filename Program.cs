@@ -23,9 +23,9 @@ class Program
     static async Task Main(string[] args)
     {
         // Define command line parameters
-        var apiKeyOption = new Option<string>("--api-key", "Your OpenAI API key") ;
+        var apiKeyOption = new Option<string>("--api-key", "Your OpenAI API key");
         var baseUrlOption = new Option<string>("--base-domain", "The base URL for the OpenAI API");
-        var promptOption = new Option<string>("--prompt", "The prompt for text generation. Optional for most commands.") {IsRequired = true};
+        var promptOption = new Option<string>("--prompt", "The prompt for text generation. Optional for most commands.") { IsRequired = true };
 
         var configOption = new Option<string>("--config", () => "appSettings.json", "The path to the appSettings.json config file");
 
@@ -50,11 +50,12 @@ class Program
         var chunkSizeOption = new Option<int>("--chunk-size", () => 1024,
             "The size to chunk down text into embeddable documents.");
         var embedFileOption = new Option<string[]>("--file", "Name of a file from which to load previously saved embeddings. Multiple files allowed.")
-            { AllowMultipleArgumentsPerToken = true, Arity = ArgumentArity.OneOrMore};
+        { AllowMultipleArgumentsPerToken = true, Arity = ArgumentArity.OneOrMore };
         var embedDirectoryOption = new Option<string[]>("--directory",
             "Name of a directory from which to load previously saved embeddings. Multiple directories allowed.")
         {
-            AllowMultipleArgumentsPerToken = true, Arity = ArgumentArity.OneOrMore
+            AllowMultipleArgumentsPerToken = true,
+            Arity = ArgumentArity.OneOrMore
         };
 
         var matchLimitOption = new Option<int>("--match-limit", () => 3,
@@ -99,19 +100,19 @@ class Program
         rootCommand.AddOption(botTokenOption);
         chatCommand.AddOption(maxChatHistoryLengthOption);
         discordCommand.AddOption(maxChatHistoryLengthOption);
-        
+
 
         var binder = new GPTParametersBinder(
             apiKeyOption, baseUrlOption, promptOption, configOption,
             modelOption, maxTokensOption, temperatureOption, topPOption,
             nOption, streamOption, stopOption,
-            presencePenaltyOption, frequencyPenaltyOption, logitBiasOption, 
+            presencePenaltyOption, frequencyPenaltyOption, logitBiasOption,
             userOption, embedFileOption, embedDirectoryOption, chunkSizeOption, matchLimitOption, botTokenOption, maxChatHistoryLengthOption);
 
         ParameterMapping.Mode mode = ParameterMapping.Mode.Completion;
 
         // Set the handler for the rootCommand
-        rootCommand.SetHandler(_ => {}, binder);
+        rootCommand.SetHandler(_ => { }, binder);
         chatCommand.SetHandler(_ => mode = ParameterMapping.Mode.Chat, binder);
         embedCommand.SetHandler(_ => mode = ParameterMapping.Mode.Embed, binder);
         discordCommand.SetHandler(_ => mode = ParameterMapping.Mode.Discord, binder);
@@ -125,12 +126,12 @@ class Program
         if (retValue == 0 && binder.GPTParameters != null)
         {
             // Set up dependency injection
-            var services = new ServiceCollection(); 
-            
+            var services = new ServiceCollection();
+
             ConfigureServices(services, binder, mode);
 
             await using var serviceProvider = services.BuildServiceProvider();
-            
+
 
             // get a OpenAILogic instance
             var openAILogic = serviceProvider.GetService<OpenAILogic>();
@@ -138,27 +139,27 @@ class Program
             switch (mode)
             {
                 case ParameterMapping.Mode.Chat:
-                {
-                    await HandleChatMode(openAILogic, binder.GPTParameters);
-                    break;
-                }
+                    {
+                        await HandleChatMode(openAILogic, binder.GPTParameters);
+                        break;
+                    }
                 case ParameterMapping.Mode.Embed:
-                {
-                    await HandleEmbedMode(openAILogic, binder.GPTParameters);
-                    break;
-                }
+                    {
+                        await HandleEmbedMode(openAILogic, binder.GPTParameters);
+                        break;
+                    }
                 case ParameterMapping.Mode.Discord:
-                {
-                    await HandleDiscordMode(openAILogic, binder.GPTParameters, services);
-                    break;
-                }
+                    {
+                        await HandleDiscordMode(openAILogic, binder.GPTParameters, services);
+                        break;
+                    }
                 case ParameterMapping.Mode.Completion:
                 default:
-                {
-                    await HandleCompletionMode(openAILogic, binder.GPTParameters);
+                    {
+                        await HandleCompletionMode(openAILogic, binder.GPTParameters);
 
-                    break;
-                }
+                        break;
+                    }
             }
         }
     }
@@ -204,6 +205,102 @@ class Program
         }
     }
 
+    private static readonly Random Random = new();
+    private static int _lastLogo = 0;
+    private static readonly List<(string Logo, int Width)> Logos = new()
+    {
+        new (@"
+________/\\\\\\\\\__/\\\__________________________________________/\\\\\\\\\\\\__/\\\\\\\\\\\\\____/\\\\\\\\\\\\\\\__________________/\\\\\\\\\__/\\\______________/\\\\\\\\\\\_        
+ _____/\\\////////__\/\\\________________________________________/\\\//////////__\/\\\/////////\\\_\///////\\\/////________________/\\\////////__\/\\\_____________\/////\\\///__       
+  ___/\\\/___________\/\\\____________________________/\\\_______/\\\_____________\/\\\_______\/\\\_______\/\\\___________________/\\\/___________\/\\\_________________\/\\\_____      
+   __/\\\_____________\/\\\__________/\\\\\\\\\_____/\\\\\\\\\\\_\/\\\____/\\\\\\\_\/\\\\\\\\\\\\\/________\/\\\__________________/\\\_____________\/\\\_________________\/\\\_____     
+    _\/\\\_____________\/\\\\\\\\\\__\////////\\\___\////\\\////__\/\\\___\/////\\\_\/\\\/////////__________\/\\\_________________\/\\\_____________\/\\\_________________\/\\\_____    
+     _\//\\\____________\/\\\/////\\\___/\\\\\\\\\\_____\/\\\______\/\\\_______\/\\\_\/\\\___________________\/\\\_________________\//\\\____________\/\\\_________________\/\\\_____   
+      __\///\\\__________\/\\\___\/\\\__/\\\/////\\\_____\/\\\_/\\__\/\\\_______\/\\\_\/\\\___________________\/\\\__________________\///\\\__________\/\\\_________________\/\\\_____  
+       ____\////\\\\\\\\\_\/\\\___\/\\\_\//\\\\\\\\/\\____\//\\\\\___\//\\\\\\\\\\\\/__\/\\\___________________\/\\\____________________\////\\\\\\\\\_\/\\\\\\\\\\\\\\\__/\\\\\\\\\\\_ 
+        _______\/////////__\///____\///___\////////\//______\/////_____\////////////____\///____________________\///________________________\/////////__\///////////////__\///////////__", 185),
+        new(@"
+   ________          __  __________  ______   ________    ____
+  / ____/ /_  ____ _/ /_/ ____/ __ \/_  __/  / ____/ /   /  _/
+ / /   / __ \/ __ `/ __/ / __/ /_/ / / /    / /   / /    / /  
+/ /___/ / / / /_/ / /_/ /_/ / ____/ / /    / /___/ /____/ /   
+\____/_/ /_/\__,_/\__/\____/_/     /_/     \____/_____/___/", 63),
+        new(@"
+╔═╗┬ ┬┌─┐┌┬┐╔═╗╔═╗╔╦╗  ╔═╗╦  ╦
+║  ├─┤├─┤ │ ║ ╦╠═╝ ║   ║  ║  ║
+╚═╝┴ ┴┴ ┴ ┴ ╚═╝╩   ╩   ╚═╝╩═╝╩
+",31),
+        new (@"
+   ___ _           _     ___   ___  _____     ___   __   _____ 
+  / __\ |__   __ _| |_  / _ \ / _ \/__   \   / __\ / /   \_   \
+ / /  | '_ \ / _` | __|/ /_\// /_)/  / /\/  / /   / /     / /\/
+/ /___| | | | (_| | |_/ /_\\/ ___/  / /    / /___/ /___/\/ /_  
+\____/|_| |_|\__,_|\__\____/\/      \/     \____/\____/\____/", 64),
+        new(@"
+                                                                           ,----,                      ,--,
+                                                        ,-.----.         ,/   .`|                   ,---.'|
+  ,----..    ,---,                   ___      ,----..   \    /  \      ,`   .'  :          ,----..  |   | :      ,---,
+ /   /   \ ,--.' |                 ,--.'|_   /   /   \  |   :    \   ;    ;     /         /   /   \ :   : |   ,`--.' |
+|   :     :|  |  :                 |  | :,' |   :     : |   |  .\ :.'___,/    ,'         |   :     :|   ' :   |   :  :
+.   |  ;. /:  :  :                 :  : ' : .   |  ;. / .   :  |: ||    :     |          .   |  ;. /;   ; '   :   |  '
+.   ; /--` :  |  |,--.  ,--.--.  .;__,'  /  .   ; /--`  |   |   \ :;    |.';  ;          .   ; /--` '   | |__ |   :  |
+;   | ;    |  :  '   | /       \ |  |   |   ;   | ;  __ |   : .   /`----'  |  |          ;   | ;    |   | :.'|'   '  ;
+|   : |    |  |   /' :.--.  .-. |:__,'| :   |   : |.' .';   | |`-'     '   :  ;          |   : |    '   :    ;|   |  |
+.   | '___ '  :  | | | \__\/: . .  '  : |__ .   | '_.' :|   | ;        |   |  '          .   | '___ |   |  ./ '   :  ;
+'   ; : .'||  |  ' | : ,' .--.; |  |  | '.'|'   ; : \  |:   ' |        '   :  |          '   ; : .'|;   : ;   |   |  '
+'   | '/  :|  :  :_:,'/  /  ,.  |  ;  :    ;'   | '/  .':   : :        ;   |.'           '   | '/  :|   ,/    '   :  |
+|   :    / |  | ,'   ;  :   .'   \ |  ,   / |   :    /  |   | :        '---'             |   :    / '---'     ;   |.'
+ \   \ .'  `--''     |  ,     .-./  ---`-'   \   \ .'   `---'.|                           \   \ .'            '---'
+  `---`               `--`---'                `---`       `---`                            `---`", 119),
+        new(@"
+  _              __  _ ___    _    ___ 
+ /  |_   _. _|_ /__ |_) |    /  |   |  
+ \_ | | (_|  |_ \_| |   |    \_ |_ _|_
+                                       ", 38),
+        new(@"
+    __  __ __   ____  ______   ____  ____  ______         __  _      ____ 
+   /  ]|  |  | /    ||      | /    ||    \|      |       /  ]| |    |    |
+  /  / |  |  ||  o  ||      ||   __||  o  )      |      /  / | |     |  | 
+ /  /  |  _  ||     ||_|  |_||  |  ||   _/|_|  |_|     /  /  | |___  |  | 
+/   \_ |  |  ||  _  |  |  |  |  |_ ||  |    |  |      /   \_ |     | |  | 
+\     ||  |  ||  |  |  |  |  |     ||  |    |  |      \     ||     | |  | 
+ \____||__|__||__|__|  |__|  |___,_||__|    |__|       \____||_____||____|", 75),
+        new(@"
+ ,-----.,--.               ,--.   ,----.   ,------. ,--------.     ,-----.,--.   ,--. 
+'  .--./|  ,---.  ,--,--.,-'  '-.'  .-./   |  .--. ''--.  .--'    '  .--./|  |   |  | 
+|  |    |  .-.  |' ,-.  |'-.  .-'|  | .---.|  '--' |   |  |       |  |    |  |   |  | 
+'  '--'\|  | |  |\ '-'  |  |  |  '  '--'  ||  | --'    |  |       '  '--'\|  '--.|  | 
+ `-----'`--' `--' `--`--'  `--'   `------' `--'        `--'        `-----'`-----'`--'", 86),
+        new(@"
+ ______     __  __     ______     ______   ______     ______   ______      ______     __         __    
+/\  ___\   /\ \_\ \   /\  __ \   /\__  _\ /\  ___\   /\  == \ /\__  _\    /\  ___\   /\ \       /\ \   
+\ \ \____  \ \  __ \  \ \  __ \  \/_/\ \/ \ \ \__ \  \ \  _-/ \/_/\ \/    \ \ \____  \ \ \____  \ \ \  
+ \ \_____\  \ \_\ \_\  \ \_\ \_\    \ \_\  \ \_____\  \ \_\      \ \_\     \ \_____\  \ \_____\  \ \_\ 
+  \/_____/   \/_/\/_/   \/_/\/_/     \/_/   \/_____/   \/_/       \/_/      \/_____/   \/_____/   \/_/", 103),
+        new(@"
+ ▄████████    ▄█    █▄       ▄████████     ███        ▄██████▄     ▄███████▄     ███           ▄████████  ▄█        ▄█
+███    ███   ███    ███     ███    ███ ▀█████████▄   ███    ███   ███    ███ ▀█████████▄      ███    ███ ███       ███
+███    █▀    ███    ███     ███    ███    ▀███▀▀██   ███    █▀    ███    ███    ▀███▀▀██      ███    █▀  ███       ███▌
+███         ▄███▄▄▄▄███▄▄   ███    ███     ███   ▀  ▄███          ███    ███     ███   ▀      ███        ███       ███▌
+███        ▀▀███▀▀▀▀███▀  ▀███████████     ███     ▀▀███ ████▄  ▀█████████▀      ███          ███        ███       ███▌
+███    █▄    ███    ███     ███    ███     ███       ███    ███   ███            ███          ███    █▄  ███       ███
+███    ███   ███    ███     ███    ███     ███       ███    ███   ███            ███          ███    ███ ███▌    ▄ ███
+████████▀    ███    █▀      ███    █▀     ▄████▀     ████████▀   ▄████▀         ▄████▀        ████████▀  █████▄▄██ █▀", 120),
+        new(@"
+ ▄▄▄▄▄▄▄▄▄▄▄  ▄         ▄  ▄▄▄▄▄▄▄▄▄▄▄  ▄▄▄▄▄▄▄▄▄▄▄  ▄▄▄▄▄▄▄▄▄▄▄  ▄▄▄▄▄▄▄▄▄▄▄  ▄▄▄▄▄▄▄▄▄▄▄       ▄▄▄▄▄▄▄▄▄▄▄  ▄            ▄▄▄▄▄▄▄▄▄▄▄ 
+▐░░░░░░░░░░░▌▐░▌       ▐░▌▐░░░░░░░░░░░▌▐░░░░░░░░░░░▌▐░░░░░░░░░░░▌▐░░░░░░░░░░░▌▐░░░░░░░░░░░▌     ▐░░░░░░░░░░░▌▐░▌          ▐░░░░░░░░░░░▌
+▐░█▀▀▀▀▀▀▀▀▀ ▐░▌       ▐░▌▐░█▀▀▀▀▀▀▀█░▌ ▀▀▀▀█░█▀▀▀▀ ▐░█▀▀▀▀▀▀▀▀▀ ▐░█▀▀▀▀▀▀▀█░▌ ▀▀▀▀█░█▀▀▀▀      ▐░█▀▀▀▀▀▀▀▀▀ ▐░▌           ▀▀▀▀█░█▀▀▀▀ 
+▐░▌          ▐░▌       ▐░▌▐░▌       ▐░▌     ▐░▌     ▐░▌          ▐░▌       ▐░▌     ▐░▌          ▐░▌          ▐░▌               ▐░▌     
+▐░▌          ▐░█▄▄▄▄▄▄▄█░▌▐░█▄▄▄▄▄▄▄█░▌     ▐░▌     ▐░▌ ▄▄▄▄▄▄▄▄ ▐░█▄▄▄▄▄▄▄█░▌     ▐░▌          ▐░▌          ▐░▌               ▐░▌     
+▐░▌          ▐░░░░░░░░░░░▌▐░░░░░░░░░░░▌     ▐░▌     ▐░▌▐░░░░░░░░▌▐░░░░░░░░░░░▌     ▐░▌          ▐░▌          ▐░▌               ▐░▌     
+▐░▌          ▐░█▀▀▀▀▀▀▀█░▌▐░█▀▀▀▀▀▀▀█░▌     ▐░▌     ▐░▌ ▀▀▀▀▀▀█░▌▐░█▀▀▀▀▀▀▀▀▀      ▐░▌          ▐░▌          ▐░▌               ▐░▌     
+▐░▌          ▐░▌       ▐░▌▐░▌       ▐░▌     ▐░▌     ▐░▌       ▐░▌▐░▌               ▐░▌          ▐░▌          ▐░▌               ▐░▌     
+▐░█▄▄▄▄▄▄▄▄▄ ▐░▌       ▐░▌▐░▌       ▐░▌     ▐░▌     ▐░█▄▄▄▄▄▄▄█░▌▐░▌               ▐░▌          ▐░█▄▄▄▄▄▄▄▄▄ ▐░█▄▄▄▄▄▄▄▄▄  ▄▄▄▄█░█▄▄▄▄ 
+▐░░░░░░░░░░░▌▐░▌       ▐░▌▐░▌       ▐░▌     ▐░▌     ▐░░░░░░░░░░░▌▐░▌               ▐░▌          ▐░░░░░░░░░░░▌▐░░░░░░░░░░░▌▐░░░░░░░░░░░▌
+ ▀▀▀▀▀▀▀▀▀▀▀  ▀         ▀  ▀         ▀       ▀       ▀▀▀▀▀▀▀▀▀▀▀  ▀                 ▀            ▀▀▀▀▀▀▀▀▀▀▀  ▀▀▀▀▀▀▀▀▀▀▀  ▀▀▀▀▀▀▀▀▀▀▀", 136)
+
+    };
+
     private static async Task HandleChatMode(OpenAILogic openAILogic, GPTParameters gptParameters)
     {
         var initialRequest = await ParameterMapping.MapCommon(gptParameters, openAILogic, new ChatCompletionCreateRequest()
@@ -214,17 +311,21 @@ class Program
                     "You are ChatGPT CLI, the helpful assistant, but you're running on a command line.")
             }
         }, ParameterMapping.Mode.Chat);
+        
+        async Task PrintLogo()
+        {
+            var newLogo = GetRandomLogo();
+            while (newLogo == _lastLogo)
+            {
+                newLogo = GetRandomLogo();
+            }
 
+            _lastLogo = newLogo;
+            await Console.Out.WriteLineAsync(Logos[newLogo].Logo);
+        }
 
+        await PrintLogo();
 
-        await Console.Out.WriteLineAsync(@"
- #####                       #####  ######  #######     #####  #       ### 
-#     # #    #   ##   ##### #     # #     #    #       #     # #        #  
-#       #    #  #  #    #   #       #     #    #       #       #        #  
-#       ###### #    #   #   #  #### ######     #       #       #        #  
-#       #    # ######   #   #     # #          #       #       #        #  
-#     # #    # #    #   #   #     # #          #       #     # #        #  
- #####  #    # #    #   #    #####  #          #        #####  ####### ###");
         var sb = new StringBuilder();
         var documents = await ReadEmbedFilesAsync(gptParameters);
         documents.AddRange(await ReadEmbedDirectoriesAsync(gptParameters));
@@ -233,82 +334,92 @@ class Program
         var promptResponses = new List<string>();
 
         var chatBot = new ChatBot(openAILogic, gptParameters);
-        
+
         do
         {
             await Console.Out.WriteAsync("\r\n? ");
             var chatInput = await Console.In.ReadLineAsync();
 
-            if (!string.IsNullOrWhiteSpace(chatInput))
+            if (string.IsNullOrWhiteSpace(chatInput))
             {
-                if ("exit".Equals(chatInput, StringComparison.OrdinalIgnoreCase))
-                {
-                    break;
-                }
-
-                if (chatInput.StartsWith("!instruction "))
-                {
-                    
-                    // add instruction:
-                    chatBot.AddInstruction(new ChatMessage(StaticValues.ChatMessageRoles.User,
-                        chatInput.Substring(13)));
-                    await Console.Out.WriteLineAsync($"Instructions added: {chatInput.Substring(13)}");
-                    continue;
-                }
-
-
-                for (int i = 0; i < prompts.Count; i++)
-                {
-                    await chatBot.AddMessage(new(StaticValues.ChatMessageRoles.User, prompts[i]));
-                    await chatBot.AddMessage(new(StaticValues.ChatMessageRoles.Assistant, promptResponses[i]));
-                }
-
-                
-                // If there's embedded context provided, inject it after the existing chat history, and before the new prompt
-                if (documents.Count > 0)
-                {
-                    // Search for the closest few documents and add those if they aren't used yet
-                    var closestDocuments =
-                        Document.FindMostSimilarDocuments(documents, await openAILogic.GetEmbeddingForPrompt(chatInput), gptParameters.ClosestMatchLimit);
-                    if (closestDocuments != null)
-                    {
-                        foreach (var closestDocument in closestDocuments)
-                        {
-                            await chatBot.AddMessage(new(StaticValues.ChatMessageRoles.User, 
-                                    $"Embedding context for the next prompt: {closestDocument.Text}"));
-                        }
-                    }
-                }
-
-                prompts.Add(chatInput);
-                await chatBot.AddMessage(new(StaticValues.ChatMessageRoles.User, chatInput));
-
-                // Get the new response:
-                var responses = chatBot.GetResponseAsync();
-                sb.Clear();
-                await foreach (var response in responses)
-                {
-                    if (await OutputChatResponse(response))
-                    {
-                        foreach (var choice in response.Choices)
-                        {
-                            sb.Append(choice.Message.Content);
-                        }
-                    }
-                }
-
-                // Store the streamed response for the chat history
-                promptResponses.Add(sb.ToString());
-
-                // Output the 
-                await Console.Out.WriteLineAsync();
+                await PrintLogo();
+                continue;
             }
+
+            if ("exit".Equals(chatInput, StringComparison.OrdinalIgnoreCase))
+            {
+                break;
+            }
+
+            if (chatInput.StartsWith("!instruction "))
+            {
+
+                // add instruction:
+                chatBot.AddInstruction(new ChatMessage(StaticValues.ChatMessageRoles.User,
+                    chatInput.Substring(13)));
+                await Console.Out.WriteLineAsync($"Instructions added: {chatInput.Substring(13)}");
+                continue;
+            }
+
+
+            for (int i = 0; i < prompts.Count; i++)
+            {
+                await chatBot.AddMessage(new(StaticValues.ChatMessageRoles.User, prompts[i]));
+                await chatBot.AddMessage(new(StaticValues.ChatMessageRoles.Assistant, promptResponses[i]));
+            }
+
+
+            // If there's embedded context provided, inject it after the existing chat history, and before the new prompt
+            if (documents.Count > 0)
+            {
+                // Search for the closest few documents and add those if they aren't used yet
+                var closestDocuments =
+                    Document.FindMostSimilarDocuments(documents, await openAILogic.GetEmbeddingForPrompt(chatInput), gptParameters.ClosestMatchLimit);
+                if (closestDocuments != null)
+                {
+                    foreach (var closestDocument in closestDocuments)
+                    {
+                        await chatBot.AddMessage(new(StaticValues.ChatMessageRoles.User,
+                                $"Embedding context for the next prompt: {closestDocument.Text}"));
+                    }
+                }
+            }
+
+            prompts.Add(chatInput);
+            await chatBot.AddMessage(new(StaticValues.ChatMessageRoles.User, chatInput));
+
+            // Get the new response:
+            var responses = chatBot.GetResponseAsync();
+            sb.Clear();
+            await foreach (var response in responses)
+            {
+                if (await OutputChatResponse(response))
+                {
+                    foreach (var choice in response.Choices)
+                    {
+                        sb.Append(choice.Message.Content);
+                    }
+                }
+            }
+
+            // Store the streamed response for the chat history
+            promptResponses.Add(sb.ToString());
+
+            // Output the 
+            await Console.Out.WriteLineAsync();
+
         } while (true);
+    }
+
+    private static int GetRandomLogo()
+    {
+        var fits = Logos.Where(l => l.Width >= Console.LargestWindowWidth).ToList();
+        return Random.Next(Logos.Count);
     }
 
     public static async Task<List<Document>> ReadEmbedFilesAsync(GPTParameters parameters)
     {
-        List<Document> documents = new ();
+        List<Document> documents = new();
         if (parameters.EmbedFilenames is { Length: > 0 })
         {
             foreach (var embedFile in parameters.EmbedFilenames)
@@ -392,7 +503,7 @@ class Program
         });
 
         services.AddScoped<DiscordSocketClient>();
-        
+
         services.AddSingleton<DiscordBot>();
         services.AddSingleton(_ => gptParameters);
     }
