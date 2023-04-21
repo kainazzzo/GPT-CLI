@@ -1,4 +1,5 @@
-﻿using System.CommandLine;
+﻿using System.Collections.Concurrent;
+using System.CommandLine;
 using System.CommandLine.Builder;
 using System.CommandLine.Parsing;
 using System.Text;
@@ -144,6 +145,7 @@ class Program
             ConfigureServices(services, binder, mode);
 
             await using var serviceProvider = services.BuildServiceProvider();
+            
 
             // get a OpenAILogic instance
             var openAILogic = serviceProvider.GetService<OpenAILogic>();
@@ -387,18 +389,18 @@ class Program
             settings.BaseDomain = gptParameters.BaseDomain;
         });
         services.AddSingleton<OpenAILogic>();
-        services.AddSingleton(_ =>
-        {
-            var config = new DiscordSocketConfig
-            {
-                GatewayIntents = GatewayIntents.Guilds | GatewayIntents.GuildMessages | GatewayIntents.GuildMembers | 
-                                 GatewayIntents.MessageContent | GatewayIntents.DirectMessages | GatewayIntents.DirectMessageReactions | 
-                                 GatewayIntents.GuildMessageReactions | GatewayIntents.GuildEmojis,
-                MessageCacheSize = 100
-            };
 
-            return new DiscordSocketClient(config);
+        services.AddSingleton(_ => new DiscordSocketConfig
+        {
+            GatewayIntents = GatewayIntents.Guilds | GatewayIntents.GuildMessages | GatewayIntents.GuildMembers |
+                             GatewayIntents.MessageContent | GatewayIntents.DirectMessages |
+                             GatewayIntents.DirectMessageReactions |
+                             GatewayIntents.GuildMessageReactions | GatewayIntents.GuildEmojis,
+            MessageCacheSize = 10
         });
+
+        services.AddScoped<DiscordSocketClient>();
+        
         services.AddSingleton<DiscordBot>();
         services.AddSingleton(_ => gptParameters);
 
@@ -445,61 +447,4 @@ class Program
     }
 
     public static IConfigurationRoot Configuration { get; set; }
-
-    private static bool VerifySignature(string publicKey, string signature, string timestamp, string body)
-    {
-        byte[] publicKeyBytes = StringToByteArray(publicKey);
-        byte[] signatureBytes = StringToByteArray(signature);
-        byte[] timestampBytes = Encoding.UTF8.GetBytes(timestamp);
-        byte[] bodyBytes = Encoding.UTF8.GetBytes(body);
-
-        var pubKeyParam = new Ed25519PublicKeyParameters(publicKeyBytes, 0);
-        var verifier = SignerUtilities.GetSigner("Ed25519");
-
-        verifier.Init(false, pubKeyParam);
-
-        byte[] combinedBytes = new byte[timestampBytes.Length + bodyBytes.Length];
-        Buffer.BlockCopy(timestampBytes, 0, combinedBytes, 0, timestampBytes.Length);
-        Buffer.BlockCopy(bodyBytes, 0, combinedBytes, timestampBytes.Length, bodyBytes.Length);
-
-        verifier.BlockUpdate(combinedBytes, 0, combinedBytes.Length);
-
-        return verifier.VerifySignature(signatureBytes);
-
-        
-    }
-    private static byte[] StringToByteArray(string hex)
-    {
-        int length = hex.Length;
-        byte[] bytes = new byte[length / 2];
-        for (int i = 0; i < length; i += 2)
-        {
-            bytes[i / 2] = Convert.ToByte(hex.Substring(i, 2), 16);
-        }
-        return bytes;
-    }
-    
-
-    public class InteractionPayload
-    {
-        public string ApplicationId { get; set; }
-        public string Id { get; set; }
-        public string Token { get; set; }
-        public int Type { get; set; }
-        public InteractionUser User { get; set; }
-        public int Version { get; set; }
-    }
-
-    public class InteractionUser
-    {
-        public string Avatar { get; set; }
-        public object AvatarDecoration { get; set; }
-        public string Discriminator { get; set; }
-        public object DisplayName { get; set; }
-        public object GlobalName { get; set; }
-        public string Id { get; set; }
-        public int PublicFlags { get; set; }
-        public string Username { get; set; }
-    }
-
 }

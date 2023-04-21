@@ -9,7 +9,6 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 using OpenAI.GPT3.ObjectModels;
 using OpenAI.GPT3.ObjectModels.RequestModels;
-using Org.BouncyCastle.Asn1.X509;
 
 namespace GPT.CLI.Chat.Discord;
 
@@ -34,11 +33,13 @@ public class DiscordBot : IHostedService
     }
 
 
+    
     private readonly DiscordSocketClient _client;
     private readonly IConfiguration _configuration;
     private readonly OpenAILogic _openAILogic;
     private readonly GPTParameters _defaultParameters;
     private readonly ConcurrentDictionary<ulong, ChannelState> _channelBots = new();
+
 
     public DiscordBot(DiscordSocketClient client, IConfiguration configuration, OpenAILogic openAILogic, GPTParameters defaultParameters)
     {
@@ -63,6 +64,7 @@ public class DiscordBot : IHostedService
         // Load state from discordState.json
         await LoadState();
 
+        // Login and start
         await _client.LoginAsync(TokenType.Bot, token);
         await _client.StartAsync();
 
@@ -73,15 +75,7 @@ public class DiscordBot : IHostedService
         
 
         // Message receiver is going to run in parallel
-        _client.MessageReceived += message =>
-        {
-#pragma warning disable CS4014
-            return Task.Run(async () =>
-#pragma warning restore CS4014
-            {
-                await HandleMessageReceivedAsync(message);
-            }, cancellationToken);
-        };
+        _client.MessageReceived += HandleMessageReceivedAsync;
 
         _client.MessageUpdated += async (oldMessage, newMessage, channel) =>
         {
@@ -96,23 +90,15 @@ public class DiscordBot : IHostedService
 
 
 
-        _client.Ready += () =>
+        _client.Ready += async () =>
         {
-            Console.WriteLine("Client is ready!");
-            return Task.CompletedTask;
+            await Console.Out.WriteLineAsync("Client is ready!");
         };
 
-        _client.MessageCommandExecuted += (command) =>
+        _client.MessageCommandExecuted += async (command) =>
         {
-            Console.WriteLine($"Command {command.CommandName} executed with result {command.Data.Message.Content}");
-            return Task.CompletedTask;
+            await Console.Out.WriteLineAsync($"Command {command.CommandName} executed with result {command.Data.Message.Content}");
         };
-    }
-
-    private async Task AddStandardReactions(IMessage message)
-    {
-        await message.AddReactionAsync(new Emoji("📌"));
-        await message.AddReactionAsync(new Emoji("🔄"));
     }
 
     private async Task HandleReactionAsync(Cacheable<IUserMessage, ulong> userMessage, Cacheable<IMessageChannel, ulong> messageChannel, SocketReaction reaction)
@@ -125,6 +111,7 @@ public class DiscordBot : IHostedService
         var message = await userMessage.GetOrDownloadAsync();
         var channel = await messageChannel.GetOrDownloadAsync();
 
+
         switch (reaction.Emote.Name)
         {
             case "📌":
@@ -135,28 +122,30 @@ public class DiscordBot : IHostedService
                     var chatBot = channelState.Chat;
                     chatBot.AddInstruction(new ChatMessage(StaticValues.ChatMessageRoles.User, message.Content));
 
+
                     using var typingState = channel.EnterTypingState();
                     await message.RemoveReactionAsync(reaction.Emote, reaction.UserId);
                     await message.ReplyAsync("Instruction added.");
-
-                    Console.WriteLine(
-                        $"{reaction.User.Value.Username} reacted with an arrow up. Message promoted to instruction: {message.Content}");
                 }
+
                 break;
             }
             case "🔄":
             {
-                // remove the emoji
-                await message.RemoveReactionAsync(reaction.Emote, reaction.UserId);
+                // If the message is from the bot, ignore it. These aren't prompts.
+                if (message.Author.Id == _client.CurrentUser.Id)
+                {
+                    return;
+                }
 
-                await message.ReplyAsync("Using as a prompt.");
+                // remove the emoji
+                await message.RemoveReactionAsync(reaction.Emote, reaction.User.Value);
 
                 // Replay the message as a new message
-#pragma warning disable CS4014
-                Task.Run(async () => await HandleMessageReceivedAsync(message, reaction.Emote));
-#pragma warning restore CS4014
+                await HandleMessageReceivedAsync(message as SocketMessage);
                 break;
             }
+
         }
     }
 
@@ -222,7 +211,6 @@ public class DiscordBot : IHostedService
         try
         {
             var str = await new StreamReader(stream).ReadToEndAsync();
-            await Console.Out.WriteLineAsync($"State read for {channelId}: {str}");
             // Deserialize channelState from stream
             var channelState = JsonSerializer.Deserialize<ChannelState>(str);
 
@@ -252,18 +240,16 @@ public class DiscordBot : IHostedService
         await Console.Out.WriteLineAsync(log.ToString());
     }
 
-    private async Task HandleMessageReceivedAsync(IMessage message, IEmote emote = null)
+    private async Task HandleMessageReceivedAsync(SocketMessage message)
     {
-        if (message.Author.Id == _client.CurrentUser.Id && emote == null)
+        if (message == null || message.Author.Id == _client.CurrentUser.Id)
             return;
 
         // Handle the received message here
         // ...
-        if (!_channelBots.TryGetValue(message.Channel.Id, out var channel))
-        {
-            channel = InitializeChannel(message.Channel.Id);
-        }
-        else if (channel.Chat.State.PrimeDirectives.Count != _defaultPrimeDirective.Count || channel.Chat.State.PrimeDirectives[0].Content != _defaultPrimeDirective[0].Content)
+        var channel = _channelBots.GetOrAdd(message.Channel.Id, InitializeChannel);
+       
+        if (channel.Chat.State.PrimeDirectives.Count != _defaultPrimeDirective.Count || channel.Chat.State.PrimeDirectives[0].Content != _defaultPrimeDirective[0].Content)
         {
             channel.Chat.State.PrimeDirectives = PrimeDirective.ToList();
         }
@@ -274,74 +260,58 @@ public class DiscordBot : IHostedService
         if (message.Content.StartsWith("!ignore"))
             return;
 
-        await message.AddReactionAsync(new Emoji("🤔"));
-
-        await AddStandardReactions(message);
 
         // Add this message as a chat log
         await channel.Chat.AddMessage(new ChatMessage(StaticValues.ChatMessageRoles.User, $"<{message.Author.Username}> {message.Content}"));
 
         if (!channel.Options.Muted)
         {
-            try
+            using var typingState = message.Channel.EnterTypingState();
+            // Get the response from the bot
+            var responses = channel.Chat.GetResponseAsync();
+            // Add the response as a chat 
+            
+            var sb = new StringBuilder();
+            // Send the response to the channel
+            await foreach (var response in responses)
             {
-                
-                // Get the response from the bot
-                var responses = channel.Chat.GetResponseAsync();
-                // Add the response as a chat 
-                
-                using var typingState = message.Channel.EnterTypingState();
-
-                var sb = new StringBuilder();
-                // Send the response to the channel
-                await foreach (var response in responses)
+                if (response.Successful)
                 {
-                    if (response.Successful)
+                    var content = response.Choices.FirstOrDefault()?.Message.Content;
+                    if (content is not null)
                     {
-                        var content = response?.Choices?.FirstOrDefault()?.Message.Content;
-                        if (content is not null)
-                        {
-                            sb.Append(content);
-                        }
-                    }
-                    else
-                    {
-                        await Console.Out.WriteLineAsync(
-                            $"Error code {response.Error?.Code}: {response.Error?.Message}");
+                        sb.Append(content);
                     }
                 }
-
-                int chunkSize = 2000;
-                int currentPosition = 0;
-
-                while (currentPosition < sb.Length)
+                else
                 {
-                    var size = Math.Min(chunkSize, sb.Length - currentPosition);
-                    var chunk = sb.ToString(currentPosition, size);
-                    currentPosition += size;
-
-                    var responseMessage = new ChatMessage(StaticValues.ChatMessageRoles.Assistant, chunk);
-
-                    await channel.Chat.AddMessage(responseMessage);
-                    // Convert message to SocketMessage
-                    IMessage newMessage;
-
-                    if (message is IUserMessage userMessage)
-                    {
-                        newMessage = await userMessage.ReplyAsync(responseMessage.Content);
-                    }
-                    else
-                    {
-
-                        newMessage = await message.Channel.SendMessageAsync(responseMessage.Content);
-                    }
-
-                    await AddStandardReactions(newMessage);
+                    await Console.Out.WriteLineAsync(
+                        $"Error code {response.Error?.Code}: {response.Error?.Message}");
                 }
             }
-            finally
+
+            int chunkSize = 2000;
+            int currentPosition = 0;
+
+            while (currentPosition < sb.Length)
             {
-                await message.RemoveReactionAsync(new Emoji("🤔"), _client.CurrentUser);
+                var size = Math.Min(chunkSize, sb.Length - currentPosition);
+                var chunk = sb.ToString(currentPosition, size);
+                currentPosition += size;
+
+                var responseMessage = new ChatMessage(StaticValues.ChatMessageRoles.Assistant, chunk);
+
+                await channel.Chat.AddMessage(responseMessage);
+                // Convert message to SocketMessage
+
+                if (message is IUserMessage userMessage)
+                {
+                    _ = await userMessage.ReplyAsync(responseMessage.Content);
+                }
+                else
+                {
+                    _ = await message.Channel.SendMessageAsync(responseMessage.Content);
+                }
             }
         }
 
@@ -354,7 +324,7 @@ public class DiscordBot : IHostedService
         (StaticValues.ChatMessageRoles.System,
             "This is the Prime Directive: This is a chat bot running in [GPT-CLI](https://github.com/kainazzzo/GPT-CLI). Answer questions and" +
             " provide responses in Discord message formatting. Encourage users to add instructions with /gptcli or by using the :up_arrow:" +
-            " emoji reaction on any message. Instructions are like 'sticky' chat messages that provide upfront context to the bot.")
+            " emoji reaction on any message. Instructions are like 'sticky' chat messages that provide upfront context to the bot. The the 📌 emoji reaction is for pinning a message to instructions. The 🔄 emoji reaction is for replaying a message as a new prompt.")
     };
 
     private IEnumerable<ChatMessage> PrimeDirective => _defaultPrimeDirective;
