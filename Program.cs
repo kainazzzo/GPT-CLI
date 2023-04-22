@@ -31,7 +31,7 @@ class Program
 
         // Add the rest of the available fields as command line parameters
         var modelOption = new Option<string>("--model", () => Models.ChatGpt3_5Turbo, "The model ID to use.");
-        var maxTokensOption = new Option<int>("--max-tokens", () => 1000, "The maximum number of tokens to generate in the completion.");
+        var maxTokensOption = new Option<int>("--max-tokens", () => 1500, "The maximum number of tokens to generate in the completion.");
         var temperatureOption = new Option<double>("--temperature", "The sampling temperature to use, between 0 and 2");
         var topPOption = new Option<double>("--top-p", "The value for nucleus sampling");
         var nOption = new Option<int>("--n", () => 1, "The number of completions to generate for each prompt.");
@@ -45,13 +45,13 @@ class Program
         var embedCommand = new Command("embed", "Create an embedding for data redirected via STDIN.");
         var discordCommand = new Command("discord", "Starts the CLI as a Discord bot that receives messages from all channels on your server.");
         var botTokenOption = new Option<string>("--bot-token", "The token for your Discord bot.");
-        var maxChatHistoryLengthOption = new Option<uint>("--max-chat-history-length", () => 1024, "The maximum message length to keep in chat history (chat & discord modes).");
+        var maxChatHistoryLengthOption = new Option<uint>("--max-chat-history-length", () => 2048, "The maximum message length to keep in chat history (chat & discord modes).");
 
         var chunkSizeOption = new Option<int>("--chunk-size", () => 1024,
             "The size to chunk down text into embeddable documents.");
         var embedFileOption = new Option<string[]>("--file", "Name of a file from which to load previously saved embeddings. Multiple files allowed.")
         { AllowMultipleArgumentsPerToken = true, Arity = ArgumentArity.OneOrMore };
-        var embedDirectoryOption = new Option<string[]>("--directory",
+        var embedDirectoryOption = new Option<string[]>("--directory", () => new[] { "embeds" },
             "Name of a directory from which to load previously saved embeddings. Multiple directories allowed.")
         {
             AllowMultipleArgumentsPerToken = true,
@@ -70,6 +70,7 @@ class Program
         });
 
         embedCommand.AddOption(chunkSizeOption);
+        chatCommand.AddOption(chunkSizeOption);
 
         // Create a command and add the options
         var rootCommand = new RootCommand("GPT Console Application");
@@ -209,16 +210,6 @@ class Program
     private static int _lastLogo = 0;
     private static readonly List<(string Logo, int Width)> Logos = new()
     {
-        new (@"
-________/\\\\\\\\\__/\\\__________________________________________/\\\\\\\\\\\\__/\\\\\\\\\\\\\____/\\\\\\\\\\\\\\\__________________/\\\\\\\\\__/\\\______________/\\\\\\\\\\\_        
- _____/\\\////////__\/\\\________________________________________/\\\//////////__\/\\\/////////\\\_\///////\\\/////________________/\\\////////__\/\\\_____________\/////\\\///__       
-  ___/\\\/___________\/\\\____________________________/\\\_______/\\\_____________\/\\\_______\/\\\_______\/\\\___________________/\\\/___________\/\\\_________________\/\\\_____      
-   __/\\\_____________\/\\\__________/\\\\\\\\\_____/\\\\\\\\\\\_\/\\\____/\\\\\\\_\/\\\\\\\\\\\\\/________\/\\\__________________/\\\_____________\/\\\_________________\/\\\_____     
-    _\/\\\_____________\/\\\\\\\\\\__\////////\\\___\////\\\////__\/\\\___\/////\\\_\/\\\/////////__________\/\\\_________________\/\\\_____________\/\\\_________________\/\\\_____    
-     _\//\\\____________\/\\\/////\\\___/\\\\\\\\\\_____\/\\\______\/\\\_______\/\\\_\/\\\___________________\/\\\_________________\//\\\____________\/\\\_________________\/\\\_____   
-      __\///\\\__________\/\\\___\/\\\__/\\\/////\\\_____\/\\\_/\\__\/\\\_______\/\\\_\/\\\___________________\/\\\__________________\///\\\__________\/\\\_________________\/\\\_____  
-       ____\////\\\\\\\\\_\/\\\___\/\\\_\//\\\\\\\\/\\____\//\\\\\___\//\\\\\\\\\\\\/__\/\\\___________________\/\\\____________________\////\\\\\\\\\_\/\\\\\\\\\\\\\\\__/\\\\\\\\\\\_ 
-        _______\/////////__\///____\///___\////////\//______\/////_____\////////////____\///____________________\///________________________\/////////__\///////////////__\///////////__", 185),
         new(@"
    ________          __  __________  ______   ________    ____
   / ____/ /_  ____ _/ /_/ ____/ __ \/_  __/  / ____/ /   /  _/
@@ -353,21 +344,45 @@ ________/\\\\\\\\\__/\\\__________________________________________/\\\\\\\\\\\\_
 
             if (chatInput.StartsWith("!instruction "))
             {
-
                 // add instruction:
                 chatBot.AddInstruction(new ChatMessage(StaticValues.ChatMessageRoles.User,
                     chatInput.Substring(13)));
                 await Console.Out.WriteLineAsync($"Instructions added: {chatInput.Substring(13)}");
                 continue;
             }
+            if (chatInput.StartsWith("!instructions"))
+            {
+                await Console.Out.WriteLineAsync($"My instructions are:");
+                await Console.Out.WriteLineAsync(chatBot.InstructionStr);
+                continue;
+            }
 
+            if (chatInput.StartsWith("!embed"))
+            {
+                await Console.Out.WriteLineAsync($"Paste in text to embed. CTRL-Z -> Enter when finished: ");
+                // get stream for Console.In and read until EOF
+                var input = await Console.In.ReadToEndAsync();
+                using var ms = new MemoryStream(Encoding.UTF8.GetBytes(input));
+
+                var embedding = await Document.ChunkStreamToDocumentsAsync(ms, 2048);
+                Directory.CreateDirectory("embeds");
+                Directory.CreateDirectory("embeds/console/");
+
+                var embeddings = await openAILogic.CreateEmbeddings(embedding);
+                var filePath = $"embeds/console/{Guid.NewGuid()}.json";
+                await using var outputStream = File.Create(filePath);
+                await JsonSerializer.SerializeAsync(outputStream, embedding);
+                await Console.Out.WriteLineAsync($"Embedding saved to {filePath}");
+
+                documents.AddRange(embedding);
+                continue;
+            }
 
             for (int i = 0; i < prompts.Count; i++)
             {
-                await chatBot.AddMessage(new(StaticValues.ChatMessageRoles.User, prompts[i]));
-                await chatBot.AddMessage(new(StaticValues.ChatMessageRoles.Assistant, promptResponses[i]));
+                chatBot.AddMessage(new(StaticValues.ChatMessageRoles.User, prompts[i]));
+                chatBot.AddMessage(new(StaticValues.ChatMessageRoles.Assistant, promptResponses[i]));
             }
-
 
             // If there's embedded context provided, inject it after the existing chat history, and before the new prompt
             if (documents.Count > 0)
@@ -377,16 +392,18 @@ ________/\\\\\\\\\__/\\\__________________________________________/\\\\\\\\\\\\_
                     Document.FindMostSimilarDocuments(documents, await openAILogic.GetEmbeddingForPrompt(chatInput), gptParameters.ClosestMatchLimit);
                 if (closestDocuments != null)
                 {
+                    chatBot.AddMessage(new(StaticValues.ChatMessageRoles.User,
+                        $"Embedding context for the next {closestDocuments.Count} message(s). Please use this information to answer the next prompt"));
                     foreach (var closestDocument in closestDocuments)
                     {
-                        await chatBot.AddMessage(new(StaticValues.ChatMessageRoles.User,
-                                $"Embedding context for the next prompt: {closestDocument.Text}"));
+                        chatBot.AddMessage(new(StaticValues.ChatMessageRoles.User,
+                                $"---context---\r\n{closestDocument.Text}\r\n--end context---"));
                     }
                 }
             }
 
             prompts.Add(chatInput);
-            await chatBot.AddMessage(new(StaticValues.ChatMessageRoles.User, chatInput));
+            chatBot.AddMessage(new(StaticValues.ChatMessageRoles.User, chatInput));
 
             // Get the new response:
             var responses = chatBot.GetResponseAsync();
@@ -425,8 +442,10 @@ ________/\\\\\\\\\__/\\\__________________________________________/\\\\\\\\\\\\_
             foreach (var embedFile in parameters.EmbedFilenames)
             {
                 await using var fileStream = File.OpenRead(embedFile);
+                var loaded = Document.LoadEmbeddings(fileStream);
+                documents.AddRange(loaded);
 
-                documents.AddRange(Document.LoadEmbeddings(fileStream));
+                await Console.Out.WriteLineAsync($"Loaded {loaded.Count} embeddings from {embedFile}");
             }
         }
 
@@ -441,12 +460,18 @@ ________/\\\\\\\\\__/\\\__________________________________________/\\\\\\\\\\\\_
         {
             foreach (var embedDirectory in parameters.EmbedDirectoryNames)
             {
-                var files = Directory.EnumerateFiles(embedDirectory);
+                if (!Directory.Exists(embedDirectory))
+                {
+                    continue;
+                }
+
+                var files = Directory.EnumerateFiles(embedDirectory, "*.json", SearchOption.AllDirectories);
                 foreach (var file in files)
                 {
                     await using var fileStream = File.OpenRead(file);
-
-                    documents.AddRange(Document.LoadEmbeddings(fileStream));
+                    var loaded = Document.LoadEmbeddings(fileStream);
+                    documents.AddRange(loaded);
+                    await Console.Out.WriteLineAsync($"Loaded {loaded.Count} embeddings from {embedDirectory}{Path.DirectorySeparatorChar}{file}");
                 }
             }
         }

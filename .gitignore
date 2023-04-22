@@ -351,3 +351,4 @@ MigrationBackup/
 /appSettings.json
 /updateApplicationCommand.sh
 /channels
+/embeds/console

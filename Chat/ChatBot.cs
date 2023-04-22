@@ -47,7 +47,7 @@ public class ChatBot
     public string InstructionStr => State.Instructions.Count > 0 ? string.Join("\n", State.Instructions.Select(x => x.Content)) : string.Empty;
 
 
-    public async Task AddMessage(ChatMessage message)
+    public void AddMessage(ChatMessage message)
     {
         while (State.Messages.Count > 0 && State.MessageLength > State.Parameters.MaxChatHistoryLength)
         {

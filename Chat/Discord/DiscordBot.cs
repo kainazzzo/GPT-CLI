@@ -262,7 +262,7 @@ public class DiscordBot : IHostedService
             return;
 
         // Add this message as a chat log
-        await channel.Chat.AddMessage(new ChatMessage(StaticValues.ChatMessageRoles.User, $"<{message.Author.Username}> {message.Content}"));
+        channel.Chat.AddMessage(new ChatMessage(StaticValues.ChatMessageRoles.User, $"<{message.Author.Username}> {message.Content}"));
 
         if (!channel.Options.Muted)
         {
@@ -301,7 +301,7 @@ public class DiscordBot : IHostedService
 
                 var responseMessage = new ChatMessage(StaticValues.ChatMessageRoles.Assistant, chunk);
 
-                await channel.Chat.AddMessage(responseMessage);
+                channel.Chat.AddMessage(responseMessage);
                 // Convert message to SocketMessage
 
                 if (message is IUserMessage userMessage)
@@ -332,7 +332,9 @@ public class DiscordBot : IHostedService
         (StaticValues.ChatMessageRoles.System,
             "This is the Prime Directive: This is a chat bot running in [GPT-CLI](https://github.com/kainazzzo/GPT-CLI). Answer questions and" +
             " provide responses in Discord message formatting. Encourage users to add instructions with /gptcli or by using the :up_arrow:" +
-            " emoji reaction on any message. Instructions are like 'sticky' chat messages that provide upfront context to the bot. The the 📌 emoji reaction is for pinning a message to instructions. The 🔄 emoji reaction is for replaying a message as a new prompt.")
+            " emoji reaction on any message. Instructions are like 'sticky' chat messages that provide upfront context to the bot. The the 📌 emoji reaction is for pinning a message to instructions. The 🔄 emoji reaction is for replaying a message as a new prompt."),
+        new ChatMessage(StaticValues.ChatMessageRoles.Assistant,
+            "Got it. My name is GPT-CLI. I'm a chat bot running on discord that uses [GPT-CLI](https://github.com/kainazzzo/GPT-CLI). I'm still learning, so please be patient with me. I'm also still in development, so please report any bugs you find. You can find the source code on github here: https://github.com/kainazzzo/GPT-CLI")
     };
 
     private IEnumerable<ChatMessage> PrimeDirective => _defaultPrimeDirective;
