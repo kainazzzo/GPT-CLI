@@ -409,16 +409,13 @@ class Program
             {
                 // Search for the closest few documents and add those if they aren't used yet
                 var closestDocuments =
-                    Document.FindMostSimilarDocuments(documents, await openAILogic.GetEmbeddingForPrompt(chatInput), gptParameters.ClosestMatchLimit);
-                if (closestDocuments != null)
+                    Document.FindMostSimilarDocuments(documents, await openAILogic.GetEmbeddingForPrompt(chatInput), gptParameters.ClosestMatchLimit).ToList();
+                chatBot.AddMessage(new(StaticValues.ChatMessageRoles.User,
+                    $"Embedding context for the next {closestDocuments.Count} message(s). Please use this information to answer the next prompt"));
+                foreach (var closestDocument in closestDocuments)
                 {
                     chatBot.AddMessage(new(StaticValues.ChatMessageRoles.User,
-                        $"Embedding context for the next {closestDocuments.Count} message(s). Please use this information to answer the next prompt"));
-                    foreach (var closestDocument in closestDocuments)
-                    {
-                        chatBot.AddMessage(new(StaticValues.ChatMessageRoles.User,
-                                $"---context---\r\n{closestDocument.Text}\r\n--end context---"));
-                    }
+                        $"---context---\r\n{closestDocument.Document.Text}\r\n--end context---"));
                 }
             }
 

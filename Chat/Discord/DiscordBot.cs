@@ -283,6 +283,25 @@ public class DiscordBot : IHostedService
             return;
         }
 
+        
+
+        if (_documents.GetOrAdd(message.Channel.Id, new List<Document>()) is {Count: > 0} documents)
+        {
+            // Search for the closest few documents and add those if they aren't used yet
+            var closestDocuments =
+                Document.FindMostSimilarDocuments(documents, await _openAILogic.GetEmbeddingForPrompt(message.Content), channel.Chat.State.Parameters.ClosestMatchLimit).ToList();
+            if (closestDocuments.Any(cd => cd.Similarity > 0.80))
+            {
+                channel.Chat.AddMessage(new(StaticValues.ChatMessageRoles.User,
+                    $"Context for the next {closestDocuments.Count} message(s). Use this to answer:"));
+                foreach (var closestDocument in closestDocuments)
+                {
+                    channel.Chat.AddMessage(new(StaticValues.ChatMessageRoles.User,
+                        $"---context---\r\n{closestDocument.Document.Text}\r\n--end context---"));
+                }
+            }
+        }
+
         // Add this message as a chat log
         channel.Chat.AddMessage(new ChatMessage(StaticValues.ChatMessageRoles.User, $"<{message.Author.Username}> {message.Content}"));
 
@@ -355,9 +374,7 @@ public class DiscordBot : IHostedService
         (StaticValues.ChatMessageRoles.System,
             "This is the Prime Directive: This is a chat bot running in [GPT-CLI](https://github.com/kainazzzo/GPT-CLI). Answer questions and" +
             " provide responses in Discord message formatting. Encourage users to add instructions with /gptcli or by using the :up_arrow:" +
-            " emoji reaction on any message. Instructions are like 'sticky' chat messages that provide upfront context to the bot. The the 📌 emoji reaction is for pinning a message to instructions. The 🔄 emoji reaction is for replaying a message as a new prompt."),
-        new ChatMessage(StaticValues.ChatMessageRoles.Assistant,
-            "Got it. My name is GPT-CLI. I'm a chat bot running on discord that uses [GPT-CLI](https://github.com/kainazzzo/GPT-CLI). I'm still learning, so please be patient with me. I'm also still in development, so please report any bugs you find. You can find the source code on github here: https://github.com/kainazzzo/GPT-CLI")
+            " emoji reaction on any message. Instructions are like 'sticky' chat messages that provide upfront context to the bot. The the 📌 emoji reaction is for pinning a message to instructions. The 🔄 emoji reaction is for replaying a message as a new prompt.")
     };
 
     private IEnumerable<ChatMessage> PrimeDirective => _defaultPrimeDirective;

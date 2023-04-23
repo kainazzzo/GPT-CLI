@@ -24,7 +24,7 @@ namespace GPT.CLI.Embeddings
             }
         }
 
-        public static List<Document> FindMostSimilarDocuments(List<Document> documents, List<double> queryEmbedding, int numResults)
+        public static IEnumerable<(Document Document, double Similarity)> FindMostSimilarDocuments(List<Document> documents, List<double> queryEmbedding, int numResults)
         {
             var similarities = new List<(Document Document, double Similarity)>();
 
@@ -39,7 +39,7 @@ namespace GPT.CLI.Embeddings
             similarities.Sort((x, y) => y.Similarity.CompareTo(x.Similarity));
             
             // Return the top numResults
-            return similarities.Take(numResults).Select(x => x.Document).ToList();
+            return similarities.Take(numResults);
         }
 
         

@@ -1,4 +1,5 @@
 ﻿using System.Text.Json.Serialization;
+using Discord;
 using OpenAI.GPT3.ObjectModels;
 using OpenAI.GPT3.ObjectModels.RequestModels;
 using OpenAI.GPT3.ObjectModels.ResponseModels;
@@ -75,6 +76,9 @@ public class ChatBot
 
     public async IAsyncEnumerable<ChatCompletionCreateResponse> GetResponseAsync()
     {
+        //await Console.Out.WriteLineAsync(string.Join("\r\n\r\n",
+        //    State.PrimeDirectives.Concat(State.Instructions).Concat(State.Messages).Select(s => s.Content)));
+
         await foreach (var response in OpenAILogic.CreateChatCompletionAsyncEnumerable(
                            await ParameterMapping.MapCommon(
                                State.Parameters,

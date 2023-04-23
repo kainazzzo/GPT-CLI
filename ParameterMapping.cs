@@ -30,7 +30,7 @@ internal static class ParameterMapping
                     foreach (var closestDocument in closestDocuments)
                     {
                         request.Messages.Add(new(StaticValues.ChatMessageRoles.User,
-                            $"Context for the next message: {closestDocument.Text}"));
+                            $"Context for the next message: {closestDocument.Document.Text}"));
                     }
                 }
             }
