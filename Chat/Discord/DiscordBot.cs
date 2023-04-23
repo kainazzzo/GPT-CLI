@@ -1,4 +1,5 @@
 ﻿using System.Collections.Concurrent;
+using System.Net.Mail;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -155,10 +156,8 @@ public class DiscordBot : IHostedService
                         return;
                 }
 
-                await message.RemoveReactionAsync(reaction.Emote, reaction.User.Value);
                 await SaveEmbed(message);
-                
-                    break;
+                break;
             }
 
         }
@@ -427,6 +426,7 @@ public class DiscordBot : IHostedService
             return;
         }
 
+        
         Directory.CreateDirectory("channels");
         Directory.CreateDirectory($"channels/{message.Channel.Id}");
         Directory.CreateDirectory($"channels/{message.Channel.Id}/embeds/");
@@ -436,14 +436,14 @@ public class DiscordBot : IHostedService
         if (await CreateAndSaveEmbedding(message.Content, $"channels/{message.Channel.Id}/embeds/{message.Id}.embed.json", channelState.Chat.State.Parameters.ChunkSize) is { Count: > 0 } newDocs)
         {
             channelDocs.AddRange(newDocs);
-            if (message is IUserMessage userMessage)
-            {
-                await userMessage.ReplyAsync($"Embed saved as {newDocs.Count} documents.");
-            }
-            else
-            {
-                await message.Channel.SendMessageAsync($"Embed saved as {newDocs.Count} documents.", messageReference: message.Reference);
-            }
+
+
+            using var embedStream = new MemoryStream();
+            await JsonSerializer.SerializeAsync(embedStream, newDocs);
+
+            await message.Channel.SendFileAsync(embedStream, $"{message.Id}.embed.json",
+                $"Message saved as {newDocs.Count} documents.",
+                messageReference: message.Reference);
         }
 
         if (message.Attachments is { Count: > 0 })
