@@ -2,7 +2,7 @@
   "profiles": {
     "GPT-CLI": {
       "commandName": "Project",
-      "commandLineArgs": "chat --model=gpt-4 --max-tokens=4096 --max-chat-history-length=4096",
+      "commandLineArgs": "discord",
       "workingDirectory": "C:\\projects\\GPT-CLI\\"
     }
   }

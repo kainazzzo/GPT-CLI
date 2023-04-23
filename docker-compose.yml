@@ -1,7 +1,9 @@
 version: '3.8'
 
 services:
-  gpt:
-    build: .
+  discord:
+    build:
+        context: .
+        dockerfile: Dockerfile.discord
     volumes:
       - /usr/local/discord/channels:/app/channels

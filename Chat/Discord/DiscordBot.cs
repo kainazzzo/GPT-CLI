@@ -5,6 +5,7 @@ using System.Text.Json.Serialization;
 using System.Threading.Channels;
 using Discord;
 using Discord.WebSocket;
+using GPT.CLI.Embeddings;
 using Mapster;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
@@ -40,6 +41,7 @@ public class DiscordBot : IHostedService
     private readonly OpenAILogic _openAILogic;
     private readonly GPTParameters _defaultParameters;
     private readonly ConcurrentDictionary<ulong, ChannelState> _channelBots = new();
+    private readonly ConcurrentDictionary<ulong, List<Document>> _documents = new();
 
 
     public DiscordBot(DiscordSocketClient client, IConfiguration configuration, OpenAILogic openAILogic, GPTParameters defaultParameters)
@@ -64,6 +66,9 @@ public class DiscordBot : IHostedService
         
         // Load state from discordState.json
         await LoadState();
+
+        // Load embeddings
+        await LoadEmbeddings();
 
         // Login and start
         await _client.LoginAsync(TokenType.Bot, token);
@@ -139,16 +144,26 @@ public class DiscordBot : IHostedService
                     return;
                 }
 
-                // remove the emoji
-                await message.RemoveReactionAsync(reaction.Emote, reaction.User.Value);
-
                 // Replay the message as a new message
                 await HandleMessageReceivedAsync(message as SocketMessage);
                 break;
             }
+            case "💾":
+            {
+                if (message.Author.Id == _client.CurrentUser.Id)
+                {
+                        return;
+                }
+
+                await message.RemoveReactionAsync(reaction.Emote, reaction.User.Value);
+                await SaveEmbed(message);
+                
+                    break;
+            }
 
         }
     }
+
 
     private async Task LoadState()
     {
@@ -261,6 +276,17 @@ public class DiscordBot : IHostedService
         if (message.Content.StartsWith("!ignore"))
             return;
 
+        if (message.Attachments is {Count: > 0})
+        {
+            await message.AddReactionAsync(new Emoji("💾"));
+        }
+
+
+        if (string.IsNullOrWhiteSpace(message.Content))
+        {
+            return;
+        }
+
         // Add this message as a chat log
         channel.Chat.AddMessage(new ChatMessage(StaticValues.ChatMessageRoles.User, $"<{message.Author.Username}> {message.Content}"));
 
@@ -322,7 +348,8 @@ public class DiscordBot : IHostedService
     {
         // pushpin unicode escape: \U0001F4CC
         var builder = new ComponentBuilder()
-            .WithButton("📌Instruct", "instruction");
+            .WithButton("📌Instruct", "instruction")
+            .WithButton("💾Embed", "embed");
         return builder.Build();
     }
 
@@ -372,11 +399,113 @@ public class DiscordBot : IHostedService
                 case "instruction":
                     await HandleInstructionCommand(command);
                     break;
+                case "embed":
+                    await HandleEmbedCommand(command);
+                    break;
             }
 
             await Console.Out.WriteLineAsync(
                 $"Interaction: {arg.Type} {arg.Id} {arg} {arg.Channel.Id} {arg.Channel.Name} {arg.User.Id} {arg.User.Username}");
         }
+    }
+
+    private async Task HandleEmbedCommand(SocketMessageComponent command)
+    {
+        await SaveEmbed(command.Message);
+    }
+
+    private async Task SaveEmbed(IMessage message)
+    {
+        if (message == null)
+        {
+            return;
+        }
+
+        var channelState = _channelBots.GetOrAdd(message.Channel.Id, InitializeChannel);
+        if (!channelState.Options.Enabled)
+        {
+            return;
+        }
+
+        Directory.CreateDirectory("channels");
+        Directory.CreateDirectory($"channels/{message.Channel.Id}");
+        Directory.CreateDirectory($"channels/{message.Channel.Id}/embeds/");
+
+        var channelDocs = _documents.GetOrAdd(message.Channel.Id, new List<Document>());
+
+        if (await CreateAndSaveEmbedding(message.Content, $"channels/{message.Channel.Id}/embeds/{message.Id}.embed.json", channelState.Chat.State.Parameters.ChunkSize) is { Count: > 0 } newDocs)
+        {
+            channelDocs.AddRange(newDocs);
+            if (message is IUserMessage userMessage)
+            {
+                await userMessage.ReplyAsync($"Embed saved as {newDocs.Count} documents.");
+            }
+            else
+            {
+                await message.Channel.SendMessageAsync($"Embed saved as {newDocs.Count} documents.", messageReference: message.Reference);
+            }
+        }
+
+        if (message.Attachments is { Count: > 0 })
+        {
+            foreach (var attachment in message.Attachments)
+            {
+                using var httpClient = new HttpClient();
+                var response = await httpClient.GetAsync(attachment.Url);
+                if (response.IsSuccessStatusCode)
+                {
+                    await using var responseStream = await response.Content.ReadAsStreamAsync();
+                    using var streamReader = new StreamReader(responseStream);
+                    
+
+                    if (await CreateAndSaveEmbedding(await streamReader.ReadToEndAsync(), $"channels/{message.Channel.Id}/embeds/{message.Id}.{attachment.Id}.embed.json", channelState.Chat.State.Parameters.ChunkSize) is { Count: > 0 } attachmentDocs)
+                    {
+                        channelDocs.AddRange(attachmentDocs);
+
+                        using var embedStream = new MemoryStream();
+                        await JsonSerializer.SerializeAsync(embedStream, attachmentDocs);
+
+                        await message.Channel.SendFileAsync(embedStream, $"{attachment.Filename}.embed.json",
+                            $"Attachment {attachment.Filename} saved as {attachmentDocs.Count} documents.", 
+                            messageReference: message.Reference);
+                    }
+                }
+            }
+        }
+    }
+
+    private async Task<List<Document>> CreateAndSaveEmbedding(string strToEmbed, string filename, int chunkSize)
+    {
+        var documents =
+            await Document.ChunkToDocumentsAsync(strToEmbed, chunkSize);
+        if (documents.Count > 0)
+        {
+            var newEmbeds = await _openAILogic.CreateEmbeddings(documents);
+            if (newEmbeds.Successful)
+            {
+                await using var file = File.Create(filename);
+                await JsonSerializer.SerializeAsync(file, documents);
+            }
+        }
+
+        return documents;
+    }
+
+    private async Task LoadEmbeddings()
+    {
+        Directory.CreateDirectory("channels");
+        var files = Directory.GetFiles("channels", "*.embed.json", SearchOption.AllDirectories).ToList();
+        
+        foreach (var file in files)
+        {
+            await using var fileStream = File.OpenRead(file);
+            var documents = await JsonSerializer.DeserializeAsync<List<Document>>(fileStream);
+            var tokens = file.Split("\\/.".ToCharArray());
+            var channelId = ulong.Parse(tokens[1]);
+            var channelDocs = _documents.GetOrAdd(channelId, _ => new List<Document>());
+            channelDocs.AddRange(documents);
+        }
+    
     }
 
     private async Task HandleInstructionCommand(SocketMessageComponent command)
@@ -486,19 +615,6 @@ public class DiscordBot : IHostedService
                         try
                         {
                             await command.RespondAsync($"Chat bot {(muted ? "muted" : "un-muted")}.");
-                        }
-                        catch (Exception ex)
-                        {
-                            await Console.Out.WriteLineAsync(ex.Message);
-                        }
-                    }
-                    break;
-                case "embed":
-                    if (option.Value is string embed)
-                    {
-                        try
-                        {
-                            await command.RespondAsync($"Embed set to {embed}.");
                         }
                         catch (Exception ex)
                         {

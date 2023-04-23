@@ -44,7 +44,7 @@ namespace GPT.CLI.Embeddings
 
         
 
-        public static async Task<List<Document>> ChunkStreamToDocumentsAsync(Stream contentStream, int chunkSize = 512)
+        public static async Task<List<Document>> ChunkToDocumentsAsync(Stream contentStream, int chunkSize)
         {
             var documents = new List<Document>();
 
@@ -58,6 +58,13 @@ namespace GPT.CLI.Embeddings
             
 
             return documents;
+        }
+
+        public static async Task<List<Document>> ChunkToDocumentsAsync(string content, int chunkSize)
+        {
+            using var contentStream = new MemoryStream(Encoding.UTF8.GetBytes(content));
+
+            return await ChunkToDocumentsAsync(contentStream, chunkSize);
         }
     }
 }

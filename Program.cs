@@ -47,11 +47,11 @@ class Program
         var botTokenOption = new Option<string>("--bot-token", "The token for your Discord bot.");
         var maxChatHistoryLengthOption = new Option<uint>("--max-chat-history-length", () => 2048, "The maximum message length to keep in chat history (chat & discord modes).");
 
-        var chunkSizeOption = new Option<int>("--chunk-size", () => 1024,
+        var chunkSizeOption = new Option<int>("--chunk-size", () => 1536,
             "The size to chunk down text into embeddable documents.");
         var embedFileOption = new Option<string[]>("--file", "Name of a file from which to load previously saved embeddings. Multiple files allowed.")
         { AllowMultipleArgumentsPerToken = true, Arity = ArgumentArity.OneOrMore };
-        var embedDirectoryOption = new Option<string[]>("--directory", () => new[] { "embeds" },
+        var embedDirectoryOption = new Option<string[]>("--directory",
             "Name of a directory from which to load previously saved embeddings. Multiple directories allowed.")
         {
             AllowMultipleArgumentsPerToken = true,
@@ -69,38 +69,58 @@ class Program
             }
         });
 
-        embedCommand.AddOption(chunkSizeOption);
-        chatCommand.AddOption(chunkSizeOption);
+       
 
         // Create a command and add the options
         var rootCommand = new RootCommand("GPT Console Application");
 
+        // Global options
         rootCommand.AddGlobalOption(apiKeyOption);
         rootCommand.AddGlobalOption(baseUrlOption);
-        rootCommand.AddOption(promptOption);
         rootCommand.AddGlobalOption(configOption);
         rootCommand.AddGlobalOption(modelOption);
         rootCommand.AddGlobalOption(maxTokensOption);
         rootCommand.AddGlobalOption(temperatureOption);
         rootCommand.AddGlobalOption(topPOption);
-        rootCommand.AddOption(nOption);
-        rootCommand.AddGlobalOption(streamOption);
         rootCommand.AddGlobalOption(stopOption);
         rootCommand.AddGlobalOption(presencePenaltyOption);
         rootCommand.AddGlobalOption(frequencyPenaltyOption);
         rootCommand.AddGlobalOption(logitBiasOption);
         rootCommand.AddGlobalOption(userOption);
-        rootCommand.AddGlobalOption(embedFileOption);
-        rootCommand.AddGlobalOption(embedDirectoryOption);
 
+        // Root command only options (not globally available in all sub commands)
+        rootCommand.AddOption(embedFileOption);
+        rootCommand.AddOption(embedDirectoryOption);
+        rootCommand.AddOption(promptOption);
+        rootCommand.AddOption(nOption);
+        rootCommand.AddOption(streamOption);
         rootCommand.AddOption(matchLimitOption);
 
+        // Embedding command options
+        embedCommand.AddOption(chunkSizeOption);
+
+        // Chat command options
+        chatCommand.AddOption(maxChatHistoryLengthOption);
+        chatCommand.AddOption(chunkSizeOption);
+        chatCommand.AddOption(streamOption);
+
+        chatCommand.AddOption(embedFileOption);
+        chatCommand.AddOption(embedDirectoryOption);
+        chatCommand.AddOption(matchLimitOption);
+
+        // Discord command options
+        discordCommand.AddOption(maxChatHistoryLengthOption);
+        discordCommand.AddOption(chunkSizeOption);
+        discordCommand.AddOption(botTokenOption);
+        discordCommand.AddOption(matchLimitOption);
+
+
+        // Add the sub commands to the root command
         rootCommand.AddCommand(chatCommand);
         rootCommand.AddCommand(embedCommand);
         rootCommand.AddCommand(discordCommand);
-        rootCommand.AddOption(botTokenOption);
-        chatCommand.AddOption(maxChatHistoryLengthOption);
-        discordCommand.AddOption(maxChatHistoryLengthOption);
+        
+
 
 
         var binder = new GPTParametersBinder(
@@ -183,7 +203,7 @@ class Program
     private static async Task HandleEmbedMode(OpenAILogic openAILogic, GPTParameters gptParameters)
     {
         // Create and output embedding
-        var documents = await Document.ChunkStreamToDocumentsAsync(Console.OpenStandardInput(), gptParameters.ChunkSize);
+        var documents = await Document.ChunkToDocumentsAsync(Console.OpenStandardInput(), gptParameters.ChunkSize);
 
         await openAILogic.CreateEmbeddings(documents);
 
@@ -199,7 +219,7 @@ class Program
         var responses = gptParameters.Stream == true
             ? openAILogic.CreateChatCompletionAsyncEnumerable(chatRequest)
             : (await openAILogic.CreateChatCompletionAsync(chatRequest)).ToAsyncEnumerable();
-
+        var v = Models.Gpt_4_32k;
         await foreach (var response in responses)
         {
             await OutputChatResponse(response);
@@ -364,11 +384,11 @@ class Program
                 var input = await Console.In.ReadToEndAsync();
                 using var ms = new MemoryStream(Encoding.UTF8.GetBytes(input));
 
-                var embedding = await Document.ChunkStreamToDocumentsAsync(ms, 2048);
+                var embedding = await Document.ChunkToDocumentsAsync(ms, 2048);
                 Directory.CreateDirectory("embeds");
                 Directory.CreateDirectory("embeds/console/");
 
-                var embeddings = await openAILogic.CreateEmbeddings(embedding);
+                _ = await openAILogic.CreateEmbeddings(embedding);
                 var filePath = $"embeds/console/{Guid.NewGuid()}.json";
                 await using var outputStream = File.Create(filePath);
                 await JsonSerializer.SerializeAsync(outputStream, embedding);
