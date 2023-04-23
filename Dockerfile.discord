@@ -9,4 +9,4 @@ RUN yum install -y libicu
 COPY --from=build /app/publish .
 COPY --from=build /src/appSettings.json .
 ENV MODEL=""
-ENTRYPOINT "./gpt discord --max-chat-history-length=4096 --"
+ENTRYPOINT ./gpt discord --max-chat-history-length=4096 --chunk-size=1536 --max-tokens=4096
