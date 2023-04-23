@@ -209,12 +209,9 @@ public class DiscordBot : IHostedService
         if (_channelBots.TryGetValue(channelId, out var channelState))
         {
             // prepare serializer options
-            var options = new JsonSerializerOptions
-            {
-                WriteIndented = true
-            };
             // Serialize channelState to stream
-            await JsonSerializer.SerializeAsync(stream, channelState, options);
+            await JsonSerializer.SerializeAsync(stream, channelState,
+                new JsonSerializerOptions { WriteIndented = true });
 
             _channelBots[channelId] = channelState;
         }
