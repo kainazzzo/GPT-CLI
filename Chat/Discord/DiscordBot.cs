@@ -133,6 +133,7 @@ public class DiscordBot : IHostedService
                     using var typingState = channel.EnterTypingState();
                     await message.RemoveReactionAsync(reaction.Emote, reaction.UserId);
                     await message.ReplyAsync("Instruction added.");
+                    await SaveCachedChannelState(channel.Id);
                 }
 
                 break;
@@ -529,7 +530,7 @@ public class DiscordBot : IHostedService
         {
             var chatBot = channelState.Chat;
             chatBot.AddInstruction(new ChatMessage(StaticValues.ChatMessageRoles.User, command.Message.Content));
-
+            await SaveCachedChannelState(command.Channel.Id);
 
             using var typingState = command.Channel.EnterTypingState();
             await command.RespondAsync("Instruction added");
@@ -586,7 +587,7 @@ public class DiscordBot : IHostedService
                     if (!string.IsNullOrWhiteSpace(instruction))
                     {
                         chatBot.Chat.AddInstruction(new(StaticValues.ChatMessageRoles.System, instruction));
-
+                        await SaveCachedChannelState(channel.Id);
                         try
                         {
                             await command.RespondAsync("Instruction received!");

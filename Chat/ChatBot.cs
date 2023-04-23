@@ -14,10 +14,10 @@ public class ChatBot
         public GPTParameters Parameters { get; set; }
 
         [JsonPropertyName("messages")]
-        public LinkedList<ChatMessage> Messages { get; } = new();
+        public LinkedList<ChatMessage> Messages { get; set; } = new();
 
         [JsonPropertyName("instructions")] 
-        public readonly List<ChatMessage> Instructions = new();
+        public List<ChatMessage> Instructions { get; set; } = new();
 
         [JsonPropertyName("message-length")]
         public uint MessageLength { get; set; }
