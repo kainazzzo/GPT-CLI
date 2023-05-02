@@ -82,7 +82,13 @@ public class DiscordBot : IHostedService
         
 
         // Message receiver is going to run in parallel
-        _client.MessageReceived += HandleMessageReceivedAsync;
+#pragma warning disable CS4014
+        _client.MessageReceived += (message) =>
+        {
+            HandleMessageReceivedAsync(message);
+            return Task.CompletedTask;
+        };
+#pragma warning restore CS4014
 
         _client.MessageUpdated += async (oldMessage, newMessage, channel) =>
         {
