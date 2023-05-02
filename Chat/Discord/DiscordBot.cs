@@ -85,17 +85,23 @@ public class DiscordBot : IHostedService
 #pragma warning disable CS4014
         _client.MessageReceived += (message) =>
         {
-            HandleMessageReceivedAsync(message);
+            if (message?.Content != null)
+            {
+                HandleMessageReceivedAsync(message);
+            }
+
             return Task.CompletedTask;
         };
 #pragma warning restore CS4014
 
-        _client.MessageUpdated += async (oldMessage, newMessage, channel) =>
+        _client.MessageUpdated += (oldMessage, newMessage, channel) =>
         {
             if (newMessage.Content != null && oldMessage.Value?.Content != newMessage.Content)
             {
-                await HandleMessageReceivedAsync(newMessage);
+                HandleMessageReceivedAsync(newMessage);
             }
+
+            return Task.CompletedTask;
         };
 
         // Handle emoji reactions.
