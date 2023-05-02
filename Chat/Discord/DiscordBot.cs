@@ -127,7 +127,7 @@ public class DiscordBot : IHostedService
                 if (channelState.Options.Enabled)
                 {
                     var chatBot = channelState.Chat;
-                    chatBot.AddInstruction(new ChatMessage(StaticValues.ChatMessageRoles.User, message.Content));
+                    chatBot.AddInstruction(new ChatMessage(StaticValues.ChatMessageRoles.System, message.Content));
 
 
                     using var typingState = channel.EnterTypingState();
@@ -293,11 +293,11 @@ public class DiscordBot : IHostedService
                 Document.FindMostSimilarDocuments(documents, await _openAILogic.GetEmbeddingForPrompt(message.Content), channel.Chat.State.Parameters.ClosestMatchLimit).ToList();
             if (closestDocuments.Any(cd => cd.Similarity > 0.80))
             {
-                channel.Chat.AddMessage(new(StaticValues.ChatMessageRoles.User,
+                channel.Chat.AddMessage(new(StaticValues.ChatMessageRoles.System,
                     $"Context for the next {closestDocuments.Count} message(s). Use this to answer:"));
                 foreach (var closestDocument in closestDocuments)
                 {
-                    channel.Chat.AddMessage(new(StaticValues.ChatMessageRoles.User,
+                    channel.Chat.AddMessage(new(StaticValues.ChatMessageRoles.System,
                         $"---context---\r\n{closestDocument.Document.Text}\r\n--end context---"));
                 }
             }
@@ -529,7 +529,7 @@ public class DiscordBot : IHostedService
         if (channelState.Options.Enabled)
         {
             var chatBot = channelState.Chat;
-            chatBot.AddInstruction(new ChatMessage(StaticValues.ChatMessageRoles.User, command.Message.Content));
+            chatBot.AddInstruction(new ChatMessage(StaticValues.ChatMessageRoles.System, command.Message.Content));
             await SaveCachedChannelState(command.Channel.Id);
 
             using var typingState = command.Channel.EnterTypingState();

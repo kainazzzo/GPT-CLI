@@ -365,7 +365,7 @@ class Program
             if (chatInput.StartsWith("!instruction "))
             {
                 // add instruction:
-                chatBot.AddInstruction(new ChatMessage(StaticValues.ChatMessageRoles.User,
+                chatBot.AddInstruction(new ChatMessage(StaticValues.ChatMessageRoles.System,
                     chatInput.Substring(13)));
                 await Console.Out.WriteLineAsync($"Instructions added: {chatInput.Substring(13)}");
                 continue;
