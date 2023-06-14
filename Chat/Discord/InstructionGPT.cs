@@ -20,6 +20,12 @@ public class InstructionGPT : DiscordBotBase, IHostedService
     }
     public record ChannelState
     {
+        [JsonPropertyName("guild-name")]
+        public string GuildName { get; set; }
+
+        [JsonPropertyName("channel-name")]
+        public string ChannelName { get; set; }
+
         [JsonPropertyName("chat-state")]
         public InstructionChatBot InstructionChat { get; set; }
 
@@ -49,6 +55,9 @@ public class InstructionGPT : DiscordBotBase, IHostedService
         // Load state from discordState.json
         await LoadState();
 
+        // Save state immediately since some new properties might have been added with default values
+        await SaveState();
+
         // Load embeddings
         await LoadEmbeddings();
 
@@ -69,6 +78,8 @@ public class InstructionGPT : DiscordBotBase, IHostedService
             if (message?.Content != null)
             {
                 HandleMessageReceivedAsync(message);
+
+                SaveCachedChannelState(message.Channel.Id);
             }
 
             return Task.CompletedTask;
@@ -172,6 +183,14 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                 await Console.Out.WriteLineAsync($"Loading state for channel {channelId}");
                 await using var stream = File.OpenRead(file);
                 var channelState = await ReadAsync(channelId, stream);
+
+                if (channelState.GuildName == null || channelState.ChannelName == null)
+                {
+                    var channel = Client.GetChannel(channelId) as IGuildChannel;
+
+                    channelState.GuildName = channel?.Guild?.Name;
+                    channelState.ChannelName = channel?.Name;
+                }
 
                 channelState.InstructionChat ??= new(OpenAILogic, DefaultParameters);
                 channelState.InstructionChat.ChatBotState ??= new() { PrimeDirectives = PrimeDirective.ToList() };
@@ -375,8 +394,15 @@ public class InstructionGPT : DiscordBotBase, IHostedService
 
     private ChannelState InitializeChannel(ulong channelId)
     {
+        var discordChannel = Client.GetChannel(channelId) as IGuildChannel;
+        if (discordChannel is null)
+        {
+            throw new Exception($"Channel {channelId} not found");
+        }
         ChannelState channel = new()
         {
+            ChannelName = discordChannel.Name,
+            GuildName = discordChannel.Guild.Name,
             InstructionChat = new(OpenAILogic, DefaultParameters.Adapt<GPTParameters>())
             {
                 ChatBotState = new()

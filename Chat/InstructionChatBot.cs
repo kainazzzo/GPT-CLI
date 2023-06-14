@@ -23,7 +23,7 @@ public class InstructionChatBot
 
         [JsonPropertyName("prime-directives")]
         public List<ChatMessage> PrimeDirectives { get; set; } = new() {new(StaticValues.ChatMessageRoles.System,
-            "Your Prime Directive: This is a chat bot running in [GPT-CLI](https://github.com/kainazzzo/GPT-CLI). Analyze and understand these instructions and apply them strictly to the last message:")};
+            "Your Prime Directive: This is a chat bot running in [GPT-CLI](https://github.com/kainazzzo/GPT-CLI). Analyze and understand these instructions and apply them strictly to the response message:")};
 
         [JsonPropertyName("chat-mode")]
         public ChatMode RespondMode { get; set; }
