@@ -9,12 +9,12 @@ using GPT.CLI.Embeddings;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
-using OpenAI.GPT3.Extensions;
-using OpenAI.GPT3.ObjectModels;
-using OpenAI.GPT3.ObjectModels.RequestModels;
-using OpenAI.GPT3.ObjectModels.ResponseModels;
 using GPT.CLI.Chat.Discord;
 using GPT.CLI.Chat;
+using OpenAI.Extensions;
+using OpenAI.ObjectModels;
+using OpenAI.ObjectModels.RequestModels;
+using OpenAI.ObjectModels.ResponseModels;
 
 namespace GPT.CLI;
 
@@ -30,8 +30,8 @@ class Program
         var configOption = new Option<string>("--config", () => "appSettings.json", "The path to the appSettings.json config file");
 
         // Add the rest of the available fields as command line parameters
-        var modelOption = new Option<string>("--model", () => Models.ChatGpt3_5Turbo, "The model ID to use.");
-        var maxTokensOption = new Option<int>("--max-tokens", () => 1500, "The maximum number of tokens to generate in the completion.");
+        var modelOption = new Option<string>("--model", () => "gpt-3.5-turbo-16k", "The model ID to use.");
+        var maxTokensOption = new Option<int>("--max-tokens", () => 3584, "The maximum number of tokens to generate in the completion.");
         var temperatureOption = new Option<double>("--temperature", "The sampling temperature to use, between 0 and 2");
         var topPOption = new Option<double>("--top-p", "The value for nucleus sampling");
         var nOption = new Option<int>("--n", () => 1, "The number of completions to generate for each prompt.");
@@ -45,9 +45,9 @@ class Program
         var embedCommand = new Command("embed", "Create an embedding for data redirected via STDIN.");
         var discordCommand = new Command("discord", "Starts the CLI as a Discord bot that receives messages from all channels on your server.");
         var botTokenOption = new Option<string>("--bot-token", "The token for your Discord bot.");
-        var maxChatHistoryLengthOption = new Option<uint>("--max-chat-history-length", () => 2048, "The maximum message length to keep in chat history (chat & discord modes).");
+        var maxChatHistoryLengthOption = new Option<uint>("--max-chat-history-length", () => 4096, "The maximum message length to keep in chat history (chat & discord modes).");
 
-        var chunkSizeOption = new Option<int>("--chunk-size", () => 1536,
+        var chunkSizeOption = new Option<int>("--chunk-size", () => 2048,
             "The size to chunk down text into embeddable documents.");
         var embedFileOption = new Option<string[]>("--file", "Name of a file from which to load previously saved embeddings. Multiple files allowed.")
         { AllowMultipleArgumentsPerToken = true, Arity = ArgumentArity.OneOrMore };
@@ -99,7 +99,7 @@ class Program
         // Embedding command options
         embedCommand.AddOption(chunkSizeOption);
 
-        // Chat command options
+        // InstructionChat command options
         chatCommand.AddOption(maxChatHistoryLengthOption);
         chatCommand.AddOption(chunkSizeOption);
         chatCommand.AddOption(streamOption);
@@ -194,7 +194,7 @@ class Program
                 innerServices.Add(service);
             }
 
-            innerServices.AddHostedService<DiscordBot>();
+            innerServices.AddHostedService<InstructionGPT>();
         });
 
         await hostBuilder.RunConsoleAsync();
@@ -344,7 +344,7 @@ class Program
         var prompts = new List<string>();
         var promptResponses = new List<string>();
 
-        var chatBot = new ChatBot(openAILogic, gptParameters);
+        var chatBot = new InstructionChatBot(openAILogic, gptParameters);
 
         do
         {
@@ -546,7 +546,7 @@ class Program
 
         services.AddScoped<DiscordSocketClient>();
 
-        services.AddSingleton<DiscordBot>();
+        services.AddSingleton<InstructionGPT>();
         services.AddSingleton(_ => gptParameters);
     }
 
