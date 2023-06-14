@@ -51,40 +51,52 @@ public class InstructionGPT : DiscordBotBase, IHostedService
     {
         // Use _configuration to access your configuration settings
         string token = Configuration["Discord:BotToken"];
-        
-        // Load state from discordState.json
-        await LoadState();
 
-        // Save state immediately since some new properties might have been added with default values
-        await SaveState();
+
+        // Login and start
+        await Client.LoginAsync(TokenType.Bot, token);
+
 
         // Load embeddings
         await LoadEmbeddings();
 
-        // Login and start
-        await Client.LoginAsync(TokenType.Bot, token);
         await Client.StartAsync();
 
         Client.Log += LogAsync;
+
+        Client.Ready += async () =>
+        {
+            await Console.Out.WriteLineAsync("Loading state");
+            // Load state from discordState.json
+            await LoadState();
+
+            // Save state immediately since some new properties might have been added with default values
+            await SaveState();
+
+            // Message receiver is going to run in parallel
+#pragma warning disable CS4014
+            Client.MessageReceived += (message) =>
+            {
+                if (message?.Content != null)
+                {
+                    HandleMessageReceivedAsync(message);
+
+                    SaveCachedChannelState(message.Channel.Id);
+                }
+
+                return Task.CompletedTask;
+            };
+#pragma warning restore CS4014
+
+            await Console.Out.WriteLineAsync("Ready!");
+        };
+
 
         // This is required for slash commands to work
         Client.InteractionCreated += HandleInteractionAsync;
         
 
-        // Message receiver is going to run in parallel
-#pragma warning disable CS4014
-        Client.MessageReceived += (message) =>
-        {
-            if (message?.Content != null)
-            {
-                HandleMessageReceivedAsync(message);
 
-                SaveCachedChannelState(message.Channel.Id);
-            }
-
-            return Task.CompletedTask;
-        };
-#pragma warning restore CS4014
 
         Client.MessageUpdated += (oldMessage, newMessage, channel) =>
         {
@@ -101,10 +113,6 @@ public class InstructionGPT : DiscordBotBase, IHostedService
 
 
 
-        Client.Ready += async () =>
-        {
-            await Console.Out.WriteLineAsync("Client is ready!");
-        };
 
         Client.MessageCommandExecuted += async (command) =>
         {
@@ -184,14 +192,12 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                 await using var stream = File.OpenRead(file);
                 var channelState = await ReadAsync(channelId, stream);
 
-                if (channelState.GuildName == null || channelState.ChannelName == null)
-                {
-                    var channel = Client.GetChannel(channelId) as IGuildChannel;
+                // Always read the channel and guild name in case they change
+                var channel = (IGuildChannel)(await Client.GetChannelAsync(channelId));
 
-                    channelState.GuildName = channel?.Guild?.Name;
-                    channelState.ChannelName = channel?.Name;
-                }
-
+                channelState.ChannelName = channel?.Name;
+                channelState.GuildName = channel?.Guild.Name;
+            
                 channelState.InstructionChat ??= new(OpenAILogic, DefaultParameters);
                 channelState.InstructionChat.ChatBotState ??= new() { PrimeDirectives = PrimeDirective.ToList() };
                 channelState.InstructionChat.OpenAILogic = OpenAILogic;
