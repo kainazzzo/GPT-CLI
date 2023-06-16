@@ -2,6 +2,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Discord;
+using Discord.Rest;
 using Discord.WebSocket;
 using GPT.CLI.Embeddings;
 using Mapster;
@@ -66,6 +67,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService
 
         Client.Ready += async () =>
         {
+            var response = await CreateGlobalCommand();
             await Console.Out.WriteLineAsync("Loading state");
             // Load state from discordState.json
             await LoadState();
@@ -118,6 +120,54 @@ public class InstructionGPT : DiscordBotBase, IHostedService
         {
             await Console.Out.WriteLineAsync($"Command {command.CommandName} executed with result {command.Data.Message.Content}");
         };
+    }
+
+    private async Task<RestGlobalCommand> CreateGlobalCommand()
+    {
+        var command = new SlashCommandBuilder()
+            .WithName("gptcli")
+            .WithDescription("GPT-CLI commands")
+            .AddOptions(new()
+            {
+                Name = "clear",
+                Description = "Clear the instructions or messages, or all",
+                Type = ApplicationCommandOptionType.SubCommand,
+                Options = new()
+                {
+                    new SlashCommandOptionBuilder().WithName("messages").WithDescription("Clear messages")
+                        .WithType(ApplicationCommandOptionType.String).AddChoice("messages", "messages"),
+                    new SlashCommandOptionBuilder().WithName("instructions").WithDescription("Clear instructions")
+                        .WithType(ApplicationCommandOptionType.String).AddChoice("instructions", "instructions"),
+                    new SlashCommandOptionBuilder().WithName("all").WithDescription("Clear all")
+                        .WithType(ApplicationCommandOptionType.String).AddChoice("all", "all"),
+                }
+            }, new()
+            {
+                Name = "set",
+                Description = "Settings",
+                Type = ApplicationCommandOptionType.SubCommand,
+                Options = new()
+                {
+
+                    new SlashCommandOptionBuilder().WithName("enabled").WithDescription("Enable or disable the chat bot")
+                        .WithType(ApplicationCommandOptionType.Boolean),
+                    new SlashCommandOptionBuilder().WithName("mute").WithDescription("Mute or unmute the chat bot")
+                        .WithType(ApplicationCommandOptionType.Boolean),
+                    new SlashCommandOptionBuilder().WithName("response-mode").WithDescription("Set the response mode")
+                        .WithType(ApplicationCommandOptionType.String).AddChoice("All", "All").AddChoice("Matches", "Matches"),
+                    new SlashCommandOptionBuilder().WithName("embed-mode").WithDescription("Set the embed mode")
+                        .WithType(ApplicationCommandOptionType.String).AddChoice("Explicit", "Explicit").AddChoice("All", "All"),
+                    new SlashCommandOptionBuilder().WithName("max-chat-history-length").WithDescription("Set the maximum chat history length")
+                        .WithType(ApplicationCommandOptionType.Integer).WithMinValue(100),
+                    new SlashCommandOptionBuilder().WithName("max-tokens").WithDescription("Set the maximum tokens")
+                        .WithType(ApplicationCommandOptionType.Integer).WithMinValue(50),
+                    new SlashCommandOptionBuilder().WithName("model").WithDescription("Set the model")
+                        .WithType(ApplicationCommandOptionType.String).AddChoice("gpt-4", "gpt-4").AddChoice("gpt-3.5-turbo-16k", "gpt-3.5-turbo-16k")
+                }
+            });
+
+        var response = await Client.Rest.CreateGlobalCommand(command.Build());
+        return response;
     }
 
     private async Task HandleReactionAsync(Cacheable<IUserMessage, ulong> userMessage, Cacheable<IMessageChannel, ulong> messageChannel, SocketReaction reaction)
@@ -575,36 +625,39 @@ public class InstructionGPT : DiscordBotBase, IHostedService
         var options = command.Data.Options;
         foreach (var option in options)
         {
+            var subOption = option.Options.FirstOrDefault();
             switch (option.Name)
             {
                 case "clear":
-                    var clearOptionValue = option.Value.ToString();
-                    if (clearOptionValue == "messages")
+                    
+                    switch (subOption.Name)
                     {
-                        chatBot.InstructionChat.ClearMessages();
-                    }
-                    else if (clearOptionValue == "instructions")
-                    {
-                        chatBot.InstructionChat.ClearInstructions();
-                    }
-                    else if (clearOptionValue == "all")
-                    {
-                        chatBot.InstructionChat.ClearMessages();
-                        chatBot.InstructionChat.ClearInstructions();
+                        case "messages":
+                            chatBot.InstructionChat.ClearMessages();
+                            
+                            break;
+                        case "instructions":
+                            chatBot.InstructionChat.ClearInstructions();
+                            break;
+                        case "all":
+                            chatBot.InstructionChat.ClearMessages();
+                            chatBot.InstructionChat.ClearInstructions();
+                            break;
                     }
 
-                    if (clearOptionValue != null)
+                    var clearOptionValue = subOption.Name;
+
+                    try
                     {
-                        try
-                        {
-                            await command.RespondAsync(
-                                $"{char.ToUpper(clearOptionValue[0])}{clearOptionValue.Substring(1)} cleared.");
-                        }
-                        catch (Exception ex)
-                        {
-                            await Console.Out.WriteLineAsync(ex.Message);
-                        }
+                        await command.RespondAsync(
+                            $"{char.ToUpper(clearOptionValue[0])}{clearOptionValue.Substring(1)} cleared.");
                     }
+                    catch (Exception ex)
+                    {
+                        await Console.Out.WriteLineAsync(ex.Message);
+                    }
+                
+                    
 
                     break;
                 case "instruction":
@@ -633,33 +686,110 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                         await Console.Out.WriteLineAsync(ex.Message);
                     }
                     break;
-                case "enabled":
-                    if (option.Value is bool enabled)
+                case "set":
+                    switch (subOption.Name)
                     {
-                        chatBot.Options.Enabled = enabled;
-                        try
-                        {
-                            await command.RespondAsync($"InstructionChat bot {(enabled ? "enabled" : "disabled")}.");
-                        }
-                        catch (Exception ex)
-                        {
-                            await Console.Out.WriteLineAsync(ex.Message);
-                        }
-                    }
-                    break;
-                case "mute":
-                    if (option.Value is bool muted)
-                    {
-                        chatBot.Options.Muted = muted;
+                        case "enabled":
+                            if (subOption.Value is bool enabled)
+                            {
+                                chatBot.Options.Enabled = enabled;
+                                try
+                                {
+                                    await command.RespondAsync($"InstructionChat bot {(enabled ? "enabled" : "disabled")}.");
+                                }
+                                catch (Exception ex)
+                                {
+                                    await Console.Out.WriteLineAsync(ex.Message);
+                                }
+                            }
+                            break;
+                        case "mute":
+                            if (subOption.Value is bool muted)
+                            {
+                                chatBot.Options.Muted = muted;
 
-                        try
-                        {
-                            await command.RespondAsync($"InstructionChat bot {(muted ? "muted" : "un-muted")}.");
-                        }
-                        catch (Exception ex)
-                        {
-                            await Console.Out.WriteLineAsync(ex.Message);
-                        }
+                                try
+                                {
+                                    await command.RespondAsync($"InstructionChat bot {(muted ? "muted" : "un-muted")}.");
+                                }
+                                catch (Exception ex)
+                                {
+                                    await Console.Out.WriteLineAsync(ex.Message);
+                                }
+                            }
+                            break;
+                        case "max-tokens":
+                            if (subOption.Value is long maxTokens)
+                            {
+                                chatBot.InstructionChat.ChatBotState.Parameters.MaxTokens = (int?)maxTokens;
+                                try
+                                {
+                                    await command.RespondAsync($"Max tokens set to {maxTokens}.");
+                                }
+                                catch (Exception ex)
+                                {
+                                    await Console.Out.WriteLineAsync(ex.Message);
+                                }
+                            }
+                            break;
+                        case "max-chat-history-length":
+                            if (subOption.Value is long maxChatHistoryLength)
+                            {
+                                chatBot.InstructionChat.ChatBotState.Parameters.MaxChatHistoryLength = (uint)maxChatHistoryLength;
+                                try
+                                {
+                                    await command.RespondAsync(
+                                        $"Max chat history length set to {maxChatHistoryLength}.");
+                                }
+                                catch (Exception ex)
+                                {
+                                    await Console.Out.WriteLineAsync(ex.Message);
+                                }
+                            }
+                            break;
+                        case "model":
+                            if (subOption.Value is string model)
+                            {
+                                chatBot.InstructionChat.ChatBotState.Parameters.Model = model;
+                                try
+                                {
+                                    await command.RespondAsync($"Model set to {model}.");
+                                }
+                                catch (Exception ex)
+                                {
+                                    await Console.Out.WriteLineAsync(ex.Message);
+                                }
+                            }
+                            break;
+                        case "embed-mode":
+                            if (subOption.Value is string embedMode)
+                            {
+                                chatBot.InstructionChat.ChatBotState.EmbedMode = Enum.Parse<InstructionChatBot.EmbedMode>(embedMode);
+                                try
+                                {
+                                    await command.RespondAsync($"Embed mode set to {embedMode}.");
+                                }
+                                catch (Exception ex)
+                                {
+                                    await Console.Out.WriteLineAsync(ex.Message);
+                                }
+                            }
+                            break;
+                        case "response-mode":
+                            if (subOption.Value is string responseMode)
+                            {
+                                chatBot.InstructionChat.ChatBotState.ResponseMode = Enum.Parse<InstructionChatBot.ResponseMode>(responseMode);
+                                try
+                                {
+                                    await command.RespondAsync($"Response mode set to {responseMode}.");
+                                }
+                                catch (Exception ex)
+                                {
+                                    await Console.Out.WriteLineAsync(ex.Message);
+                                }
+                            }
+                            break;
+
                     }
                     break;
             }
