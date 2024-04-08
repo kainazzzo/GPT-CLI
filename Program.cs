@@ -30,7 +30,7 @@ class Program
         var configOption = new Option<string>("--config", () => "appSettings.json", "The path to the appSettings.json config file");
 
         // Add the rest of the available fields as command line parameters
-        var modelOption = new Option<string>("--model", () => "gpt-3.5-turbo-16k", "The model ID to use.");
+        var modelOption = new Option<string>("--model", () => "gpt-4-turbo-preview", "The model ID to use.");
         var maxTokensOption = new Option<int>("--max-tokens", () => 3584, "The maximum number of tokens to generate in the completion.");
         var temperatureOption = new Option<double>("--temperature", "The sampling temperature to use, between 0 and 2");
         var topPOption = new Option<double>("--top-p", "The value for nucleus sampling");

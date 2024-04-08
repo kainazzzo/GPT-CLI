@@ -287,7 +287,9 @@ node_modules/
 # Visual Studio LightSwitch build output
 **/*.HTMLClient/GeneratedArtifacts
 **/*.DesktopClient/GeneratedArtifacts
-**/*.DesktopClient/ModelManifest.xml
+**/*.DesktopClient/
+
+ModelManifest.xml
 **/*.Server/GeneratedArtifacts
 **/*.Server/ModelManifest.xml
 _Pvt_Extensions

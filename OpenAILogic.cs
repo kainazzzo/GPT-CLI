@@ -53,9 +53,9 @@ public class OpenAILogic
             .Data.First().Embedding;
     }
 
-    public static int CountTokens(string prompt, string modelName)
+    public static async Task<int> CountTokensAsync(string prompt, string modelName)
     {
-        var tokenizer = TokenizerBuilder.CreateByModelName(modelName);
+        var tokenizer = await TokenizerBuilder.CreateByModelNameAsync(modelName);
         var encoded = tokenizer.Encode(prompt, new List<string>());
         return encoded.Count;
     }

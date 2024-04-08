@@ -9,4 +9,4 @@ RUN yum install -y libicu
 COPY --from=build /app/publish .
 COPY --from=build /src/appSettings.json .
 ENV MODEL=""
-ENTRYPOINT ./gpt discord --chunk-size=1536 --max-tokens=4096 --model=gpt-4
+ENTRYPOINT ./gpt discord --chunk-size=1536 --max-tokens=4096 --model=gpt-4-turbo-preview
