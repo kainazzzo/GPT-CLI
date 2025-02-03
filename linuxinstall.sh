@@ -1,0 +1,1 @@
+dotnet publish gpt.csproj -c Release -r linux-x64 -o $HOME/bin --self-contained true -p:PublishSingleFile=true

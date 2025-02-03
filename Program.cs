@@ -30,7 +30,7 @@ class Program
         var configOption = new Option<string>("--config", () => "appSettings.json", "The path to the appSettings.json config file");
 
         // Add the rest of the available fields as command line parameters
-        var modelOption = new Option<string>("--model", () => "gpt-4-turbo-preview", "The model ID to use.");
+        var modelOption = new Option<string>("--model", () => "gpt-4o", "The model ID to use.");
         var maxTokensOption = new Option<int>("--max-tokens", () => 3584, "The maximum number of tokens to generate in the completion.");
         var temperatureOption = new Option<double>("--temperature", "The sampling temperature to use, between 0 and 2");
         var topPOption = new Option<double>("--top-p", "The value for nucleus sampling");
@@ -69,7 +69,7 @@ class Program
             }
         });
 
-       
+
 
         // Create a command and add the options
         var rootCommand = new RootCommand("GPT Console Application");
@@ -119,7 +119,7 @@ class Program
         rootCommand.AddCommand(chatCommand);
         rootCommand.AddCommand(embedCommand);
         rootCommand.AddCommand(discordCommand);
-        
+
 
 
 
@@ -219,7 +219,6 @@ class Program
         var responses = gptParameters.Stream == true
             ? openAILogic.CreateChatCompletionAsyncEnumerable(chatRequest)
             : (await openAILogic.CreateChatCompletionAsync(chatRequest)).ToAsyncEnumerable();
-        var v = Models.Gpt_4_32k;
         await foreach (var response in responses)
         {
             await OutputChatResponse(response);
@@ -248,22 +247,6 @@ class Program
 / /___| | | | (_| | |_/ /_\\/ ___/  / /    / /___/ /___/\/ /_  
 \____/|_| |_|\__,_|\__\____/\/      \/     \____/\____/\____/", 64),
         new(@"
-                                                                           ,----,                      ,--,
-                                                        ,-.----.         ,/   .`|                   ,---.'|
-  ,----..    ,---,                   ___      ,----..   \    /  \      ,`   .'  :          ,----..  |   | :      ,---,
- /   /   \ ,--.' |                 ,--.'|_   /   /   \  |   :    \   ;    ;     /         /   /   \ :   : |   ,`--.' |
-|   :     :|  |  :                 |  | :,' |   :     : |   |  .\ :.'___,/    ,'         |   :     :|   ' :   |   :  :
-.   |  ;. /:  :  :                 :  : ' : .   |  ;. / .   :  |: ||    :     |          .   |  ;. /;   ; '   :   |  '
-.   ; /--` :  |  |,--.  ,--.--.  .;__,'  /  .   ; /--`  |   |   \ :;    |.';  ;          .   ; /--` '   | |__ |   :  |
-;   | ;    |  :  '   | /       \ |  |   |   ;   | ;  __ |   : .   /`----'  |  |          ;   | ;    |   | :.'|'   '  ;
-|   : |    |  |   /' :.--.  .-. |:__,'| :   |   : |.' .';   | |`-'     '   :  ;          |   : |    '   :    ;|   |  |
-.   | '___ '  :  | | | \__\/: . .  '  : |__ .   | '_.' :|   | ;        |   |  '          .   | '___ |   |  ./ '   :  ;
-'   ; : .'||  |  ' | : ,' .--.; |  |  | '.'|'   ; : \  |:   ' |        '   :  |          '   ; : .'|;   : ;   |   |  '
-'   | '/  :|  :  :_:,'/  /  ,.  |  ;  :    ;'   | '/  .':   : :        ;   |.'           '   | '/  :|   ,/    '   :  |
-|   :    / |  | ,'   ;  :   .'   \ |  ,   / |   :    /  |   | :        '---'             |   :    / '---'     ;   |.'
- \   \ .'  `--''     |  ,     .-./  ---`-'   \   \ .'   `---'.|                           \   \ .'            '---'
-  `---`               `--`---'                `---`       `---`                            `---`", 119),
-        new(@"
   _              __  _ ___    _    ___ 
  /  |_   _. _|_ /__ |_) |    /  |   |  
  \_ | | (_|  |_ \_| |   |    \_ |_ _|_
@@ -287,29 +270,7 @@ class Program
 /\  ___\   /\ \_\ \   /\  __ \   /\__  _\ /\  ___\   /\  == \ /\__  _\    /\  ___\   /\ \       /\ \   
 \ \ \____  \ \  __ \  \ \  __ \  \/_/\ \/ \ \ \__ \  \ \  _-/ \/_/\ \/    \ \ \____  \ \ \____  \ \ \  
  \ \_____\  \ \_\ \_\  \ \_\ \_\    \ \_\  \ \_____\  \ \_\      \ \_\     \ \_____\  \ \_____\  \ \_\ 
-  \/_____/   \/_/\/_/   \/_/\/_/     \/_/   \/_____/   \/_/       \/_/      \/_____/   \/_____/   \/_/", 103),
-        new(@"
- ▄████████    ▄█    █▄       ▄████████     ███        ▄██████▄     ▄███████▄     ███           ▄████████  ▄█        ▄█
-███    ███   ███    ███     ███    ███ ▀█████████▄   ███    ███   ███    ███ ▀█████████▄      ███    ███ ███       ███
-███    █▀    ███    ███     ███    ███    ▀███▀▀██   ███    █▀    ███    ███    ▀███▀▀██      ███    █▀  ███       ███▌
-███         ▄███▄▄▄▄███▄▄   ███    ███     ███   ▀  ▄███          ███    ███     ███   ▀      ███        ███       ███▌
-███        ▀▀███▀▀▀▀███▀  ▀███████████     ███     ▀▀███ ████▄  ▀█████████▀      ███          ███        ███       ███▌
-███    █▄    ███    ███     ███    ███     ███       ███    ███   ███            ███          ███    █▄  ███       ███
-███    ███   ███    ███     ███    ███     ███       ███    ███   ███            ███          ███    ███ ███▌    ▄ ███
-████████▀    ███    █▀      ███    █▀     ▄████▀     ████████▀   ▄████▀         ▄████▀        ████████▀  █████▄▄██ █▀", 120),
-        new(@"
- ▄▄▄▄▄▄▄▄▄▄▄  ▄         ▄  ▄▄▄▄▄▄▄▄▄▄▄  ▄▄▄▄▄▄▄▄▄▄▄  ▄▄▄▄▄▄▄▄▄▄▄  ▄▄▄▄▄▄▄▄▄▄▄  ▄▄▄▄▄▄▄▄▄▄▄       ▄▄▄▄▄▄▄▄▄▄▄  ▄            ▄▄▄▄▄▄▄▄▄▄▄ 
-▐░░░░░░░░░░░▌▐░▌       ▐░▌▐░░░░░░░░░░░▌▐░░░░░░░░░░░▌▐░░░░░░░░░░░▌▐░░░░░░░░░░░▌▐░░░░░░░░░░░▌     ▐░░░░░░░░░░░▌▐░▌          ▐░░░░░░░░░░░▌
-▐░█▀▀▀▀▀▀▀▀▀ ▐░▌       ▐░▌▐░█▀▀▀▀▀▀▀█░▌ ▀▀▀▀█░█▀▀▀▀ ▐░█▀▀▀▀▀▀▀▀▀ ▐░█▀▀▀▀▀▀▀█░▌ ▀▀▀▀█░█▀▀▀▀      ▐░█▀▀▀▀▀▀▀▀▀ ▐░▌           ▀▀▀▀█░█▀▀▀▀ 
-▐░▌          ▐░▌       ▐░▌▐░▌       ▐░▌     ▐░▌     ▐░▌          ▐░▌       ▐░▌     ▐░▌          ▐░▌          ▐░▌               ▐░▌     
-▐░▌          ▐░█▄▄▄▄▄▄▄█░▌▐░█▄▄▄▄▄▄▄█░▌     ▐░▌     ▐░▌ ▄▄▄▄▄▄▄▄ ▐░█▄▄▄▄▄▄▄█░▌     ▐░▌          ▐░▌          ▐░▌               ▐░▌     
-▐░▌          ▐░░░░░░░░░░░▌▐░░░░░░░░░░░▌     ▐░▌     ▐░▌▐░░░░░░░░▌▐░░░░░░░░░░░▌     ▐░▌          ▐░▌          ▐░▌               ▐░▌     
-▐░▌          ▐░█▀▀▀▀▀▀▀█░▌▐░█▀▀▀▀▀▀▀█░▌     ▐░▌     ▐░▌ ▀▀▀▀▀▀█░▌▐░█▀▀▀▀▀▀▀▀▀      ▐░▌          ▐░▌          ▐░▌               ▐░▌     
-▐░▌          ▐░▌       ▐░▌▐░▌       ▐░▌     ▐░▌     ▐░▌       ▐░▌▐░▌               ▐░▌          ▐░▌          ▐░▌               ▐░▌     
-▐░█▄▄▄▄▄▄▄▄▄ ▐░▌       ▐░▌▐░▌       ▐░▌     ▐░▌     ▐░█▄▄▄▄▄▄▄█░▌▐░▌               ▐░▌          ▐░█▄▄▄▄▄▄▄▄▄ ▐░█▄▄▄▄▄▄▄▄▄  ▄▄▄▄█░█▄▄▄▄ 
-▐░░░░░░░░░░░▌▐░▌       ▐░▌▐░▌       ▐░▌     ▐░▌     ▐░░░░░░░░░░░▌▐░▌               ▐░▌          ▐░░░░░░░░░░░▌▐░░░░░░░░░░░▌▐░░░░░░░░░░░▌
- ▀▀▀▀▀▀▀▀▀▀▀  ▀         ▀  ▀         ▀       ▀       ▀▀▀▀▀▀▀▀▀▀▀  ▀                 ▀            ▀▀▀▀▀▀▀▀▀▀▀  ▀▀▀▀▀▀▀▀▀▀▀  ▀▀▀▀▀▀▀▀▀▀▀", 136)
-
+  \/_____/   \/_/\/_/   \/_/\/_/     \/_/   \/_____/   \/_/       \/_/      \/_____/   \/_____/   \/_/", 103)
     };
 
     private static async Task HandleChatMode(OpenAILogic openAILogic, GPTParameters gptParameters)
@@ -322,7 +283,7 @@ class Program
                     "You are ChatGPT CLI, the helpful assistant, but you're running on a command line.")
             }
         }, ParameterMapping.Mode.Chat);
-        
+
         async Task PrintLogo()
         {
             var newLogo = GetRandomLogo();
