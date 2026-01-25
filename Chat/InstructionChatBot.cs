@@ -10,7 +10,7 @@ public class InstructionChatBot
     public record InstructionChatBotState
     {
         [JsonPropertyName("parameters")]
-        public GPTParameters Parameters { get; set; }
+        public GptOptions Parameters { get; set; }
 
         [JsonPropertyName("messages")]
         public LinkedList<ChatMessage> Messages { get; set; } = new();
@@ -50,7 +50,7 @@ public class InstructionChatBot
     public InstructionChatBotState ChatBotState { get; set; } = new();
     
 
-    public InstructionChatBot(OpenAILogic openAILogic, GPTParameters gptParameters)
+    public InstructionChatBot(OpenAILogic openAILogic, GptOptions gptParameters)
     {
         OpenAILogic = openAILogic;
         ChatBotState.Parameters = gptParameters;

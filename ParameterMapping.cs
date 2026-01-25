@@ -5,9 +5,9 @@ using OpenAI.ObjectModels.RequestModels;
 
 namespace GPT.CLI;
 
-internal static class ParameterMapping
+public static class ParameterMapping
 {
-    public static async Task<ChatCompletionCreateRequest> MapCommon(GPTParameters parameters, OpenAILogic openAILogic, ChatCompletionCreateRequest request, Mode mode)
+    public static async Task<ChatCompletionCreateRequest> MapCommon(GptOptions parameters, OpenAILogic openAILogic, ChatCompletionCreateRequest request, Mode mode)
     {
         // It only makes sense to look for embeddings when in completion mode and when a prompt is provided
         if (mode == Mode.Completion && parameters.Prompt != null)
@@ -54,7 +54,7 @@ internal static class ParameterMapping
         return request;
     }
 
-    public static async Task<ChatCompletionCreateRequest> MapChatEdit(GPTParameters parameters, OpenAILogic openAILogic, Stream inputStream)
+    public static async Task<ChatCompletionCreateRequest> MapChatEdit(GptOptions parameters, OpenAILogic openAILogic, Stream inputStream)
     {
         using var streamReader = new StreamReader(inputStream);
         var input = await streamReader.ReadToEndAsync();
@@ -81,7 +81,7 @@ internal static class ParameterMapping
 
     }
 
-    public static async Task<ChatCompletionCreateRequest> MapChatCreate(GPTParameters parameters,
+    public static async Task<ChatCompletionCreateRequest> MapChatCreate(GptOptions parameters,
         OpenAILogic openAILogic)
     {
         var request = await ParameterMapping.MapCommon(parameters, openAILogic,new ChatCompletionCreateRequest
@@ -94,7 +94,7 @@ internal static class ParameterMapping
         return request;
     }
 
-    internal enum Mode
+    public enum Mode
     {
         Completion,
         Chat,

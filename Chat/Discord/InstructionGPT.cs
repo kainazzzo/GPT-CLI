@@ -16,7 +16,7 @@ namespace GPT.CLI.Chat.Discord;
 public class InstructionGPT : DiscordBotBase, IHostedService
 {
     public InstructionGPT (DiscordSocketClient client, IConfiguration configuration, OpenAILogic openAILogic,
-        GPTParameters defaultParameters) : base(client, configuration, openAILogic, defaultParameters)
+        GptOptions defaultParameters) : base(client, configuration, openAILogic, defaultParameters)
     {
     }
     public record ChannelState
@@ -48,10 +48,12 @@ public class InstructionGPT : DiscordBotBase, IHostedService
 
 
 
-    public async Task StartAsync(CancellationToken cancellationToken)
+    public override async Task StartAsync(CancellationToken cancellationToken)
     {
-        // Use _configuration to access your configuration settings
-        string token = Configuration["Discord:BotToken"];
+        // Use configuration settings
+        string token = DefaultParameters.BotToken
+            ?? Configuration["GPT:BotToken"]
+            ?? Configuration["Discord:BotToken"];
 
 
         // Login and start
@@ -100,14 +102,12 @@ public class InstructionGPT : DiscordBotBase, IHostedService
 
 
 
-        Client.MessageUpdated += (oldMessage, newMessage, channel) =>
+        Client.MessageUpdated += async (oldMessage, newMessage, channel) =>
         {
             if (newMessage.Content != null && oldMessage.Value?.Content != newMessage.Content)
             {
-                HandleMessageReceivedAsync(newMessage);
+                await HandleMessageReceivedAsync(newMessage);
             }
-
-            return Task.CompletedTask;
         };
 
         // Handle emoji reactions.
@@ -309,7 +309,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService
         }
     }
 
-    public async Task StopAsync(CancellationToken cancellationToken)
+    public override async Task StopAsync(CancellationToken cancellationToken)
     {
         // Save state to discordState.json
         await SaveState();
@@ -459,12 +459,12 @@ public class InstructionGPT : DiscordBotBase, IHostedService
         {
             ChannelName = discordChannel.Name,
             GuildName = discordChannel.Guild.Name,
-            InstructionChat = new(OpenAILogic, DefaultParameters.Adapt<GPTParameters>())
+            InstructionChat = new(OpenAILogic, DefaultParameters.Adapt<GptOptions>())
             {
                 ChatBotState = new()
                 {
                     PrimeDirectives = PrimeDirective.ToList(),
-                    Parameters = DefaultParameters.Adapt<GPTParameters>()
+                    Parameters = DefaultParameters.Adapt<GptOptions>()
                 }
             },
             Options = new(),

@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/dotnet/sdk:7.0 AS build
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 COPY . .
 RUN dotnet publish gpt.csproj -c Release -r linux-x64 -o /app/publish --self-contained true -p:PublishSingleFile=true
@@ -7,6 +7,9 @@ FROM redhat/ubi9
 WORKDIR /app
 RUN yum install -y libicu
 COPY --from=build /app/publish .
-COPY --from=build /src/appSettings.json .
-ENV MODEL=""
-ENTRYPOINT ./gpt discord --chunk-size=1536 --max-tokens=4096 --model=gpt-4o
+COPY --from=build /src/appsettings.json .
+ENV GPT__MODE="Discord"
+ENV GPT__CHUNKSIZE="1536"
+ENV GPT__MAXTOKENS="4096"
+ENV GPT__MODEL="gpt-4o"
+ENTRYPOINT ./gpt

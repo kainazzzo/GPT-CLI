@@ -4,25 +4,29 @@ Welcome to GPT-CLI, a command line interface for harnessing the power of OpenAI'
 
 ## Prerequisites
 
-In order to use this CLI interface, you will need an OpenAI API key. [Sign up](https://platform.openai.com) if you haven't already, and create an [api key](https://platform.openai.com/account/api-keys). 
+In order to use this CLI interface, you will need an OpenAI API key. [Sign up](https://platform.openai.com) if you haven't already, and create an [api key](https://platform.openai.com/account/apikeys). 
 
-Then, create an appSettings.json file in the current working directory with the following contents:
+Then, create an appsettings.json file in the current working directory with the following contents:
 
 ```json
 {
   "OpenAI": {
-    "api-key": "sk-your-api-key-here"
+    "ApiKey": "sk-your-apikey-here"
+  },
+  "GPT": {
+    "Mode": "Completion",
+    "Prompt": "generate a hello world python script"
   }
 }
 ```
 
-Alternatively, you can also use the api-key command line parameter:
+Alternatively, you can use environment variables:
 
 ```bash
-gpt api-key "sk-your-api-key-here" prompt "generate a hello world python script" > hello.py
+OPENAI__APIKEY="sk-your-apikey-here" GPT__MODE="Completion" GPT__PROMPT="generate a hello world python script" gpt > hello.py
 ```
 
-Since this is a .NET 7 standalone console application, you won't need to worry about installing the .NET CLI or runtime in your environment.
+Since this is a .NET 10 standalone console application, you won't need to worry about installing the .NET CLI or runtime in your environment.
 
 ## Features
 
@@ -40,7 +44,7 @@ The primary goal of this project is to create a command line interface (CLI) for
 
 For example, you could generate a bash script for "Hello, World!" with the following command:
 ```bash
-gpt --prompt "create a bash Hello World script" > hello.sh
+GPT__PROMPT="create a bash Hello World script" gpt > hello.sh
 ```
 
 But GPT-CLI's potential doesn't stop there. You can even pipe GPT commands to other commands, or back to GPT itself, creating powerful and dynamic workflows.
@@ -49,42 +53,42 @@ Here are some additional ideas for GPT-CLI functionalities:
 
 1. **Code Refactoring:** Use GPT-CLI to refactor your code by providing a prompt and outputting the result to the desired file.
 ```bash
-cat original_code.py | gpt --prompt "refactor this Python function for better readability" > refactored_code.py
+cat original_code.py | GPT__PROMPT="refactor this Python function for better readability" gpt > refactored_code.py
 ```
 
 2. **Automated Documentation:** Generate documentation for your code by providing relevant prompts.
 ```bash
-gpt --prompt "create markdown documentation for this JavaScript code" < file.js
+GPT__PROMPT="create markdown documentation for this JavaScript code" gpt < file.js
 ```
 
 3. **Text Processing:** Use GPT-CLI in conjunction with other command line tools to process and manipulate text, such as grep, awk, or sed.
 ```bash
-curl -s https://datti.net/2023/03/14/Publishing-an-Azure-Static-Website-with-Github-Actions-&-Jekyll/ | grep -zPo '<section id="content" class="main inactive">\K.*?(?=</section>)' | sed 's/<[^>]*>//g' | gpt --prompt "summarize this article" | grep 'keyword' > summarized_with_keyword.txt
+curl -s https://datti.net/2023/03/14/Publishing-an-Azure-Static-Website-with-Github-Actions-&-Jekyll/ | grep -zPo '<section id="content" class="main inactive">\K.*?(?=</section>)' | sed 's/<[^>]*>//g' | GPT__PROMPT="summarize this article" gpt | grep 'keyword' > summarized_with_keyword.txt
 ```
 
 4. **Combine Text from Multiple Files and Summarize:**
 ```bash
-cat file1.txt file2.txt | gpt --prompt "combine and summarize the information from these two texts" > summarized_information.txt
+cat file1.txt file2.txt | GPT__PROMPT="combine and summarize the information from these two texts" gpt > summarized_information.txt
 ```
 
 5. **Generate a List of Ideas and Sort by Relevance:**
 ```bash
-gpt --prompt "generate a list of 10 innovative AI project ideas" | sort -R | gpt --prompt="rank these AI project ideas by their potential impact" > sorted_AI_project_ideas.txt
+GPT__PROMPT="generate a list of 10 innovative AI project ideas" gpt | sort -R | GPT__PROMPT="rank these AI project ideas by their potential impact" gpt > sorted_AI_project_ideas.txt
 ```
 
 6. **Extract Quotes from a Text and Generate a Motivational Poster:**
 ```bash
-grep -o '".*"' input_text.txt | gpt --prompt "create a motivational poster using one of these quotes" > motivational_poster.txt
+grep -o '".*"' input_text.txt | GPT__PROMPT="create a motivational poster using one of these quotes" gpt > motivational_poster.txt
 ```
 
 7. **Filter Log File and Generate a Report:**
 ```bash
-grep 'ERROR' log_file.txt | gpt --prompt "analyze these error logs and generate a brief report on the most common issues" > error_report.txt
+grep 'ERROR' log_file.txt | GPT__PROMPT="analyze these error logs and generate a brief report on the most common issues" gpt > error_report.txt
 ```
 
 8. **Embed context into a chat session via curl, stripping html tags with sed:**
 ```bash
-curl http://url/documentation | sed 's/<[^>]\+>//g' | gpt embed --chunk-size=2048 > docs.dat && gpt chat --file docs.dat
+curl http://url/documentation | sed 's/<[^>]\+>//g' | GPT__MODE="Embed" GPT__CHUNKSIZE=2048 gpt > docs.dat && GPT__MODE="Chat" GPT__EMBEDFILENAMES__0=docs.dat gpt
 ```
 With GPT-CLI, the possibilities are limited only by your imagination and ability to prompt and string together commands.
 

@@ -8,7 +8,7 @@ namespace GPT.CLI.Chat.Discord;
 
 public abstract class DiscordBotBase : IHostedService
 {
-    protected DiscordBotBase(DiscordSocketClient client, IConfiguration configuration, OpenAILogic openAILogic, GPTParameters defaultParameters)
+    protected DiscordBotBase(DiscordSocketClient client, IConfiguration configuration, OpenAILogic openAILogic, GptOptions defaultParameters)
     {
         Client = client;
         Configuration = configuration;
@@ -29,7 +29,7 @@ public abstract class DiscordBotBase : IHostedService
     protected readonly DiscordSocketClient Client;
     protected readonly IConfiguration Configuration;
     protected readonly OpenAILogic OpenAILogic;
-    protected readonly GPTParameters DefaultParameters;
+    protected readonly GptOptions DefaultParameters;
     protected readonly ConcurrentDictionary<ulong, InstructionGPT.ChannelState> ChannelBots = new();
     protected readonly ConcurrentDictionary<ulong, List<Document>> Documents = new();
 

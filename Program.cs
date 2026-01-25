@@ -1,7 +1,4 @@
-﻿using System.CommandLine;
-using System.CommandLine.Builder;
-using System.CommandLine.Parsing;
-using System.Text;
+﻿using System.Text;
 using System.Text.Json;
 using Discord;
 using Discord.WebSocket;
@@ -22,185 +19,65 @@ class Program
 {
     static async Task Main(string[] args)
     {
-        // Define command line parameters
-        var apiKeyOption = new Option<string>("--api-key", "Your OpenAI API key");
-        var baseUrlOption = new Option<string>("--base-domain", "The base URL for the OpenAI API");
-        var promptOption = new Option<string>("--prompt", "The prompt for text generation. Optional for most commands.") { IsRequired = true };
+        var (modeOverride, remainingArgs) = ParseModeOverride(args);
 
-        var configOption = new Option<string>("--config", () => "appSettings.json", "The path to the appSettings.json config file");
-
-        // Add the rest of the available fields as command line parameters
-        var modelOption = new Option<string>("--model", () => "gpt-4o", "The model ID to use.");
-        var maxTokensOption = new Option<int>("--max-tokens", () => 3584, "The maximum number of tokens to generate in the completion.");
-        var temperatureOption = new Option<double>("--temperature", "The sampling temperature to use, between 0 and 2");
-        var topPOption = new Option<double>("--top-p", "The value for nucleus sampling");
-        var nOption = new Option<int>("--n", () => 1, "The number of completions to generate for each prompt.");
-        var streamOption = new Option<bool>("--stream", () => true, "Whether to stream back partial progress");
-        var stopOption = new Option<string>("--stop", "Up to 4 sequences where the API will stop generating further tokens");
-        var presencePenaltyOption = new Option<double>("--presence-penalty", "Penalty for new tokens based on their presence in the text so far");
-        var frequencyPenaltyOption = new Option<double>("--frequency-penalty", "Penalty for new tokens based on their frequency in the text so far");
-        var logitBiasOption = new Option<string>("--logit-bias", "Modify the likelihood of specified tokens appearing in the completion");
-        var userOption = new Option<string>("--user", "A unique identifier representing your end-user");
-        var chatCommand = new Command("chat", "Starts listening in chat mode.");
-        var embedCommand = new Command("embed", "Create an embedding for data redirected via STDIN.");
-        var discordCommand = new Command("discord", "Starts the CLI as a Discord bot that receives messages from all channels on your server.");
-        var botTokenOption = new Option<string>("--bot-token", "The token for your Discord bot.");
-        var maxChatHistoryLengthOption = new Option<uint>("--max-chat-history-length", () => 4096, "The maximum message length to keep in chat history (chat & discord modes).");
-
-        var chunkSizeOption = new Option<int>("--chunk-size", () => 2048,
-            "The size to chunk down text into embeddable documents.");
-        var embedFileOption = new Option<string[]>("--file", "Name of a file from which to load previously saved embeddings. Multiple files allowed.")
-        { AllowMultipleArgumentsPerToken = true, Arity = ArgumentArity.OneOrMore };
-        var embedDirectoryOption = new Option<string[]>("--directory",
-            "Name of a directory from which to load previously saved embeddings. Multiple directories allowed.")
-        {
-            AllowMultipleArgumentsPerToken = true,
-            Arity = ArgumentArity.OneOrMore
-        };
-
-        var matchLimitOption = new Option<int>("--match-limit", () => 3,
-            "Limits the number of embedding chunks to use when applying context.");
-
-        embedCommand.AddValidator(result =>
-        {
-            if (!Console.IsInputRedirected)
+        using var host = Host.CreateDefaultBuilder(remainingArgs)
+            .ConfigureServices((context, services) =>
             {
-                result.ErrorMessage = "Input required for embedding";
-            }
-        });
+                ConfigureServices(services, context.Configuration, modeOverride);
+            })
+            .Build();
 
+        var gptParameters = host.Services.GetRequiredService<GptOptions>();
 
-
-        // Create a command and add the options
-        var rootCommand = new RootCommand("GPT Console Application");
-
-        // Global options
-        rootCommand.AddGlobalOption(apiKeyOption);
-        rootCommand.AddGlobalOption(baseUrlOption);
-        rootCommand.AddGlobalOption(configOption);
-        rootCommand.AddGlobalOption(modelOption);
-        rootCommand.AddGlobalOption(maxTokensOption);
-        rootCommand.AddGlobalOption(temperatureOption);
-        rootCommand.AddGlobalOption(topPOption);
-        rootCommand.AddGlobalOption(stopOption);
-        rootCommand.AddGlobalOption(presencePenaltyOption);
-        rootCommand.AddGlobalOption(frequencyPenaltyOption);
-        rootCommand.AddGlobalOption(logitBiasOption);
-        rootCommand.AddGlobalOption(userOption);
-
-        // Root command only options (not globally available in all sub commands)
-        rootCommand.AddOption(embedFileOption);
-        rootCommand.AddOption(embedDirectoryOption);
-        rootCommand.AddOption(promptOption);
-        rootCommand.AddOption(nOption);
-        rootCommand.AddOption(streamOption);
-        rootCommand.AddOption(matchLimitOption);
-
-        // Embedding command options
-        embedCommand.AddOption(chunkSizeOption);
-
-        // InstructionChat command options
-        chatCommand.AddOption(maxChatHistoryLengthOption);
-        chatCommand.AddOption(chunkSizeOption);
-        chatCommand.AddOption(streamOption);
-
-        chatCommand.AddOption(embedFileOption);
-        chatCommand.AddOption(embedDirectoryOption);
-        chatCommand.AddOption(matchLimitOption);
-
-        // Discord command options
-        discordCommand.AddOption(maxChatHistoryLengthOption);
-        discordCommand.AddOption(chunkSizeOption);
-        discordCommand.AddOption(botTokenOption);
-        discordCommand.AddOption(matchLimitOption);
-
-
-        // Add the sub commands to the root command
-        rootCommand.AddCommand(chatCommand);
-        rootCommand.AddCommand(embedCommand);
-        rootCommand.AddCommand(discordCommand);
-
-
-
-
-        var binder = new GPTParametersBinder(
-            apiKeyOption, baseUrlOption, promptOption, configOption,
-            modelOption, maxTokensOption, temperatureOption, topPOption,
-            nOption, streamOption, stopOption,
-            presencePenaltyOption, frequencyPenaltyOption, logitBiasOption,
-            userOption, embedFileOption, embedDirectoryOption, chunkSizeOption, matchLimitOption, botTokenOption, maxChatHistoryLengthOption);
-
-        ParameterMapping.Mode mode = ParameterMapping.Mode.Completion;
-
-        // Set the handler for the rootCommand
-        rootCommand.SetHandler(_ => { }, binder);
-        chatCommand.SetHandler(_ => mode = ParameterMapping.Mode.Chat, binder);
-        embedCommand.SetHandler(_ => mode = ParameterMapping.Mode.Embed, binder);
-        discordCommand.SetHandler(_ => mode = ParameterMapping.Mode.Discord, binder);
-
-        // Invoke the command
-        var retValue = await new CommandLineBuilder(rootCommand)
-            .UseDefaults()
-            .Build()
-            .InvokeAsync(args);
-
-        if (retValue == 0 && binder.GPTParameters != null)
+        if (string.IsNullOrWhiteSpace(gptParameters.ApiKey))
         {
-            // Set up dependency injection
-            var services = new ServiceCollection();
+            await Console.Error.WriteLineAsync("Missing OpenAI ApiKey. Set OpenAI:ApiKey or GPT:ApiKey in configuration.");
+            return;
+        }
 
-            ConfigureServices(services, binder, mode);
-
-            await using var serviceProvider = services.BuildServiceProvider();
-
-
-            // get a OpenAILogic instance
-            var openAILogic = serviceProvider.GetService<OpenAILogic>();
-
-            switch (mode)
+        if (gptParameters.Mode == ParameterMapping.Mode.Discord)
+        {
+            if (string.IsNullOrWhiteSpace(gptParameters.BotToken))
             {
-                case ParameterMapping.Mode.Chat:
-                    {
-                        await HandleChatMode(openAILogic, binder.GPTParameters);
-                        break;
-                    }
-                case ParameterMapping.Mode.Embed:
-                    {
-                        await HandleEmbedMode(openAILogic, binder.GPTParameters);
-                        break;
-                    }
-                case ParameterMapping.Mode.Discord:
-                    {
-                        await HandleDiscordMode(openAILogic, binder.GPTParameters, services);
-                        break;
-                    }
-                case ParameterMapping.Mode.Completion:
-                default:
-                    {
-                        await HandleCompletionMode(openAILogic, binder.GPTParameters);
-
-                        break;
-                    }
+                await Console.Error.WriteLineAsync("Missing Discord bot token. Set GPT:BotToken in configuration.");
+                return;
             }
+
+            await host.RunAsync();
+            return;
+        }
+
+        var openAILogic = host.Services.GetRequiredService<OpenAILogic>();
+
+        switch (gptParameters.Mode)
+        {
+            case ParameterMapping.Mode.Chat:
+                {
+                    await HandleChatMode(openAILogic, gptParameters);
+                    break;
+                }
+            case ParameterMapping.Mode.Embed:
+                {
+                    await HandleEmbedMode(openAILogic, gptParameters);
+                    break;
+                }
+            case ParameterMapping.Mode.Completion:
+            default:
+                {
+                    if (string.IsNullOrWhiteSpace(gptParameters.Prompt))
+                    {
+                        await Console.Error.WriteLineAsync("Missing GPT prompt. Set GPT:Prompt in configuration.");
+                        return;
+                    }
+
+                    await HandleCompletionMode(openAILogic, gptParameters);
+                    break;
+                }
         }
     }
 
-    private static async Task HandleDiscordMode(OpenAILogic openAILogic, GPTParameters gptParameters, IServiceCollection services)
-    {
-        var hostBuilder = new HostBuilder().ConfigureServices(innerServices =>
-        {
-            foreach (var service in services)
-            {
-                innerServices.Add(service);
-            }
-
-            innerServices.AddHostedService<InstructionGPT>();
-        });
-
-        await hostBuilder.RunConsoleAsync();
-    }
-
-    private static async Task HandleEmbedMode(OpenAILogic openAILogic, GPTParameters gptParameters)
+    private static async Task HandleEmbedMode(OpenAILogic openAILogic, GptOptions gptParameters)
     {
         // Create and output embedding
         var documents = await Document.ChunkToDocumentsAsync(Console.OpenStandardInput(), gptParameters.ChunkSize);
@@ -210,7 +87,7 @@ class Program
         await Console.Out.WriteLineAsync(JsonSerializer.Serialize(documents));
     }
 
-    private static async Task HandleCompletionMode(OpenAILogic openAILogic, GPTParameters gptParameters)
+    private static async Task HandleCompletionMode(OpenAILogic openAILogic, GptOptions gptParameters)
     {
         var chatRequest = Console.IsInputRedirected
             ? await ParameterMapping.MapChatEdit(gptParameters, openAILogic, Console.OpenStandardInput())
@@ -273,7 +150,7 @@ class Program
   \/_____/   \/_/\/_/   \/_/\/_/     \/_/   \/_____/   \/_/       \/_/      \/_____/   \/_____/   \/_/", 103)
     };
 
-    private static async Task HandleChatMode(OpenAILogic openAILogic, GPTParameters gptParameters)
+    private static async Task HandleChatMode(OpenAILogic openAILogic, GptOptions gptParameters)
     {
         var initialRequest = await ParameterMapping.MapCommon(gptParameters, openAILogic, new ChatCompletionCreateRequest()
         {
@@ -412,7 +289,7 @@ class Program
         return Random.Next(Logos.Count);
     }
 
-    public static async Task<List<Document>> ReadEmbedFilesAsync(GPTParameters parameters)
+    public static async Task<List<Document>> ReadEmbedFilesAsync(GptOptions parameters)
     {
         List<Document> documents = new();
         if (parameters.EmbedFilenames is { Length: > 0 })
@@ -430,7 +307,7 @@ class Program
         return documents;
     }
 
-    public static async Task<List<Document>> ReadEmbedDirectoriesAsync(GPTParameters parameters)
+    public static async Task<List<Document>> ReadEmbedDirectoriesAsync(GptOptions parameters)
     {
         List<Document> documents = new();
 
@@ -475,41 +352,71 @@ class Program
     }
 
 
-    private static void ConfigureServices(IServiceCollection services, GPTParametersBinder gptParametersBinder, ParameterMapping.Mode mode)
+    private static void ConfigureServices(IServiceCollection services, IConfiguration configuration, ParameterMapping.Mode? modeOverride)
     {
-        var gptParameters = gptParametersBinder.GPTParameters;
-
-        Configuration = new ConfigurationBuilder()
-            .SetBasePath(AppDomain.CurrentDomain.BaseDirectory)
-            .AddJsonFile(gptParameters.Config ?? "appSettings.json", optional: true, reloadOnChange: false)
-            .Build();
-
-        gptParameters.ApiKey ??= Configuration["OpenAI:api-key"];
-        gptParameters.BaseDomain ??= Configuration["OpenAI:base-domain"];
+        var gptParameters = BindParameters(configuration, modeOverride);
 
         // Add the configuration object to the services
-        services.AddSingleton<IConfiguration>(Configuration);
+        services.AddSingleton(configuration);
         services.AddOpenAIService(settings =>
         {
             settings.ApiKey = gptParameters.ApiKey;
-            settings.BaseDomain = gptParameters.BaseDomain;
+            if (!string.IsNullOrWhiteSpace(gptParameters.BaseDomain))
+            {
+                settings.BaseDomain = gptParameters.BaseDomain;
+            }
         });
         services.AddSingleton<OpenAILogic>();
 
-        services.AddSingleton(_ => new DiscordSocketConfig
+        if (gptParameters.Mode == ParameterMapping.Mode.Discord)
         {
-            GatewayIntents = GatewayIntents.Guilds | GatewayIntents.GuildMessages | GatewayIntents.GuildMembers |
-                             GatewayIntents.MessageContent | GatewayIntents.DirectMessages |
-                             GatewayIntents.DirectMessageReactions |
-                             GatewayIntents.GuildMessageReactions | GatewayIntents.GuildEmojis,
-            MessageCacheSize = 10
-        });
+            services.AddSingleton(_ => new DiscordSocketConfig
+            {
+                GatewayIntents = GatewayIntents.Guilds | GatewayIntents.GuildMessages | GatewayIntents.GuildMembers |
+                                 GatewayIntents.MessageContent | GatewayIntents.DirectMessages |
+                                 GatewayIntents.DirectMessageReactions |
+                                 GatewayIntents.GuildMessageReactions | GatewayIntents.GuildEmojis,
+                MessageCacheSize = 10
+            });
 
-        services.AddScoped<DiscordSocketClient>();
+            services.AddScoped<DiscordSocketClient>();
+            services.AddHostedService<InstructionGPT>();
+        }
 
-        services.AddSingleton<InstructionGPT>();
-        services.AddSingleton(_ => gptParameters);
+        services.AddSingleton(gptParameters);
     }
 
-    public static IConfigurationRoot Configuration { get; set; }
+    private static GptOptions BindParameters(IConfiguration configuration, ParameterMapping.Mode? modeOverride)
+    {
+        var gptParameters = configuration.GetSection("GPT").Get<GptOptions>() ?? new GptOptions();
+
+        gptParameters.ApiKey ??= configuration["OpenAI:ApiKey"];
+        gptParameters.BaseDomain ??= configuration["OpenAI:BaseDomain"];
+
+        if (modeOverride.HasValue)
+        {
+            gptParameters.Mode = modeOverride.Value;
+        }
+        else
+        {
+            var modeRaw = configuration["GPT:Mode"];
+            if (!string.IsNullOrWhiteSpace(modeRaw) &&
+                Enum.TryParse<ParameterMapping.Mode>(modeRaw, true, out var parsedMode))
+            {
+                gptParameters.Mode = parsedMode;
+            }
+        }
+
+        return gptParameters;
+    }
+
+    private static (ParameterMapping.Mode? ModeOverride, string[] RemainingArgs) ParseModeOverride(string[] args)
+    {
+        if (args.Length > 0 && string.Equals(args[0], "chat", StringComparison.OrdinalIgnoreCase))
+        {
+            return (ParameterMapping.Mode.Chat, args.Skip(1).ToArray());
+        }
+
+        return (null, args);
+    }
 }
