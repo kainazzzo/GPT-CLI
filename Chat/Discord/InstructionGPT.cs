@@ -21,8 +21,14 @@ public class InstructionGPT : DiscordBotBase, IHostedService
     }
     public record ChannelState
     {
+        [JsonPropertyName("guild-id")]
+        public ulong GuildId { get; set; }
+
         [JsonPropertyName("guild-name")]
         public string GuildName { get; set; }
+
+        [JsonPropertyName("channel-id")]
+        public ulong ChannelId { get; set; }
 
         [JsonPropertyName("channel-name")]
         public string ChannelName { get; set; }
@@ -234,24 +240,31 @@ public class InstructionGPT : DiscordBotBase, IHostedService
         var files = Directory.GetFiles("channels", "*.state.json", SearchOption.AllDirectories);
         foreach (var file in files)
         {
-            var tokens = file.Split("\\./".ToCharArray());
-            if (tokens.Length == 5 && tokens[3] == "state")
+            if (!TryGetChannelIdFromStatePath(file, out var channelId))
             {
-                ulong channelId = Convert.ToUInt64(tokens[1]);
-                await Console.Out.WriteLineAsync($"Loading state for channel {channelId}");
-                await using var stream = File.OpenRead(file);
-                var channelState = await ReadAsync(channelId, stream);
-
-                // Always read the channel and guild name in case they change
-                var channel = (IGuildChannel)(await Client.GetChannelAsync(channelId));
-
-                channelState.ChannelName = channel?.Name;
-                channelState.GuildName = channel?.Guild.Name;
-            
-                channelState.InstructionChat ??= new(OpenAILogic, DefaultParameters);
-                channelState.InstructionChat.ChatBotState ??= new() { PrimeDirectives = PrimeDirective.ToList() };
-                channelState.InstructionChat.OpenAILogic = OpenAILogic;
+                continue;
             }
+
+            await Console.Out.WriteLineAsync($"Loading state for channel {channelId}");
+            await using var stream = File.OpenRead(file);
+            var channelState = await ReadAsync(channelId, stream);
+            if (channelState == null)
+            {
+                continue;
+            }
+
+            channelState.ChannelId = channelId;
+
+            // Always read the channel and guild name in case they change
+            var channel = await Client.GetChannelAsync(channelId) as IGuildChannel;
+            if (channel != null)
+            {
+                EnsureChannelStateMetadata(channelState, channel);
+            }
+        
+            channelState.InstructionChat ??= new(OpenAILogic, DefaultParameters);
+            channelState.InstructionChat.ChatBotState ??= new() { PrimeDirectives = PrimeDirective.ToList() };
+            channelState.InstructionChat.OpenAILogic = OpenAILogic;
         }
     }
 
@@ -266,9 +279,29 @@ public class InstructionGPT : DiscordBotBase, IHostedService
 
     private async Task SaveCachedChannelState(ulong channelId)
     {
-        Directory.CreateDirectory($"channels/{channelId}");
+        if (!ChannelBots.TryGetValue(channelId, out var channelState))
+        {
+            channelState = InitializeChannel(channelId);
+        }
 
-        await using var stream = File.Create($"channels/{channelId}/{channelId}.state.json");
+        if (channelState.ChannelId == 0 || channelState.GuildId == 0)
+        {
+            var guildChannel = Client.GetChannel(channelId) as IGuildChannel;
+            if (guildChannel != null)
+            {
+                EnsureChannelStateMetadata(channelState, guildChannel);
+            }
+            else
+            {
+                channelState.ChannelId = channelId;
+            }
+        }
+
+        var channelDirectory = GetChannelDirectory(channelState);
+        Directory.CreateDirectory(channelDirectory);
+        var stateFileName = $"{GetChannelFileName(channelState)}.state.json";
+
+        await using var stream = File.Create(Path.Combine(channelDirectory, stateFileName));
         await WriteAsync(channelId, stream);
     }
 
@@ -457,8 +490,10 @@ public class InstructionGPT : DiscordBotBase, IHostedService
         }
         ChannelState channel = new()
         {
+            GuildId = discordChannel.GuildId,
             ChannelName = discordChannel.Name,
             GuildName = discordChannel.Guild.Name,
+            ChannelId = discordChannel.Id,
             InstructionChat = new(OpenAILogic, DefaultParameters.Adapt<GptOptions>())
             {
                 ChatBotState = new()
@@ -516,14 +551,18 @@ public class InstructionGPT : DiscordBotBase, IHostedService
             return;
         }
 
-        
-        Directory.CreateDirectory("channels");
-        Directory.CreateDirectory($"channels/{message.Channel.Id}");
-        Directory.CreateDirectory($"channels/{message.Channel.Id}/embeds/");
+        if (message.Channel is IGuildChannel guildChannel)
+        {
+            EnsureChannelStateMetadata(channelState, guildChannel);
+        }
+
+        var channelDirectory = GetChannelDirectory(channelState);
+        var embedDirectory = Path.Combine(channelDirectory, "embeds");
+        Directory.CreateDirectory(embedDirectory);
 
         var channelDocs = Documents.GetOrAdd(message.Channel.Id, new List<Document>());
 
-        if (await CreateAndSaveEmbedding(message.Content, $"channels/{message.Channel.Id}/embeds/{message.Id}.embed.json", channelState.InstructionChat.ChatBotState.Parameters.ChunkSize) is { Count: > 0 } newDocs)
+        if (await CreateAndSaveEmbedding(message.Content, Path.Combine(embedDirectory, $"{message.Id}.embed.json"), channelState.InstructionChat.ChatBotState.Parameters.ChunkSize) is { Count: > 0 } newDocs)
         {
             channelDocs.AddRange(newDocs);
 
@@ -548,7 +587,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                     using var streamReader = new StreamReader(responseStream);
                     
 
-                    if (await CreateAndSaveEmbedding(await streamReader.ReadToEndAsync(), $"channels/{message.Channel.Id}/embeds/{message.Id}.{attachment.Id}.embed.json", channelState.InstructionChat.ChatBotState.Parameters.ChunkSize) is { Count: > 0 } attachmentDocs)
+                    if (await CreateAndSaveEmbedding(await streamReader.ReadToEndAsync(), Path.Combine(embedDirectory, $"{message.Id}.{attachment.Id}.embed.json"), channelState.InstructionChat.ChatBotState.Parameters.ChunkSize) is { Count: > 0 } attachmentDocs)
                     {
                         channelDocs.AddRange(attachmentDocs);
 
@@ -590,12 +629,118 @@ public class InstructionGPT : DiscordBotBase, IHostedService
         {
             await using var fileStream = File.OpenRead(file);
             var documents = await JsonSerializer.DeserializeAsync<List<Document>>(fileStream);
-            var tokens = file.Split("\\/.".ToCharArray());
-            var channelId = ulong.Parse(tokens[1]);
+            if (!TryGetChannelIdFromEmbedPath(file, out var channelId))
+            {
+                continue;
+            }
             var channelDocs = Documents.GetOrAdd(channelId, _ => new List<Document>());
             channelDocs.AddRange(documents);
         }
     
+    }
+
+    private static void EnsureChannelStateMetadata(ChannelState channelState, IGuildChannel guildChannel)
+    {
+        channelState.GuildId = guildChannel.GuildId;
+        channelState.GuildName = guildChannel.Guild.Name;
+        channelState.ChannelId = guildChannel.Id;
+        channelState.ChannelName = guildChannel.Name;
+    }
+
+    private static string GetChannelDirectory(ChannelState channelState)
+    {
+        var guildFolder = $"{SanitizeName(channelState.GuildName ?? "guild")}_{channelState.GuildId}";
+        var channelFolder = $"{SanitizeName(channelState.ChannelName ?? "channel")}_{channelState.ChannelId}";
+        return Path.Combine("channels", guildFolder, channelFolder);
+    }
+
+    private static string GetChannelFileName(ChannelState channelState)
+    {
+        return $"{SanitizeName(channelState.ChannelName ?? "channel")}_{channelState.ChannelId}";
+    }
+
+    private static bool TryGetChannelIdFromStatePath(string file, out ulong channelId)
+    {
+        channelId = 0;
+        var channelDirectory = Path.GetDirectoryName(file);
+        if (string.IsNullOrWhiteSpace(channelDirectory))
+        {
+            return false;
+        }
+
+        var channelFolder = new DirectoryInfo(channelDirectory).Name;
+        return TryParseIdFromName(channelFolder, out channelId);
+    }
+
+    private static bool TryGetChannelIdFromEmbedPath(string file, out ulong channelId)
+    {
+        channelId = 0;
+        var embedDirectory = Path.GetDirectoryName(file);
+        if (string.IsNullOrWhiteSpace(embedDirectory))
+        {
+            return false;
+        }
+
+        var channelDirectory = Directory.GetParent(embedDirectory);
+        if (channelDirectory == null)
+        {
+            return false;
+        }
+
+        return TryParseIdFromName(channelDirectory.Name, out channelId);
+    }
+
+    private static bool TryParseIdFromName(string name, out ulong id)
+    {
+        id = 0;
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return false;
+        }
+
+        var underscoreIndex = name.LastIndexOf('_');
+        if (underscoreIndex >= 0 && underscoreIndex < name.Length - 1)
+        {
+            if (ulong.TryParse(name[(underscoreIndex + 1)..], out id))
+            {
+                return true;
+            }
+        }
+
+        return ulong.TryParse(name, out id);
+    }
+
+    private static string SanitizeName(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return "unknown";
+        }
+
+        var invalidChars = Path.GetInvalidFileNameChars();
+        var builder = new StringBuilder(name.Length);
+        var lastWasDash = false;
+
+        foreach (var ch in name)
+        {
+            var isInvalid = invalidChars.Contains(ch);
+            if (char.IsLetterOrDigit(ch) || ch == '-' || ch == '_')
+            {
+                builder.Append(ch);
+                lastWasDash = false;
+            }
+            else if (char.IsWhiteSpace(ch) || isInvalid)
+            {
+                if (!lastWasDash)
+                {
+                    builder.Append('-');
+                    lastWasDash = true;
+                }
+            }
+        }
+
+        var sanitized = builder.ToString().Trim('-');
+        return string.IsNullOrWhiteSpace(sanitized) ? "unknown" : sanitized;
     }
 
     private async Task HandleInstructionCommand(SocketMessageComponent command)
