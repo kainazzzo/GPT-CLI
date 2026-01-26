@@ -760,184 +760,152 @@ public class InstructionGPT : DiscordBotBase, IHostedService
 
     private async Task HandleGptCliCommand(SocketSlashCommand command)
     {
+        if (!command.HasResponded)
+        {
+            await command.DeferAsync(ephemeral: true);
+        }
+
         var channel = command.Channel;
         if (!ChannelBots.TryGetValue(channel.Id, out var chatBot))
         {
             chatBot = InitializeChannel(channel.Id);
         }
 
-
+        var responses = new List<string>();
         var options = command.Data.Options;
-        foreach (var option in options)
+        if (options == null || options.Count == 0)
         {
-            var subOption = option.Options.FirstOrDefault();
-            switch (option.Name)
+            responses.Add("No options provided.");
+        }
+        else
+        {
+            foreach (var option in options)
             {
-                case "clear":
-                    
-                    switch (subOption.Name)
-                    {
-                        case "messages":
-                            chatBot.InstructionChat.ClearMessages();
-                            
-                            break;
-                        case "instructions":
-                            chatBot.InstructionChat.ClearInstructions();
-                            break;
-                        case "all":
-                            chatBot.InstructionChat.ClearMessages();
-                            chatBot.InstructionChat.ClearInstructions();
-                            break;
-                    }
-
-                    var clearOptionValue = subOption.Name;
-
-                    try
-                    {
-                        await command.RespondAsync(
-                            $"{char.ToUpper(clearOptionValue[0])}{clearOptionValue.Substring(1)} cleared.");
-                    }
-                    catch (Exception ex)
-                    {
-                        await Console.Out.WriteLineAsync(ex.Message);
-                    }
-                
-                    
-
-                    break;
-                case "instruction":
-                    var instruction = option.Value.ToString();
-                    if (!string.IsNullOrWhiteSpace(instruction))
-                    {
-                        chatBot.InstructionChat.AddInstruction(new(StaticValues.ChatMessageRoles.System, instruction));
-                        await SaveCachedChannelState(channel.Id);
-                        try
+                var subOption = option.Options?.FirstOrDefault();
+                switch (option.Name)
+                {
+                    case "clear":
+                        if (subOption == null)
                         {
-                            await command.RespondAsync("Instruction received!");
+                            responses.Add("Specify messages, instructions, or all.");
+                            break;
                         }
-                        catch (Exception ex)
+
+                        switch (subOption.Name)
                         {
-                            await Console.Out.WriteLineAsync(ex.Message);
+                            case "messages":
+                                chatBot.InstructionChat.ClearMessages();
+                                break;
+                            case "instructions":
+                                chatBot.InstructionChat.ClearInstructions();
+                                break;
+                            case "all":
+                                chatBot.InstructionChat.ClearMessages();
+                                chatBot.InstructionChat.ClearInstructions();
+                                break;
+                            default:
+                                responses.Add($"Unknown clear option: {subOption.Name}");
+                                break;
                         }
-                    }
-                    break;
-                case "instructions":
-                    try
-                    {
-                        await command.RespondAsync($"Instructions: {chatBot.InstructionChat.InstructionStr}");
-                    }
-                    catch (Exception ex)
-                    {
-                        await Console.Out.WriteLineAsync(ex.Message);
-                    }
-                    break;
-                case "set":
-                    switch (subOption.Name)
-                    {
-                        case "enabled":
-                            if (subOption.Value is bool enabled)
-                            {
-                                chatBot.Options.Enabled = enabled;
-                                try
-                                {
-                                    await command.RespondAsync($"InstructionChat bot {(enabled ? "enabled" : "disabled")}.");
-                                }
-                                catch (Exception ex)
-                                {
-                                    await Console.Out.WriteLineAsync(ex.Message);
-                                }
-                            }
-                            break;
-                        case "mute":
-                            if (subOption.Value is bool muted)
-                            {
-                                chatBot.Options.Muted = muted;
 
-                                try
-                                {
-                                    await command.RespondAsync($"InstructionChat bot {(muted ? "muted" : "un-muted")}.");
-                                }
-                                catch (Exception ex)
-                                {
-                                    await Console.Out.WriteLineAsync(ex.Message);
-                                }
-                            }
+                        var clearName = string.IsNullOrWhiteSpace(subOption.Name) ? "Option" : subOption.Name;
+                        responses.Add($"{char.ToUpper(clearName[0])}{clearName.Substring(1)} cleared.");
+                        break;
+                    case "instruction":
+                        var instruction = option.Value?.ToString();
+                        if (!string.IsNullOrWhiteSpace(instruction))
+                        {
+                            chatBot.InstructionChat.AddInstruction(new(StaticValues.ChatMessageRoles.System, instruction));
+                            responses.Add("Instruction received!");
+                        }
+                        break;
+                    case "instructions":
+                        responses.Add($"Instructions: {chatBot.InstructionChat.InstructionStr}");
+                        break;
+                    case "set":
+                        if (subOption == null)
+                        {
+                            responses.Add("Specify a setting to change.");
                             break;
-                        case "max-tokens":
-                            if (subOption.Value is long maxTokens)
-                            {
-                                chatBot.InstructionChat.ChatBotState.Parameters.MaxTokens = (int?)maxTokens;
-                                try
-                                {
-                                    await command.RespondAsync($"Max tokens set to {maxTokens}.");
-                                }
-                                catch (Exception ex)
-                                {
-                                    await Console.Out.WriteLineAsync(ex.Message);
-                                }
-                            }
-                            break;
-                        case "max-chat-history-length":
-                            if (subOption.Value is long maxChatHistoryLength)
-                            {
-                                chatBot.InstructionChat.ChatBotState.Parameters.MaxChatHistoryLength = (uint)maxChatHistoryLength;
-                                try
-                                {
-                                    await command.RespondAsync(
-                                        $"Max chat history length set to {maxChatHistoryLength}.");
-                                }
-                                catch (Exception ex)
-                                {
-                                    await Console.Out.WriteLineAsync(ex.Message);
-                                }
-                            }
-                            break;
-                        case "model":
-                            if (subOption.Value is string model)
-                            {
-                                chatBot.InstructionChat.ChatBotState.Parameters.Model = model;
-                                try
-                                {
-                                    await command.RespondAsync($"Model set to {model}.");
-                                }
-                                catch (Exception ex)
-                                {
-                                    await Console.Out.WriteLineAsync(ex.Message);
-                                }
-                            }
-                            break;
-                        case "embed-mode":
-                            if (subOption.Value is string embedMode)
-                            {
-                                chatBot.InstructionChat.ChatBotState.EmbedMode = Enum.Parse<InstructionChatBot.EmbedMode>(embedMode);
-                                try
-                                {
-                                    await command.RespondAsync($"Embed mode set to {embedMode}.");
-                                }
-                                catch (Exception ex)
-                                {
-                                    await Console.Out.WriteLineAsync(ex.Message);
-                                }
-                            }
-                            break;
-                        case "response-mode":
-                            if (subOption.Value is string responseMode)
-                            {
-                                chatBot.InstructionChat.ChatBotState.ResponseMode = Enum.Parse<InstructionChatBot.ResponseMode>(responseMode);
-                                try
-                                {
-                                    await command.RespondAsync($"Response mode set to {responseMode}.");
-                                }
-                                catch (Exception ex)
-                                {
-                                    await Console.Out.WriteLineAsync(ex.Message);
-                                }
-                            }
-                            break;
+                        }
 
-                    }
-                    break;
+                        switch (subOption.Name)
+                        {
+                            case "enabled":
+                                if (subOption.Value is bool enabled)
+                                {
+                                    chatBot.Options.Enabled = enabled;
+                                    responses.Add($"InstructionChat bot {(enabled ? "enabled" : "disabled")}.");
+                                }
+                                break;
+                            case "mute":
+                                if (subOption.Value is bool muted)
+                                {
+                                    chatBot.Options.Muted = muted;
+                                    responses.Add($"InstructionChat bot {(muted ? "muted" : "un-muted")}.");
+                                }
+                                break;
+                            case "max-tokens":
+                                if (subOption.Value is long maxTokens)
+                                {
+                                    chatBot.InstructionChat.ChatBotState.Parameters.MaxTokens = (int?)maxTokens;
+                                    responses.Add($"Max tokens set to {maxTokens}.");
+                                }
+                                break;
+                            case "max-chat-history-length":
+                                if (subOption.Value is long maxChatHistoryLength)
+                                {
+                                    chatBot.InstructionChat.ChatBotState.Parameters.MaxChatHistoryLength = (uint)maxChatHistoryLength;
+                                    responses.Add($"Max chat history length set to {maxChatHistoryLength}.");
+                                }
+                                break;
+                            case "model":
+                                if (subOption.Value is string model)
+                                {
+                                    chatBot.InstructionChat.ChatBotState.Parameters.Model = model;
+                                    responses.Add($"Model set to {model}.");
+                                }
+                                break;
+                            case "embed-mode":
+                                if (subOption.Value is string embedMode &&
+                                    Enum.TryParse<InstructionChatBot.EmbedMode>(embedMode, true, out var parsedEmbedMode))
+                                {
+                                    chatBot.InstructionChat.ChatBotState.EmbedMode = parsedEmbedMode;
+                                    responses.Add($"Embed mode set to {embedMode}.");
+                                }
+                                break;
+                            case "response-mode":
+                                if (subOption.Value is string responseMode &&
+                                    Enum.TryParse<InstructionChatBot.ResponseMode>(responseMode, true, out var parsedResponseMode))
+                                {
+                                    chatBot.InstructionChat.ChatBotState.ResponseMode = parsedResponseMode;
+                                    responses.Add($"Response mode set to {responseMode}.");
+                                }
+                                break;
+                            default:
+                                responses.Add($"Unknown setting: {subOption.Name}");
+                                break;
+                        }
+                        break;
+                    default:
+                        responses.Add($"Unknown option: {option.Name}");
+                        break;
+                }
             }
+        }
+
+        if (responses.Count == 0)
+        {
+            responses.Add("No changes made.");
+        }
+
+        if (command.HasResponded)
+        {
+            await command.FollowupAsync(string.Join("\n", responses), ephemeral: true);
+        }
+        else
+        {
+            await command.RespondAsync(string.Join("\n", responses), ephemeral: true);
         }
 
         await SaveCachedChannelState(channel.Id);

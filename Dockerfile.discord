@@ -1,15 +1,17 @@
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 COPY . .
+
+RUN ls -lah
 RUN dotnet publish gpt.csproj -c Release -r linux-x64 -o /app/publish --self-contained true -p:PublishSingleFile=true
 
 FROM redhat/ubi9
 WORKDIR /app
 RUN yum install -y libicu
 COPY --from=build /app/publish .
-COPY --from=build /src/appsettings.json .
+# appsettings.json is mounted at runtime via docker-compose
 ENV GPT__MODE="Discord"
 ENV GPT__CHUNKSIZE="1536"
 ENV GPT__MAXTOKENS="64000"
 ENV GPT__MODEL="gpt-5.2"
-ENTRYPOINT ./gpt
+ENTRYPOINT ./gpt discord
