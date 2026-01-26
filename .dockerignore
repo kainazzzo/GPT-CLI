@@ -1,0 +1,8 @@
+deploy/
+appsettings.json
+.env
+*.env
+channels/
+embeds/
+bin/
+obj/

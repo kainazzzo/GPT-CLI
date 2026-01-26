@@ -1,9 +1,8 @@
-version: '3.8'
-
 services:
   discord:
     build:
         context: .
         dockerfile: Dockerfile.discord
     volumes:
+      - ./appsettings.json:/app/appsettings.json:ro
       - /usr/local/discord/channels:/app/channels
