@@ -162,7 +162,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                     new SlashCommandOptionBuilder().WithName("max-tokens").WithDescription("Set the maximum tokens")
                         .WithType(ApplicationCommandOptionType.Integer).WithMinValue(50),
                     new SlashCommandOptionBuilder().WithName("model").WithDescription("Set the model")
-                        .WithType(ApplicationCommandOptionType.String).AddChoice("gpt-4o", "gpt-4o").AddChoice("gpt-4o-mini", "gpt-4o-mini").AddChoice("gpt-4", "gpt-4")
+                        .WithType(ApplicationCommandOptionType.String).AddChoice("gpt-5.2", "gpt-5.2").AddChoice("gpt-5.2", "gpt-5.2").AddChoice("gpt-5.2", "gpt-5.2")
                 }
             });
 

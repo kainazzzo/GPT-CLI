@@ -5,9 +5,9 @@
       "environmentVariables": {
         "GPT__MODE": "Discord",
         "GPT__CHUNKSIZE": "1536",
-        "GPT__MAXTOKENS": "8000",
+        "GPT__MAXTOKENS": "64000",
         "GPT__MAXCHATHISTORYLENGTH": "3072",
-        "GPT__MODEL": "gpt-4o"
+        "GPT__MODEL": "gpt-5.2"
       },
       "workingDirectory": "C:\\projects\\GPT-CLI\\"
     }

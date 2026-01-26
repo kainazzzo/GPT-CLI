@@ -8,9 +8,9 @@ public record GptOptions
 
     public string Prompt { get; set; }
 
-    public string Model { get; set; } = "gpt-4o";
+    public string Model { get; set; } = "gpt-5.2";
 
-    public int? MaxTokens { get; set; } = 3584;
+    public int? MaxTokens { get; set; } = 64000;
 
     public double? Temperature { get; set; }
 

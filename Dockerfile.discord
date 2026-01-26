@@ -10,6 +10,6 @@ COPY --from=build /app/publish .
 COPY --from=build /src/appsettings.json .
 ENV GPT__MODE="Discord"
 ENV GPT__CHUNKSIZE="1536"
-ENV GPT__MAXTOKENS="4096"
-ENV GPT__MODEL="gpt-4o"
+ENV GPT__MAXTOKENS="64000"
+ENV GPT__MODEL="gpt-5.2"
 ENTRYPOINT ./gpt

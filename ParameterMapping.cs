@@ -38,7 +38,7 @@ public static class ParameterMapping
 
         // Map the common parameters to the request
         request.Model = parameters.Model;
-        request.MaxTokens = parameters.MaxTokens;
+        SetModelTokenParameters(request, parameters, parameters.Model);
         request.N = parameters.N;
         request.Temperature = (float?)parameters.Temperature;
         request.TopP = (float?)parameters.TopP;
@@ -52,6 +52,31 @@ public static class ParameterMapping
         request.User = parameters.User;
 
         return request;
+    }
+
+    private static void SetModelTokenParameters(ChatCompletionCreateRequest request, GptOptions parameters, string modelName)
+    {
+        request.MaxTokens = null;
+        request.MaxCompletionTokens = null;
+
+        if (!parameters.MaxTokens.HasValue)
+        {
+            return;
+        }
+
+        if (RequiresCompletionTokens(modelName))
+        {
+        request.MaxCompletionTokens = parameters.MaxTokens;
+        }
+        else
+        {
+            request.MaxTokens = parameters.MaxTokens;
+        }
+    }
+
+    private static bool RequiresCompletionTokens(string modelName)
+    {
+        return modelName?.StartsWith("gpt-5", StringComparison.OrdinalIgnoreCase) ?? false;
     }
 
     public static async Task<ChatCompletionCreateRequest> MapChatEdit(GptOptions parameters, OpenAILogic openAILogic, Stream inputStream)
