@@ -47,6 +47,12 @@ public class InstructionGPT : DiscordBotBase, IHostedService
 
         [JsonPropertyName("muted")]
         public bool Muted { get; set; }
+
+        [JsonPropertyName("learning-enabled")]
+        public bool LearningEnabled { get; set; } = true;
+
+        [JsonPropertyName("factoid-similarity-threshold")]
+        public double FactoidSimilarityThreshold { get; set; } = 0.80;
     }
 
 
@@ -66,8 +72,9 @@ public class InstructionGPT : DiscordBotBase, IHostedService
         await Client.LoginAsync(TokenType.Bot, token);
 
 
-        // Load embeddings
+        // Load embeddings and factoids
         await LoadEmbeddings();
+        await LoadFactoids();
 
         await Client.StartAsync();
 
@@ -168,7 +175,42 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                     new SlashCommandOptionBuilder().WithName("max-tokens").WithDescription("Set the maximum tokens")
                         .WithType(ApplicationCommandOptionType.Integer).WithMinValue(50),
                     new SlashCommandOptionBuilder().WithName("model").WithDescription("Set the model")
-                        .WithType(ApplicationCommandOptionType.String).AddChoice("gpt-5.2", "gpt-5.2").AddChoice("gpt-5.2", "gpt-5.2").AddChoice("gpt-5.2", "gpt-5.2")
+                        .WithType(ApplicationCommandOptionType.String).AddChoice("gpt-5.2", "gpt-5.2").AddChoice("gpt-5.2", "gpt-5.2").AddChoice("gpt-5.2", "gpt-5.2"),
+                    new SlashCommandOptionBuilder().WithName("learning").WithDescription("Enable or disable factoid learning")
+                        .WithType(ApplicationCommandOptionType.Boolean)
+                }
+            }, new()
+            {
+                Name = "fact",
+                Description = "Factoid commands",
+                Type = ApplicationCommandOptionType.SubCommand,
+                Options = new()
+                {
+                    new SlashCommandOptionBuilder().WithName("set").WithDescription("Set a factoid")
+                        .WithType(ApplicationCommandOptionType.SubCommand)
+                        .AddOption(new SlashCommandOptionBuilder().WithName("term")
+                            .WithDescription("The factoid term")
+                            .WithType(ApplicationCommandOptionType.String)
+                            .WithRequired(true))
+                        .AddOption(new SlashCommandOptionBuilder().WithName("text")
+                            .WithDescription("The factoid text")
+                            .WithType(ApplicationCommandOptionType.String)
+                            .WithRequired(true)),
+                    new SlashCommandOptionBuilder().WithName("get").WithDescription("Get a factoid")
+                        .WithType(ApplicationCommandOptionType.SubCommand)
+                        .AddOption(new SlashCommandOptionBuilder().WithName("term")
+                            .WithDescription("The factoid term")
+                            .WithType(ApplicationCommandOptionType.String)
+                            .WithRequired(true)),
+                    new SlashCommandOptionBuilder().WithName("delete").WithDescription("Delete a factoid")
+                        .WithType(ApplicationCommandOptionType.SubCommand)
+                        .AddOption(new SlashCommandOptionBuilder().WithName("term")
+                            .WithDescription("The factoid term")
+                            .WithType(ApplicationCommandOptionType.String)
+                            .WithRequired(true))
+                    ,
+                    new SlashCommandOptionBuilder().WithName("list").WithDescription("List factoid terms")
+                        .WithType(ApplicationCommandOptionType.SubCommand)
                 }
             });
 
@@ -261,10 +303,11 @@ public class InstructionGPT : DiscordBotBase, IHostedService
             {
                 EnsureChannelStateMetadata(channelState, channel);
             }
-        
+         
             channelState.InstructionChat ??= new(OpenAILogic, DefaultParameters);
             channelState.InstructionChat.ChatBotState ??= new() { PrimeDirectives = PrimeDirective.ToList() };
             channelState.InstructionChat.OpenAILogic = OpenAILogic;
+            channelState.Options ??= new ChannelOptions();
         }
     }
 
@@ -369,7 +412,14 @@ public class InstructionGPT : DiscordBotBase, IHostedService
         }
 
         if (!channel.Options.Enabled)
+        {
+            if (channel.Options.LearningEnabled && !string.IsNullOrWhiteSpace(message.Content))
+            {
+                var isTagged = message.MentionedUsers.Any(user => user.Id == Client.CurrentUser.Id);
+                await HandleInfobotMessageAsync(channel, message, isTagged);
+            }
             return;
+        }
 
         if (message.Content.StartsWith("!ignore"))
             return;
@@ -403,6 +453,16 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                 }
             }
         }
+
+        if (channel.Options.LearningEnabled)
+        {
+            var isTagged = message.MentionedUsers.Any(user => user.Id == Client.CurrentUser.Id);
+            await HandleInfobotMessageAsync(channel, message, isTagged);
+        }
+
+        await AddFactoidContextAsync(channel, message);
+
+        // Infobot-style learning handles listening updates.
 
         // Add this message as a chat log
         channel.InstructionChat.AddMessage(new ChatMessage(StaticValues.ChatMessageRoles.User, $"<{message.Author.Username}> {message.Content}"));
@@ -459,6 +519,215 @@ public class InstructionGPT : DiscordBotBase, IHostedService
         }
 
         await SaveCachedChannelState(message.Channel.Id);
+    }
+
+    private async Task AddFactoidContextAsync(ChannelState channel, SocketMessage message)
+    {
+        var channelFactoids = ChannelFactoids.GetOrAdd(message.Channel.Id, _ => new List<FactoidEntry>());
+        if (channelFactoids.Count == 0)
+        {
+            return;
+        }
+
+        var embedding = await OpenAILogic.GetEmbeddingForPrompt(message.Content);
+        var threshold = channel.Options.FactoidSimilarityThreshold;
+        var closestChannel = FindMostSimilarFactoids(channelFactoids, embedding, channel.InstructionChat.ChatBotState.Parameters.ClosestMatchLimit, threshold);
+        if (closestChannel.Count == 0)
+        {
+            return;
+        }
+
+        channel.InstructionChat.AddMessage(new(StaticValues.ChatMessageRoles.System,
+            $"Factoid context for the next message. Use these facts if relevant:"));
+        foreach (var factoid in closestChannel)
+        {
+            channel.InstructionChat.AddMessage(new(StaticValues.ChatMessageRoles.System,
+                $"---factoid---\r\n{factoid.Text}\r\n--end factoid---"));
+        }
+    }
+
+    private async Task HandleInfobotMessageAsync(ChannelState channel, SocketMessage message, bool isTagged)
+    {
+        if (string.IsNullOrWhiteSpace(message.Content))
+        {
+            return;
+        }
+
+        var isListening = channel.Options.LearningEnabled;
+        var canRespond = isListening;
+
+        if (!isListening)
+        {
+            return;
+        }
+
+        var content = message.Content.Trim();
+        if (isTagged)
+        {
+            content = content.Replace($"<@{Client.CurrentUser.Id}>", string.Empty, StringComparison.OrdinalIgnoreCase)
+                             .Replace($"<@!{Client.CurrentUser.Id}>", string.Empty, StringComparison.OrdinalIgnoreCase)
+                             .Trim();
+        }
+
+        if (TryParseInfobotSet(content, out var term, out var fact))
+        {
+            if (isListening)
+            {
+                await SaveFactoidAsync(channel, message, term, fact);
+                if (isTagged)
+                {
+                    await SendFactoidAcknowledgementAsync(channel, message, term, fact, "Learned a new factoid.");
+                }
+            }
+            return;
+        }
+
+        if (TryParseInfobotQuery(content, out var queryTerm))
+        {
+            await RespondWithFactoidMatchAsync(channel, message, queryTerm);
+            return;
+        }
+    }
+
+    private static bool TryParseInfobotSet(string content, out string term, out string fact)
+    {
+        term = null;
+        fact = null;
+
+        var separatorIndex = content.IndexOf(" is ", StringComparison.OrdinalIgnoreCase);
+        if (separatorIndex <= 0)
+        {
+            return false;
+        }
+
+        term = content[..separatorIndex].Trim();
+        fact = content[(separatorIndex + 4)..].Trim();
+        return !string.IsNullOrWhiteSpace(term) && !string.IsNullOrWhiteSpace(fact);
+    }
+
+    private static bool TryParseInfobotQuery(string content, out string term)
+    {
+        term = null;
+        var trimmed = content.Trim().TrimEnd('?').Trim();
+        if (trimmed.StartsWith("what is ", StringComparison.OrdinalIgnoreCase))
+        {
+            term = trimmed.Substring("what is ".Length).Trim();
+            return !string.IsNullOrWhiteSpace(term);
+        }
+
+        if (content.EndsWith("?", StringComparison.Ordinal) && !string.IsNullOrWhiteSpace(trimmed))
+        {
+            term = trimmed;
+            return !string.IsNullOrWhiteSpace(term);
+        }
+
+        return false;
+    }
+
+    private async Task RespondWithFactoidMatchAsync(ChannelState channel, SocketMessage message, string query)
+    {
+        var factoids = ChannelFactoids.GetOrAdd(message.Channel.Id, _ => new List<FactoidEntry>());
+        if (factoids.Count == 0)
+        {
+            return;
+        }
+
+        var normalizedQuery = NormalizeTerm(query);
+        var exactMatch = factoids.FirstOrDefault(f =>
+            f.Term != null && string.Equals(f.Term, normalizedQuery, StringComparison.OrdinalIgnoreCase));
+        var match = exactMatch ?? await FindMostSimilarFactoidAsync(factoids, query, channel);
+        if (match == null)
+        {
+            return;
+        }
+
+        var response = await GenerateFactoidResponseAsync(channel, query, match, message);
+        if (string.IsNullOrWhiteSpace(response))
+        {
+            return;
+        }
+
+        if (message is IUserMessage userMessage)
+        {
+            await userMessage.ReplyAsync(response);
+        }
+        else
+        {
+            await message.Channel.SendMessageAsync(response);
+        }
+    }
+
+    private async Task<FactoidEntry> FindMostSimilarFactoidAsync(List<FactoidEntry> factoids, string query, ChannelState channel)
+    {
+        var embedding = await OpenAILogic.GetEmbeddingForPrompt(query);
+        var threshold = channel.Options.FactoidSimilarityThreshold;
+        var matches = FindMostSimilarFactoids(factoids, embedding, 1, threshold);
+        return matches.FirstOrDefault();
+    }
+
+    private async Task<string> GenerateFactoidResponseAsync(ChannelState channel, string query, FactoidEntry factoid, SocketMessage message)
+    {
+        var prompt = $"Matched factoid for '{query}': {factoid.Text}\n" +
+                     $"Stated by {factoid.SourceUsername} (user {factoid.SourceUserId}) in message {factoid.SourceMessageId} on {factoid.CreatedAt:O}.\n" +
+                     $"Respond in one short paragraph: explain the match, summarize the fact in context, and mention who/when it was stated.";
+        var request = new ChatCompletionCreateRequest
+        {
+            Model = channel.InstructionChat.ChatBotState.Parameters.Model,
+            Messages = new List<ChatMessage>
+            {
+                new(StaticValues.ChatMessageRoles.System, "You are a concise Discord bot."),
+                new(StaticValues.ChatMessageRoles.User, prompt)
+            }
+        };
+
+        var response = await OpenAILogic.CreateChatCompletionAsync(request);
+        if (!response.Successful)
+        {
+            await Console.Out.WriteLineAsync($"Factoid response failed: {response.Error?.Message}");
+            return null;
+        }
+
+        return response.Choices.FirstOrDefault()?.Message?.Content;
+    }
+
+    private async Task SendFactoidAcknowledgementAsync(ChannelState channel, SocketMessage message, string term, string fact, string prefix)
+    {
+        var info = $"{prefix} `{term}` → {fact}";
+        if (message is IUserMessage userMessage)
+        {
+            await userMessage.ReplyAsync(info);
+        }
+        else
+        {
+            await message.Channel.SendMessageAsync(info);
+        }
+    }
+
+    private static string NormalizeTerm(string term)
+    {
+        return string.IsNullOrWhiteSpace(term)
+            ? null
+            : term.Trim().TrimEnd('?').ToLowerInvariant();
+    }
+
+    private static List<FactoidEntry> FindMostSimilarFactoids(List<FactoidEntry> factoids, List<double> queryEmbedding, int limit, double threshold)
+    {
+        var matches = new List<(FactoidEntry Factoid, double Similarity)>(factoids.Count);
+        foreach (var factoid in factoids)
+        {
+            if (factoid.Embedding == null || factoid.Embedding.Count == 0)
+            {
+                continue;
+            }
+            var similarity = CosineSimilarity.Calculate(queryEmbedding, factoid.Embedding);
+            if (similarity >= threshold)
+            {
+                matches.Add((factoid, similarity));
+            }
+        }
+
+        matches.Sort((x, y) => y.Similarity.CompareTo(x.Similarity));
+        return matches.Take(limit).Select(x => x.Factoid).ToList();
     }
 
     private MessageComponent BuildStandardComponents()
@@ -639,6 +908,37 @@ public class InstructionGPT : DiscordBotBase, IHostedService
     
     }
 
+    private async Task LoadFactoids()
+    {
+        Directory.CreateDirectory("channels");
+        var factoidFiles = Directory.GetFiles("channels", "facts.json", SearchOption.AllDirectories).ToList();
+        foreach (var file in factoidFiles)
+        {
+            if (!TryGetChannelIdFromFactoidPath(file, out var channelId))
+            {
+                continue;
+            }
+
+            await using var fileStream = File.OpenRead(file);
+            var factoids = await JsonSerializer.DeserializeAsync<List<FactoidEntry>>(fileStream) ?? new List<FactoidEntry>();
+            ChannelFactoids[channelId] = factoids;
+        }
+    }
+
+    private static bool TryGetChannelIdFromFactoidPath(string file, out ulong channelId)
+    {
+        channelId = 0;
+        var channelDirectory = Path.GetDirectoryName(file);
+        if (string.IsNullOrWhiteSpace(channelDirectory))
+        {
+            return false;
+        }
+
+        var channelFolder = new DirectoryInfo(channelDirectory).Name;
+        return TryParseIdFromName(channelFolder, out channelId);
+    }
+
+
     private static void EnsureChannelStateMetadata(ChannelState channelState, IGuildChannel guildChannel)
     {
         channelState.GuildId = guildChannel.GuildId;
@@ -653,6 +953,12 @@ public class InstructionGPT : DiscordBotBase, IHostedService
         var channelFolder = $"{SanitizeName(channelState.ChannelName ?? "channel")}_{channelState.ChannelId}";
         return Path.Combine("channels", guildFolder, channelFolder);
     }
+
+    private static string GetChannelFactoidFile(ChannelState channelState)
+    {
+        return Path.Combine(GetChannelDirectory(channelState), "facts.json");
+    }
+
 
     private static string GetChannelFileName(ChannelState channelState)
     {
@@ -882,8 +1188,102 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                                     responses.Add($"Response mode set to {responseMode}.");
                                 }
                                 break;
+                            case "learning":
+                                if (subOption.Value is bool learningEnabled)
+                                {
+                                    chatBot.Options.LearningEnabled = learningEnabled;
+                                    responses.Add($"Learning {(learningEnabled ? "enabled" : "disabled")}.");
+                                }
+                                break;
                             default:
                                 responses.Add($"Unknown setting: {subOption.Name}");
+                                break;
+                        }
+                        break;
+                    case "fact":
+                        if (subOption == null)
+                        {
+                            responses.Add("Specify a fact command.");
+                            break;
+                        }
+
+                        switch (subOption.Name)
+                        {
+                            case "set":
+                            {
+                                var term = subOption.Options?.FirstOrDefault(o => o.Name == "term")?.Value?.ToString();
+                                var text = subOption.Options?.FirstOrDefault(o => o.Name == "text")?.Value?.ToString();
+                                if (string.IsNullOrWhiteSpace(term) || string.IsNullOrWhiteSpace(text))
+                                {
+                                    responses.Add("Provide term and text.");
+                                    break;
+                                }
+
+                                var channelState = ChannelBots.GetOrAdd(channel.Id, InitializeChannel);
+                                await SaveFactoidAsync(channelState, command.User, channel, term, text);
+                                responses.Add($"Factoid set: {term}.");
+                                break;
+                            }
+                            case "get":
+                            {
+                                var term = subOption.Options?.FirstOrDefault(o => o.Name == "term")?.Value?.ToString();
+                                if (string.IsNullOrWhiteSpace(term))
+                                {
+                                    responses.Add("Provide term.");
+                                    break;
+                                }
+
+                                var entry = FindExactTermFactoid(channel.Id, term);
+                                if (entry == null)
+                                {
+                                    responses.Add($"No factoid found for {term}.");
+                                }
+                                else
+                                {
+                                    responses.Add($"{term} -> {entry.Text}");
+                                }
+                                break;
+                            }
+                            case "delete":
+                            {
+                                var term = subOption.Options?.FirstOrDefault(o => o.Name == "term")?.Value?.ToString();
+                                if (string.IsNullOrWhiteSpace(term))
+                                {
+                                    responses.Add("Provide term.");
+                                    break;
+                                }
+
+                                var channelState = ChannelBots.GetOrAdd(channel.Id, InitializeChannel);
+                                if (RemoveFactoidByTerm(channelState, term))
+                                {
+                                    responses.Add($"Factoid deleted: {term}.");
+                                }
+                                else
+                                {
+                                    responses.Add($"No factoid found for {term}.");
+                                }
+                                break;
+                            }
+                            case "list":
+                            {
+                                if (!ChannelFactoids.TryGetValue(channel.Id, out var factoids) || factoids.Count == 0)
+                                {
+                                    responses.Add("No factoids stored.");
+                                    break;
+                                }
+
+                                var terms = factoids.Select(f => f.Term)
+                                    .Where(t => !string.IsNullOrWhiteSpace(t))
+                                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                                    .OrderBy(t => t)
+                                    .ToList();
+                                responses.Add(terms.Count == 0
+                                    ? "No factoids stored."
+                                    : $"Factoids: {string.Join(", ", terms)}");
+                                break;
+                            }
+                            default:
+                                responses.Add($"Unknown fact command: {subOption.Name}");
                                 break;
                         }
                         break;
@@ -909,5 +1309,151 @@ public class InstructionGPT : DiscordBotBase, IHostedService
         }
 
         await SaveCachedChannelState(channel.Id);
+    }
+
+    private FactoidEntry FindExactTermFactoid(ulong channelId, string term)
+    {
+        if (!ChannelFactoids.TryGetValue(channelId, out var factoids))
+        {
+            return null;
+        }
+
+        var normalized = NormalizeTerm(term);
+        return factoids.FirstOrDefault(f => f.Term != null &&
+                                            string.Equals(f.Term, normalized, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private bool RemoveFactoidByTerm(ChannelState channel, string term)
+    {
+        if (!ChannelFactoids.TryGetValue(channel.ChannelId, out var factoids))
+        {
+            return false;
+        }
+
+        var normalized = NormalizeTerm(term);
+        var removed = factoids.RemoveAll(f => f.Term != null &&
+                                              string.Equals(f.Term, normalized, StringComparison.OrdinalIgnoreCase));
+        if (removed == 0)
+        {
+            return false;
+        }
+
+        _ = SaveFactoidsAsync(channel, factoids);
+        return true;
+    }
+
+    private async Task SaveFactoidAsync(ChannelState channel, SocketMessage message, string term, string text)
+    {
+        var normalizedTerm = NormalizeTerm(term);
+        var entry = new FactoidEntry
+        {
+            Term = normalizedTerm,
+            Text = text.Trim(),
+            SourceMessageId = message.Id,
+            SourceUserId = message.Author.Id,
+            SourceUsername = message.Author.Username,
+            CreatedAt = DateTimeOffset.UtcNow
+        };
+
+        var documents = await Document.ChunkToDocumentsAsync(entry.Text, channel.InstructionChat.ChatBotState.Parameters.ChunkSize);
+        if (documents.Count == 0)
+        {
+            return;
+        }
+
+        var embeddings = await OpenAILogic.CreateEmbeddings(documents);
+        if (!embeddings.Successful)
+        {
+            return;
+        }
+
+        foreach (var doc in documents)
+        {
+            if (doc.Embedding == null)
+            {
+                continue;
+            }
+
+            var chunkEntry = new FactoidEntry
+            {
+                Term = entry.Term,
+                Text = doc.Text,
+                Embedding = doc.Embedding,
+                SourceMessageId = entry.SourceMessageId,
+                SourceUserId = entry.SourceUserId,
+                SourceUsername = entry.SourceUsername,
+                CreatedAt = entry.CreatedAt
+            };
+
+            var list = ChannelFactoids.GetOrAdd(message.Channel.Id, _ => new List<FactoidEntry>());
+            list.Add(chunkEntry);
+        }
+
+        if (ChannelFactoids.TryGetValue(message.Channel.Id, out var channelList))
+        {
+            await SaveFactoidsAsync(channel, channelList);
+        }
+    }
+
+    private async Task SaveFactoidAsync(ChannelState channel, IUser user, IMessageChannel messageChannel, string term, string text)
+    {
+        var normalizedTerm = NormalizeTerm(term);
+        var entry = new FactoidEntry
+        {
+            Term = normalizedTerm,
+            Text = text.Trim(),
+            SourceMessageId = 0,
+            SourceUserId = user.Id,
+            SourceUsername = user.Username,
+            CreatedAt = DateTimeOffset.UtcNow
+        };
+
+        var documents = await Document.ChunkToDocumentsAsync(entry.Text, channel.InstructionChat.ChatBotState.Parameters.ChunkSize);
+        if (documents.Count == 0)
+        {
+            return;
+        }
+
+        var embeddings = await OpenAILogic.CreateEmbeddings(documents);
+        if (!embeddings.Successful)
+        {
+            return;
+        }
+
+        foreach (var doc in documents)
+        {
+            if (doc.Embedding == null)
+            {
+                continue;
+            }
+
+            var chunkEntry = new FactoidEntry
+            {
+                Term = entry.Term,
+                Text = doc.Text,
+                Embedding = doc.Embedding,
+                SourceMessageId = entry.SourceMessageId,
+                SourceUserId = entry.SourceUserId,
+                SourceUsername = entry.SourceUsername,
+                CreatedAt = entry.CreatedAt
+            };
+
+            var list = ChannelFactoids.GetOrAdd(messageChannel.Id, _ => new List<FactoidEntry>());
+            list.Add(chunkEntry);
+        }
+
+        if (ChannelFactoids.TryGetValue(messageChannel.Id, out var channelList))
+        {
+            await SaveFactoidsAsync(channel, channelList);
+        }
+    }
+
+    private async Task SaveFactoidsAsync(ChannelState channel, List<FactoidEntry> entries)
+    {
+        var channelDirectory = GetChannelDirectory(channel);
+        Directory.CreateDirectory(channelDirectory);
+        var filePath = GetChannelFactoidFile(channel);
+        await using var stream = File.Create(filePath);
+        await JsonSerializer.SerializeAsync(stream, entries, new JsonSerializerOptions { WriteIndented = true });
     }
 }

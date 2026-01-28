@@ -32,6 +32,7 @@ public abstract class DiscordBotBase : IHostedService
     protected readonly GptOptions DefaultParameters;
     protected readonly ConcurrentDictionary<ulong, InstructionGPT.ChannelState> ChannelBots = new();
     protected readonly ConcurrentDictionary<ulong, List<Document>> Documents = new();
+    protected readonly ConcurrentDictionary<ulong, List<FactoidEntry>> ChannelFactoids = new();
 
 
 }
