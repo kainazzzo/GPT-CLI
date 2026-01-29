@@ -1,5 +1,6 @@
 ﻿using System.Collections.Concurrent;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Discord;
@@ -232,6 +233,8 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                     new SlashCommandOptionBuilder().WithName("list").WithDescription("List factoids")
                         .WithType(ApplicationCommandOptionType.SubCommand)
                     ,
+                    new SlashCommandOptionBuilder().WithName("clear").WithDescription("Clear all factoids for this channel")
+                        .WithType(ApplicationCommandOptionType.SubCommand),
                     new SlashCommandOptionBuilder().WithName("personality").WithDescription("Set the infobot personality prompt")
                         .WithType(ApplicationCommandOptionType.SubCommand)
                         .AddOption(new SlashCommandOptionBuilder().WithName("prompt")
@@ -682,10 +685,35 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                              .Trim();
         }
 
-        if (TryParseInfobotQuery(content, out var queryTerm))
+        var hasQuestionMark = content.Trim().EndsWith("?", StringComparison.Ordinal);
+        if (isTagged || hasQuestionMark)
         {
-            await RespondWithFactoidMatchAsync(channel, message, queryTerm);
-            return;
+            var question = PreprocessInfobotQuestion(content);
+            var queries = BuildInfobotQueries(question, message.Author.Username, isTagged, Client.CurrentUser.Username);
+            if (queries.Count > 0)
+            {
+                if (!isTagged && !hasQuestionMark)
+                {
+                    return;
+                }
+
+                if (!isTagged)
+                {
+                    const int minLen = 2;
+                    const int maxLen = 512;
+                    var queryLength = queries[0].Length;
+                    if (queryLength < minLen || queryLength > maxLen)
+                    {
+                        return;
+                    }
+                }
+
+                var matched = await RespondWithFactoidMatchAsync(channel, message, queries);
+                if (matched || hasQuestionMark)
+                {
+                    return;
+                }
+            }
         }
 
         if (TryParseInfobotSet(content, out var term, out var fact))
@@ -709,66 +737,61 @@ public class InstructionGPT : DiscordBotBase, IHostedService
 
         var isIndex = content.IndexOf(" is ", StringComparison.OrdinalIgnoreCase);
         var areIndex = content.IndexOf(" are ", StringComparison.OrdinalIgnoreCase);
-        var separatorIndex = isIndex >= 0 && areIndex >= 0
-            ? Math.Min(isIndex, areIndex)
-            : Math.Max(isIndex, areIndex);
+        var wasIndex = content.IndexOf(" was ", StringComparison.OrdinalIgnoreCase);
+        var wereIndex = content.IndexOf(" were ", StringComparison.OrdinalIgnoreCase);
+        var separatorIndex = new[] { isIndex, areIndex, wasIndex, wereIndex }
+            .Where(index => index >= 0)
+            .DefaultIfEmpty(-1)
+            .Min();
         if (separatorIndex <= 0)
         {
             return false;
         }
 
-        var separatorLength = separatorIndex == isIndex ? 4 : 5;
+        var separatorLength = separatorIndex == isIndex
+            ? 4
+            : separatorIndex == wereIndex
+                ? 6
+                : 5;
         term = content[..separatorIndex].Trim();
         fact = content[(separatorIndex + separatorLength)..].Trim();
         return !string.IsNullOrWhiteSpace(term) && !string.IsNullOrWhiteSpace(fact);
     }
 
-    private static bool TryParseInfobotQuery(string content, out string term)
-    {
-        term = null;
-        var trimmed = content.Trim().TrimEnd('?').Trim();
-        var prefixes = new[]
-        {
-            "what is ", "what are ", "what was ", "what were ",
-            "who is ", "who are ", "who was ", "who were ",
-            "when is ", "when are ", "when was ", "when were ",
-            "where is ", "where are ", "where was ", "where were ",
-            "why is ", "why are ", "why was ", "why were ",
-            "how is ", "how are ", "how was ", "how were "
-        };
-        foreach (var prefix in prefixes)
-        {
-            if (trimmed.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-            {
-                term = trimmed.Substring(prefix.Length).Trim();
-                return !string.IsNullOrWhiteSpace(term);
-            }
-        }
-
-        return false;
-    }
-
-    private async Task RespondWithFactoidMatchAsync(ChannelState channel, SocketMessage message, string query)
+    private async Task<bool> RespondWithFactoidMatchAsync(ChannelState channel, SocketMessage message, IReadOnlyList<string> queries)
     {
         var factoids = ChannelFactoids.GetOrAdd(message.Channel.Id, _ => new List<FactoidEntry>());
         if (factoids.Count == 0)
         {
-            return;
+            return false;
         }
 
-        var normalizedQuery = NormalizeTerm(query);
-        var exactMatch = factoids.FirstOrDefault(f =>
-            f.Term != null && string.Equals(f.Term, normalizedQuery, StringComparison.OrdinalIgnoreCase));
+        FactoidEntry exactMatch = null;
+        foreach (var query in queries)
+        {
+            var normalizedQuery = NormalizeTerm(query);
+            if (string.IsNullOrWhiteSpace(normalizedQuery))
+            {
+                continue;
+            }
+
+            exactMatch = factoids.FirstOrDefault(f =>
+                f.Term != null && string.Equals(NormalizeTerm(f.Term), normalizedQuery, StringComparison.OrdinalIgnoreCase));
+            if (exactMatch != null)
+            {
+                break;
+            }
+        }
         if (exactMatch == null)
         {
-            return;
+            return false;
         }
 
         using var typingState = message.Channel.EnterTypingState();
-        var response = await GenerateFactoidResponseAsync(channel, query, exactMatch, message);
+        var response = await GenerateFactoidResponseAsync(channel, queries[0], exactMatch, message);
         if (string.IsNullOrWhiteSpace(response))
         {
-            return;
+            return false;
         }
 
         IUserMessage responseMessage;
@@ -790,6 +813,8 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                 new Emoji("🛑")
             });
         }
+
+        return true;
     }
 
     private async Task<string> GenerateFactoidResponseAsync(ChannelState channel, string query, FactoidEntry factoid, SocketMessage message)
@@ -880,9 +905,212 @@ public class InstructionGPT : DiscordBotBase, IHostedService
 
     private static string NormalizeTerm(string term)
     {
-        return string.IsNullOrWhiteSpace(term)
-            ? null
-            : term.Trim().TrimEnd('?').ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(term))
+        {
+            return null;
+        }
+
+        var normalized = term.Trim().TrimEnd('?');
+        normalized = Regex.Replace(normalized, @"^(the|da|an?)\s+", string.Empty, RegexOptions.IgnoreCase);
+        normalized = normalized.Trim();
+        return normalized.Length == 0 ? null : normalized.ToLowerInvariant();
+    }
+
+    private static readonly string[] InfobotQuestionPrefixes =
+    {
+        "who", "who is", "who are",
+        "what", "what's", "what is", "what are",
+        "where", "where's", "where is", "where are"
+    };
+
+    private static string PreprocessInfobotQuestion(string message)
+    {
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            return string.Empty;
+        }
+
+        var question = message;
+        question = Regex.Replace(question, @"^where is ", string.Empty, RegexOptions.IgnoreCase);
+        question = Regex.Replace(question, @"\s+\?$", "?", RegexOptions.IgnoreCase);
+        question = Regex.Replace(question, @"^whois ", string.Empty, RegexOptions.IgnoreCase);
+        question = Regex.Replace(question, @"^who is ", string.Empty, RegexOptions.IgnoreCase);
+        question = Regex.Replace(question, @"^what is (a|an)?", string.Empty, RegexOptions.IgnoreCase);
+        question = Regex.Replace(question, @"^how do i ", string.Empty, RegexOptions.IgnoreCase);
+        question = Regex.Replace(question, @"^where can i (find|get|download)", string.Empty, RegexOptions.IgnoreCase);
+        question = Regex.Replace(question, @"^how about ", string.Empty, RegexOptions.IgnoreCase);
+        question = Regex.Replace(question, @" da ", " the ", RegexOptions.IgnoreCase);
+
+        question = Regex.Replace(question, @"^(stupid )?q(uestion)?:\s+", string.Empty, RegexOptions.IgnoreCase);
+        question = Regex.Replace(question, @"^(does )?(any|ne)(1|one|body) know ", string.Empty, RegexOptions.IgnoreCase);
+        question = Regex.Replace(question, @"^[uh]+m*[,\.]* +", string.Empty, RegexOptions.IgnoreCase);
+        question = Regex.Replace(question, @"^well([, ]+)", string.Empty, RegexOptions.IgnoreCase);
+        question = Regex.Replace(question, @"^still([, ]+)", string.Empty, RegexOptions.IgnoreCase);
+        question = Regex.Replace(question, @"^(gee|boy|golly|gosh)([, ]+)", string.Empty, RegexOptions.IgnoreCase);
+        question = Regex.Replace(question, @"^(well|and|but|or|yes)([, ]+)", string.Empty, RegexOptions.IgnoreCase);
+        question = Regex.Replace(question, @"^o+[hk]+(a+y+)?([,. ]+)", string.Empty, RegexOptions.IgnoreCase);
+        question = Regex.Replace(question, @"^g(eez|osh|olly)([,. ]+)", string.Empty, RegexOptions.IgnoreCase);
+        question = Regex.Replace(question, @"^w(ow|hee|o+ho+)([,. ]+)", string.Empty, RegexOptions.IgnoreCase);
+        question = Regex.Replace(question, @"^heya?,?( folks)?([,. ]+)", string.Empty, RegexOptions.IgnoreCase);
+
+        return question;
+    }
+
+    private static string NormalizeInfobotQuery(string input, ref bool finalQMark)
+    {
+        if (string.IsNullOrWhiteSpace(input))
+        {
+            return string.Empty;
+        }
+
+        var query = $" {input} ";
+
+        query = Regex.Replace(query, @" (where|what|who)\s+(\S+)\s+(is|are) ", " $1 $3 $2 ", RegexOptions.IgnoreCase);
+        query = Regex.Replace(query, @" (where|what|who)\s+(.*)\s+(is|are) ", " $1 $3 $2 ", RegexOptions.IgnoreCase);
+        query = Regex.Replace(query, @"^\s*(.*?)\s*", "$1");
+        query = Regex.Replace(query, @"be tellin'?g?", "tell", RegexOptions.IgnoreCase);
+        query = Regex.Replace(query, @" '?bout", " about", RegexOptions.IgnoreCase);
+        query = Regex.Replace(query, @",? any(hoo?w?|ways?)", " ", RegexOptions.IgnoreCase);
+        query = Regex.Replace(query, @",?\s*(pretty )*please\??\s*$", "?", RegexOptions.IgnoreCase);
+
+        var countryMatch = Regex.IsMatch(query,
+            @"wh(at|ich)\s+(add?res?s|country|place|net (suffix|domain))",
+            RegexOptions.IgnoreCase);
+        if (countryMatch)
+        {
+            if (query.Trim().Length == 2 && !query.Trim().StartsWith(".", StringComparison.Ordinal))
+            {
+                query = "." + query.Trim();
+            }
+            query = query.TrimEnd() + "?";
+        }
+
+        query = Regex.Replace(query,
+            @"th(e|at|is) (((m(o|u)th(a|er) ?)?fuck(in'?g?)?|hell|heck|(god-?)?damn?(ed)?) ?)+",
+            string.Empty, RegexOptions.IgnoreCase);
+        query = Regex.Replace(query, @"wtf", "where", RegexOptions.IgnoreCase);
+        query = Regex.Replace(query, @"this (.*) thingy?", " $1", RegexOptions.IgnoreCase);
+        query = Regex.Replace(query, @"this thingy? (called )?", string.Empty, RegexOptions.IgnoreCase);
+        query = Regex.Replace(query, @"ha(s|ve) (an?y?|some|ne) (idea|clue|guess|seen) ", "know ", RegexOptions.IgnoreCase);
+        query = Regex.Replace(query, @"does (any|ne|some) ?(1|one|body) know ", string.Empty, RegexOptions.IgnoreCase);
+        query = Regex.Replace(query, @"do you know ", string.Empty, RegexOptions.IgnoreCase);
+        query = Regex.Replace(query, @"can (you|u|((any|ne|some) ?(1|one|body)))( please)? tell (me|us|him|her)", string.Empty, RegexOptions.IgnoreCase);
+        query = Regex.Replace(query, @"where (\S+) can \S+ (a|an|the)?", string.Empty, RegexOptions.IgnoreCase);
+        query = Regex.Replace(query, @"(can|do) (i|you|one|we|he|she) (find|get)( this)?", "is", RegexOptions.IgnoreCase);
+        query = Regex.Replace(query, @"(i|one|we|he|she) can (find|get)", "is", RegexOptions.IgnoreCase);
+        query = Regex.Replace(query, @"(the )?(address|url) (for|to) ", string.Empty, RegexOptions.IgnoreCase);
+        query = Regex.Replace(query, @"(where is )+", "where is ", RegexOptions.IgnoreCase);
+        query = Regex.Replace(query, @"\s+", " ");
+        query = Regex.Replace(query, @"^\s+", string.Empty);
+
+        if (Regex.IsMatch(query, @"\s*[\/?!]*\?+\s*$"))
+        {
+            finalQMark = true;
+            query = Regex.Replace(query, @"\s*[\/?!]*\?+\s*$", string.Empty);
+        }
+
+        query = Regex.Replace(query, @"\s+", " ");
+        query = Regex.Replace(query, @"^\s*(.*?)\s*$", "$1");
+        query = query.Trim();
+
+        return query;
+    }
+
+    private static string SwitchPerson(string input, string who, bool addressed, string botName)
+    {
+        if (string.IsNullOrWhiteSpace(input))
+        {
+            return input;
+        }
+
+        var text = input;
+
+        if (!string.IsNullOrWhiteSpace(who))
+        {
+            text = Regex.Replace(text, @"(^|\W)" + Regex.Escape(who) + @"s\s+", "$1" + who + "'s ", RegexOptions.IgnoreCase);
+            text = Regex.Replace(text, @"(^|\W)" + Regex.Escape(who) + @"s$", "$1" + who + "'s", RegexOptions.IgnoreCase);
+            text = Regex.Replace(text, @"(^|\W)" + Regex.Escape(who) + @"'(\s|$)", "$1" + who + "'s$2", RegexOptions.IgnoreCase);
+            text = Regex.Replace(text, @"(^|\s)i'm(\W|$)", "$1" + who + " is$2", RegexOptions.IgnoreCase);
+            text = Regex.Replace(text, @"(^|\s)i've(\W|$)", "$1" + who + " has$2", RegexOptions.IgnoreCase);
+            text = Regex.Replace(text, @"(^|\s)i have(\W|$)", "$1" + who + " has$2", RegexOptions.IgnoreCase);
+            text = Regex.Replace(text, @"(^|\s)i haven'?t(\W|$)", "$1" + who + " has not$2", RegexOptions.IgnoreCase);
+            text = Regex.Replace(text, @"(^|\s)i(\W|$)", "$1" + who + "$2", RegexOptions.IgnoreCase);
+            text = Regex.Replace(text, @" am\b", " is", RegexOptions.IgnoreCase);
+            text = Regex.Replace(text, @"\bam ", "is ", RegexOptions.IgnoreCase);
+            text = Regex.Replace(text, @"(^|\s)(me|myself)(\W|$)", "$1" + who + "$3", RegexOptions.IgnoreCase);
+            text = Regex.Replace(text, @"(^|\s)my(\W|$)", "$1" + who + "'s$2", RegexOptions.IgnoreCase);
+            text = Regex.Replace(text, @"(^|\W)you'?re(\W|$)", "$1you are$2", RegexOptions.IgnoreCase);
+        }
+
+        if (addressed && !string.IsNullOrWhiteSpace(botName))
+        {
+            text = Regex.Replace(text, @"yourself", botName, RegexOptions.IgnoreCase);
+            text = Regex.Replace(text, @"(^|\W)are you(\W|$)", "$1is " + botName + "$2", RegexOptions.IgnoreCase);
+            text = Regex.Replace(text, @"(^|\W)you are(\W|$)", "$1" + botName + " is$2", RegexOptions.IgnoreCase);
+            text = Regex.Replace(text, @"(^|\W)you(\W|$)", "$1" + botName + "$2", RegexOptions.IgnoreCase);
+            text = Regex.Replace(text, @"(^|\W)your(\W|$)", "$1" + botName + "'s$2", RegexOptions.IgnoreCase);
+        }
+
+        return text;
+    }
+
+    private static List<string> BuildInfobotQueries(string message, string who, bool addressed, string botName)
+    {
+        var finalQMark = false;
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            return new List<string>();
+        }
+
+        var query = message.Trim();
+        if (Regex.IsMatch(query, @"\?+\s*$"))
+        {
+            finalQMark = true;
+            query = Regex.Replace(query, @"\?+\s*$", string.Empty).Trim();
+        }
+
+        var queries = new List<string> { query };
+
+        if (query.EndsWith(".", StringComparison.Ordinal) || query.EndsWith("!", StringComparison.Ordinal))
+        {
+            var trimmed = query[..^1].Trim();
+            if (!string.IsNullOrWhiteSpace(trimmed))
+            {
+                queries.Add(trimmed);
+            }
+        }
+
+        var normalized = NormalizeInfobotQuery(query, ref finalQMark);
+        if (!string.Equals(normalized, query, StringComparison.Ordinal))
+        {
+            queries.Add(normalized);
+        }
+
+        var switched = SwitchPerson(normalized, who, addressed, botName);
+        if (!string.Equals(switched, normalized, StringComparison.Ordinal))
+        {
+            queries.Add(switched);
+        }
+
+        var cleaned = switched;
+        cleaned = Regex.Replace(cleaned, @"\s+at\s*(\?*)$", "$1", RegexOptions.IgnoreCase);
+        cleaned = Regex.Replace(cleaned, @"^explain\s*(\?*)", "$1", RegexOptions.IgnoreCase);
+        cleaned = $" {cleaned} ";
+
+        var qregex = string.Join("|", InfobotQuestionPrefixes.Select(Regex.Escape));
+        var match = Regex.Match(cleaned, @"^\s(" + qregex + @")\s", RegexOptions.IgnoreCase);
+        if (match.Success)
+        {
+            cleaned = Regex.Replace(cleaned, @"^\s(" + qregex + @")\s", " ", RegexOptions.IgnoreCase);
+        }
+
+        cleaned = cleaned.Trim();
+        if (!string.IsNullOrWhiteSpace(cleaned) && !queries.Contains(cleaned))
+        {
+            queries.Add(cleaned);
+        }
+
+        return queries;
     }
 
     private static string BuildDiscordMessageLink(ChannelState channel, ulong messageId)
@@ -1490,9 +1718,12 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                                     "**Learn facts (infobot on)**",
                                     "• `<term> is <fact>`",
                                     "• `<terms> are <fact>`",
+                                    "• `<term> was <fact>`",
+                                    "• `<terms> were <fact>`",
                                     "",
                                     "**Ask questions (exact match only)**",
-                                    "• `what|who|when|where|why|how is|are|was|were <term>?`",
+                                    "• `what|who|where is|are <term>?`",
+                                    "• `<term>?` (short form)",
                                     "",
                                     "**Enable / disable**",
                                     "• `/gptcli set infobot true|false`",
@@ -1502,6 +1733,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                                     "• `/gptcli infobot get term`",
                                     "• `/gptcli infobot delete term`",
                                     "• `/gptcli infobot list`",
+                                    "• `/gptcli infobot clear`",
                                     "",
                                     "**Personality**",
                                     "• `/gptcli infobot personality prompt:\"...\"`",
@@ -1613,8 +1845,24 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                                     "• `/gptcli infobot get term`",
                                     "• `/gptcli infobot delete term`",
                                     "• `/gptcli infobot list`"
+                                    ,
+                                    "• `/gptcli infobot clear`"
                                 });
                                 responses.Add($"{summary}{footer}");
+                                break;
+                            }
+                            case "clear":
+                            {
+                                if (ChannelFactoids.TryRemove(channel.Id, out _))
+                                {
+                                    var channelState = ChannelBots.GetOrAdd(channel.Id, _ => InitializeChannel(channel));
+                                    await SaveFactoidsAsync(channelState, new List<FactoidEntry>());
+                                    responses.Add("All factoids cleared for this channel.");
+                                }
+                                else
+                                {
+                                    responses.Add("No factoids stored.");
+                                }
                                 break;
                             }
                             case "personality":
@@ -1671,7 +1919,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService
 
         var normalized = NormalizeTerm(term);
         return factoids.FirstOrDefault(f => f.Term != null &&
-                                            string.Equals(f.Term, normalized, StringComparison.OrdinalIgnoreCase));
+                                            string.Equals(NormalizeTerm(f.Term), normalized, StringComparison.OrdinalIgnoreCase));
     }
 
     private bool RemoveFactoidByTerm(ChannelState channel, string term)
@@ -1683,7 +1931,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService
 
         var normalized = NormalizeTerm(term);
         var removed = factoids.RemoveAll(f => f.Term != null &&
-                                              string.Equals(f.Term, normalized, StringComparison.OrdinalIgnoreCase));
+                                              string.Equals(NormalizeTerm(f.Term), normalized, StringComparison.OrdinalIgnoreCase));
         if (removed == 0)
         {
             return false;
