@@ -108,16 +108,26 @@ public class InstructionChatBot
 
     public async IAsyncEnumerable<ChatCompletionCreateResponse> GetResponseAsync()
     {
-        //await Console.Out.WriteLineAsync(string.Join("\r\n\r\n",
-        //    ChatBotState.PrimeDirectives.Concat(ChatBotState.Instructions).Concat(ChatBotState.Messages).Select(s => s.Content)));
+        await foreach (var response in GetResponseAsync(null))
+        {
+            yield return response;
+        }
+    }
 
+    public async IAsyncEnumerable<ChatCompletionCreateResponse> GetResponseAsync(IEnumerable<ChatMessage> additionalMessages)
+    {
         // Consolidate prime directives into a single ChatMessage
         var primeDirectiveMessage = new ChatMessage(StaticValues.ChatMessageRoles.System, $"Prime Directive: {PrimeDirectiveStr}");
 
         // Consolidate ChatBotState.Instructions into a single ChatMessage
         var instructionMessage = new ChatMessage(StaticValues.ChatMessageRoles.System, $"Instructions: {InstructionStr}");
 
-        var messages = new List<ChatMessage> {primeDirectiveMessage, instructionMessage}.Concat(ChatBotState.Messages).ToList();
+        var messages = new List<ChatMessage> { primeDirectiveMessage, instructionMessage };
+        messages.AddRange(ChatBotState.Messages);
+        if (additionalMessages != null)
+        {
+            messages.AddRange(additionalMessages);
+        }
 
         await foreach (var response in OpenAILogic.CreateChatCompletionAsyncEnumerable(
                            await ParameterMapping.MapCommon(
