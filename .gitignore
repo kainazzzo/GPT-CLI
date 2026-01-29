@@ -354,4 +354,4 @@ MigrationBackup/
 /updateApplicationCommand.sh
 /channels
 /embeds/console
-/deploy/.env
+deploy/appsettings.json

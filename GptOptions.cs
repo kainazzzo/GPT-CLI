@@ -42,5 +42,9 @@ public record GptOptions
 
     public uint MaxChatHistoryLength { get; set; } = 4096;
 
+    public ulong? DiscordGuildId { get; set; }
+
+    public string LearningPersonalityPrompt { get; set; }
+
     public ParameterMapping.Mode Mode { get; set; } = ParameterMapping.Mode.Completion;
 }

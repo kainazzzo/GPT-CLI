@@ -372,10 +372,10 @@ class Program
         {
             services.AddSingleton(_ => new DiscordSocketConfig
             {
-                GatewayIntents = GatewayIntents.Guilds | GatewayIntents.GuildMessages | GatewayIntents.GuildMembers |
-                                 GatewayIntents.MessageContent | GatewayIntents.DirectMessages |
-                                 GatewayIntents.DirectMessageReactions |
-                                 GatewayIntents.GuildMessageReactions | GatewayIntents.GuildEmojis,
+                // Only request intents the bot actually uses to avoid gateway closes from missing privileged intents.
+                GatewayIntents = GatewayIntents.Guilds | GatewayIntents.GuildMessages | GatewayIntents.MessageContent |
+                                 GatewayIntents.DirectMessages | GatewayIntents.DirectMessageReactions |
+                                 GatewayIntents.GuildMessageReactions,
                 MessageCacheSize = 10
             });
 

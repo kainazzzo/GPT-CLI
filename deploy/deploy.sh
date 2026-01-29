@@ -3,21 +3,22 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEPLOY_DIR="${ROOT_DIR}/deploy"
-ENV_FILE="${DEPLOY_DIR}/.env"
-APPSETTINGS="${ROOT_DIR}/appsettings.json"
+APPSETTINGS="${DEPLOY_DIR}/appsettings.json"
 
-if [[ ! -f "${ENV_FILE}" ]]; then
-  echo "Missing ${ENV_FILE}. Copy deploy/.env.example to deploy/.env and fill in secrets."
+if [[ ! -f "${APPSETTINGS}" ]]; then
+  echo "Missing ${APPSETTINGS}. Add your appsettings.json in deploy/."
   exit 1
 fi
-
-"${DEPLOY_DIR}/init.sh"
 
 case "${1:-}" in
   build)
     docker compose build
     ;;
   up|"")
+    docker compose up -d
+    ;;
+  restart)
+    docker compose build
     docker compose up -d
     ;;
   logs)
@@ -27,7 +28,7 @@ case "${1:-}" in
     docker compose down
     ;;
   *)
-    echo "Usage: $0 {build|up|logs|stop}"
+    echo "Usage: $0 {build|up|restart|logs|stop}"
     exit 1
     ;;
 esac

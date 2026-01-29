@@ -4,5 +4,5 @@ services:
         context: .
         dockerfile: Dockerfile.discord
     volumes:
-      - ./appsettings.json:/app/appsettings.json:ro
+      - ./deploy/appsettings.json:/app/appsettings.json:ro
       - /usr/local/discord/channels:/app/channels
