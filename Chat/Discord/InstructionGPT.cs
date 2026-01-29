@@ -1602,9 +1602,19 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                                     .Select(x => $"{x.Term} -> {x.Text}")
                                     .ToList();
 
-                                responses.Add(lines.Count == 0
+                                var summary = lines.Count == 0
                                     ? "No factoids stored."
-                                    : $"Factoids:\n{string.Join("\n", lines)}");
+                                    : $"Factoids:\n{string.Join("\n", lines)}";
+                                var footer = string.Join("\n", new[]
+                                {
+                                    "",
+                                    "**Manage factoids**",
+                                    "• `/gptcli infobot set term text`",
+                                    "• `/gptcli infobot get term`",
+                                    "• `/gptcli infobot delete term`",
+                                    "• `/gptcli infobot list`"
+                                });
+                                responses.Add($"{summary}{footer}");
                                 break;
                             }
                             case "personality":
