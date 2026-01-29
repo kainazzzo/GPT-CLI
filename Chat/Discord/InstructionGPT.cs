@@ -841,6 +841,17 @@ public class InstructionGPT : DiscordBotBase, IHostedService
             content = $"{content}\n\nSource: {string.Join(" ", missingPieces)}";
         }
 
+        if (!string.IsNullOrWhiteSpace(messageLink))
+        {
+            var originalMessageLine = $"Original message: {messageLink}";
+            if (!content.Contains(originalMessageLine, StringComparison.OrdinalIgnoreCase))
+            {
+                content = $"{content}\n{originalMessageLine}";
+            }
+        }
+
+        content = $"{content}\n\nReact with 🛑 to disable infobot here, or 🗑️ to delete this factoid.";
+
         return content;
     }
 
@@ -1434,22 +1445,29 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                             {
                                 var help = string.Join("\n", new[]
                                 {
-                                    "Infobot help",
-                                    "Learn facts (infobot on):",
-                                    "• <term> is <fact>",
-                                    "• <term> are <fact>",
-                                    "Ask questions (exact match only):",
-                                    "• what|who|when|where|why|how is|are|was|were <term>?",
-                                    "Turn infobot on/off:",
-                                    "• /gptcli set infobot true|false",
-                                    "Set personality:",
-                                    "• /gptcli set learning-personality \"...\"",
-                                    "Factoid commands:",
-                                    "• /gptcli infobot fact-set term text",
-                                    "• /gptcli infobot fact-get term",
-                                    "• /gptcli infobot fact-delete term",
-                                    "• /gptcli infobot fact-list",
-                                    "Factoid match reactions:",
+                                    "**Infobot help**",
+                                    "_Teach it facts, then ask exact-match questions._",
+                                    "",
+                                    "**Learn facts (infobot on)**",
+                                    "• `<term> is <fact>`",
+                                    "• `<term> are <fact>`",
+                                    "",
+                                    "**Ask questions (exact match only)**",
+                                    "• `what|who|when|where|why|how is|are|was|were <term>?`",
+                                    "",
+                                    "**Enable / disable**",
+                                    "• `/gptcli set infobot true|false`",
+                                    "",
+                                    "**Personality**",
+                                    "• `/gptcli set learning-personality \"...\"`",
+                                    "",
+                                    "**Factoid commands**",
+                                    "• `/gptcli infobot fact-set term text`",
+                                    "• `/gptcli infobot fact-get term`",
+                                    "• `/gptcli infobot fact-delete term`",
+                                    "• `/gptcli infobot fact-list`",
+                                    "",
+                                    "**Reactions on factoid matches**",
                                     "• 🗑️ remove the matched factoid term",
                                     "• 🛑 disable infobot for this channel"
                                 });
