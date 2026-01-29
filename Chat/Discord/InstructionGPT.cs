@@ -156,6 +156,11 @@ public class InstructionGPT : DiscordBotBase, IHostedService
             .WithDescription("GPT-CLI commands")
             .AddOptions(new()
             {
+                Name = "help",
+                Description = "Show help",
+                Type = ApplicationCommandOptionType.SubCommand,
+            }, new()
+            {
                 Name = "clear",
                 Description = "Clear the instructions or messages, or all",
                 Type = ApplicationCommandOptionType.SubCommand,
@@ -190,8 +195,6 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                         .WithType(ApplicationCommandOptionType.Integer).WithMinValue(50),
                     new SlashCommandOptionBuilder().WithName("model").WithDescription("Set the model")
                         .WithType(ApplicationCommandOptionType.String).AddChoice("gpt-5.2", "gpt-5.2"),
-                    new SlashCommandOptionBuilder().WithName("learning-personality").WithDescription("Set the infobot personality prompt")
-                        .WithType(ApplicationCommandOptionType.String),
                     new SlashCommandOptionBuilder().WithName("infobot").WithDescription("Enable or disable infobot learning")
                         .WithType(ApplicationCommandOptionType.Boolean)
                 }
@@ -204,7 +207,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                 {
                     new SlashCommandOptionBuilder().WithName("help").WithDescription("Show infobot help")
                         .WithType(ApplicationCommandOptionType.SubCommand),
-                    new SlashCommandOptionBuilder().WithName("fact-set").WithDescription("Set a factoid")
+                    new SlashCommandOptionBuilder().WithName("set").WithDescription("Set a factoid")
                         .WithType(ApplicationCommandOptionType.SubCommand)
                         .AddOption(new SlashCommandOptionBuilder().WithName("term")
                             .WithDescription("The factoid term")
@@ -214,20 +217,27 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                             .WithDescription("The factoid text")
                             .WithType(ApplicationCommandOptionType.String)
                             .WithRequired(true)),
-                    new SlashCommandOptionBuilder().WithName("fact-get").WithDescription("Get a factoid")
+                    new SlashCommandOptionBuilder().WithName("get").WithDescription("Get a factoid")
                         .WithType(ApplicationCommandOptionType.SubCommand)
                         .AddOption(new SlashCommandOptionBuilder().WithName("term")
                             .WithDescription("The factoid term")
                             .WithType(ApplicationCommandOptionType.String)
                             .WithRequired(true)),
-                    new SlashCommandOptionBuilder().WithName("fact-delete").WithDescription("Delete a factoid")
+                    new SlashCommandOptionBuilder().WithName("delete").WithDescription("Delete a factoid")
                         .WithType(ApplicationCommandOptionType.SubCommand)
                         .AddOption(new SlashCommandOptionBuilder().WithName("term")
                             .WithDescription("The factoid term")
                             .WithType(ApplicationCommandOptionType.String)
                             .WithRequired(true)),
-                    new SlashCommandOptionBuilder().WithName("fact-list").WithDescription("List factoids")
+                    new SlashCommandOptionBuilder().WithName("list").WithDescription("List factoids")
                         .WithType(ApplicationCommandOptionType.SubCommand)
+                    ,
+                    new SlashCommandOptionBuilder().WithName("personality").WithDescription("Set the infobot personality prompt")
+                        .WithType(ApplicationCommandOptionType.SubCommand)
+                        .AddOption(new SlashCommandOptionBuilder().WithName("prompt")
+                            .WithDescription("The personality prompt")
+                            .WithType(ApplicationCommandOptionType.String)
+                            .WithRequired(true))
                 }
             });
 
@@ -1312,6 +1322,45 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                 var subOption = option.Options?.FirstOrDefault();
                 switch (option.Name)
                 {
+                    case "help":
+                    {
+                        var help = string.Join("\n", new[]
+                        {
+                            "**GPT-CLI help**",
+                            "_Quick guide to the slash commands and reactions_",
+                            "",
+                            "**Core commands**",
+                            "• `/gptcli help` — show this message",
+                            "• `/gptcli clear messages|instructions|all`",
+                            "",
+                            "**Bot settings**",
+                            "• `/gptcli set enabled true|false`",
+                            "• `/gptcli set mute true|false`",
+                            "• `/gptcli set model gpt-5.2`",
+                            "• `/gptcli set max-tokens <number>`",
+                            "• `/gptcli set max-chat-history-length <number>`",
+                            "• `/gptcli set response-mode All|Matches`",
+                            "• `/gptcli set embed-mode Explicit|All`",
+                            "• `/gptcli set infobot true|false`",
+                            "",
+                            "**Infobot**",
+                            "• `/gptcli infobot help` — how it learns & matches",
+                            "• `/gptcli infobot set term text`",
+                            "• `/gptcli infobot get term`",
+                            "• `/gptcli infobot delete term`",
+                            "• `/gptcli infobot list`",
+                            "• `/gptcli infobot personality prompt:\"...\"`",
+                            "",
+                            "**Reactions**",
+                            "• 📌 add message as instruction",
+                            "• 💾 save message as embed",
+                            "• 🔄 replay a user message as a prompt",
+                            "• 🗑️ remove matched factoid term (on infobot reply)",
+                            "• 🛑 disable infobot for this channel (on infobot reply)"
+                        });
+                        responses.Add(help);
+                        break;
+                    }
                     case "clear":
                         if (subOption == null)
                         {
@@ -1417,16 +1466,6 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                                     responses.Add($"Infobot {(learningEnabled ? "enabled" : "disabled")}.");
                                 }
                                 break;
-                            case "learning-personality":
-                                if (subOption.Value is string personalityPrompt)
-                                {
-                                    var trimmed = personalityPrompt.Trim();
-                                    chatBot.Options.LearningPersonalityPrompt = string.IsNullOrWhiteSpace(trimmed) ? null : trimmed;
-                                    responses.Add(string.IsNullOrWhiteSpace(trimmed)
-                                        ? "Learning personality prompt cleared."
-                                        : "Learning personality prompt updated.");
-                                }
-                                break;
                             default:
                                 responses.Add($"Unknown setting: {subOption.Name}");
                                 break;
@@ -1450,7 +1489,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                                     "",
                                     "**Learn facts (infobot on)**",
                                     "• `<term> is <fact>`",
-                                    "• `<term> are <fact>`",
+                                    "• `<terms> are <fact>`",
                                     "",
                                     "**Ask questions (exact match only)**",
                                     "• `what|who|when|where|why|how is|are|was|were <term>?`",
@@ -1458,14 +1497,14 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                                     "**Enable / disable**",
                                     "• `/gptcli set infobot true|false`",
                                     "",
-                                    "**Personality**",
-                                    "• `/gptcli set learning-personality \"...\"`",
-                                    "",
                                     "**Factoid commands**",
-                                    "• `/gptcli infobot fact-set term text`",
-                                    "• `/gptcli infobot fact-get term`",
-                                    "• `/gptcli infobot fact-delete term`",
-                                    "• `/gptcli infobot fact-list`",
+                                    "• `/gptcli infobot set term text`",
+                                    "• `/gptcli infobot get term`",
+                                    "• `/gptcli infobot delete term`",
+                                    "• `/gptcli infobot list`",
+                                    "",
+                                    "**Personality**",
+                                    "• `/gptcli infobot personality prompt:\"...\"`",
                                     "",
                                     "**Reactions on factoid matches**",
                                     "• 🗑️ remove the matched factoid term",
@@ -1474,7 +1513,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                                 responses.Add(help);
                                 break;
                             }
-                            case "fact-set":
+                            case "set":
                             {
                                 var term = subOption.Options?.FirstOrDefault(o => o.Name == "term")?.Value?.ToString();
                                 var text = subOption.Options?.FirstOrDefault(o => o.Name == "text")?.Value?.ToString();
@@ -1489,7 +1528,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                                 responses.Add($"Factoid set: {term}.");
                                 break;
                             }
-                            case "fact-get":
+                            case "get":
                             {
                                 var term = subOption.Options?.FirstOrDefault(o => o.Name == "term")?.Value?.ToString();
                                 if (string.IsNullOrWhiteSpace(term))
@@ -1509,7 +1548,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                                 }
                                 break;
                             }
-                            case "fact-delete":
+                            case "delete":
                             {
                                 var term = subOption.Options?.FirstOrDefault(o => o.Name == "term")?.Value?.ToString();
                                 if (string.IsNullOrWhiteSpace(term))
@@ -1529,7 +1568,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                                 }
                                 break;
                             }
-                            case "fact-list":
+                            case "list":
                             {
                                 if (!ChannelFactoids.TryGetValue(channel.Id, out var factoids) || factoids.Count == 0)
                                 {
@@ -1566,6 +1605,22 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                                 responses.Add(lines.Count == 0
                                     ? "No factoids stored."
                                     : $"Factoids:\n{string.Join("\n", lines)}");
+                                break;
+                            }
+                            case "personality":
+                            {
+                                var prompt = subOption.Options?.FirstOrDefault(o => o.Name == "prompt")?.Value?.ToString();
+                                if (string.IsNullOrWhiteSpace(prompt))
+                                {
+                                    responses.Add("Provide a personality prompt.");
+                                    break;
+                                }
+
+                                var trimmed = prompt.Trim();
+                                chatBot.Options.LearningPersonalityPrompt = string.IsNullOrWhiteSpace(trimmed) ? null : trimmed;
+                                responses.Add(string.IsNullOrWhiteSpace(trimmed)
+                                    ? "Infobot personality prompt cleared."
+                                    : "Infobot personality prompt updated.");
                                 break;
                             }
                             default:
