@@ -4,6 +4,7 @@ using System.Text.RegularExpressions;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Discord;
+using Discord.Net;
 using Discord.Rest;
 using Discord.WebSocket;
 using GPT.CLI.Embeddings;
@@ -303,88 +304,173 @@ public class InstructionGPT : DiscordBotBase, IHostedService
         {
             return;
         }
-
-        var message = await userMessage.GetOrDownloadAsync();
-        var channel = await messageChannel.GetOrDownloadAsync();
-
-
-        switch (reaction.Emote.Name)
+        try
         {
-            case "📌":
+            var channel = await messageChannel.GetOrDownloadAsync();
+            if (channel == null)
             {
-                var channelState = ChannelBots[channel.Id];
-                if (channelState.Options.Enabled)
-                {
-                    var chatBot = channelState.InstructionChat;
-                    chatBot.AddInstruction(new ChatMessage(StaticValues.ChatMessageRoles.System, message.Content));
-
-
-                    using var typingState = channel.EnterTypingState();
-                    await message.RemoveReactionAsync(reaction.Emote, reaction.UserId);
-                    await message.ReplyAsync("Instruction added.");
-                    await SaveCachedChannelState(channel.Id);
-                }
-
-                break;
+                return;
             }
-            case "🗑️":
+
+            IUserMessage message = null;
+            try
             {
-                if (!_factoidResponseMap.TryGetValue(message.Id, out var metadata) || metadata.ChannelId != channel.Id)
-                {
-                    return;
-                }
-
-                var channelState = ChannelBots.GetOrAdd(channel.Id, _ => InitializeChannel(channel));
-                var removed = RemoveFactoidByTerm(channelState, metadata.Term);
-
-                await message.RemoveReactionAsync(reaction.Emote, reaction.UserId);
-                await message.ReplyAsync(removed
-                    ? $"Factoid removed: {metadata.Term}."
-                    : $"No factoid found for {metadata.Term}.");
-                await SaveCachedChannelState(channel.Id);
-                break;
+                message = await userMessage.GetOrDownloadAsync();
             }
-            case "🛑":
+            catch (HttpException ex)
             {
-                if (!_factoidResponseMap.TryGetValue(message.Id, out var metadata) || metadata.ChannelId != channel.Id)
-                {
-                    return;
-                }
-
-                var channelState = ChannelBots.GetOrAdd(channel.Id, _ => InitializeChannel(channel));
-                if (channelState.Options.LearningEnabled)
-                {
-                    channelState.Options.LearningEnabled = false;
-                    await SaveCachedChannelState(channel.Id);
-                }
-
-                await message.RemoveReactionAsync(reaction.Emote, reaction.UserId);
-                await message.ReplyAsync("Infobot disabled for this channel.");
-                break;
+                await Console.Out.WriteLineAsync($"Failed to download message {reaction.MessageId}: {ex.Reason}");
             }
-            case "🔄":
-            {
-                // If the message is from the bot, ignore it. These aren't prompts.
-                if (message.Author.Id == Client.CurrentUser.Id)
-                {
-                    return;
-                }
 
-                // Replay the message as a new message
-                await HandleMessageReceivedAsync(message as SocketMessage);
-                break;
-            }
-            case "💾":
+            var messageId = message?.Id ?? reaction.MessageId;
+
+            switch (reaction.Emote.Name)
             {
-                if (message.Author.Id == Client.CurrentUser.Id)
+                case "📌":
                 {
+                    if (message == null)
+                    {
                         return;
+                    }
+
+                    var channelState = ChannelBots[channel.Id];
+                    if (channelState.Options.Enabled)
+                    {
+                        var chatBot = channelState.InstructionChat;
+                        chatBot.AddInstruction(new ChatMessage(StaticValues.ChatMessageRoles.System, message.Content));
+
+
+                        using var typingState = channel.EnterTypingState();
+                        await TryRemoveReactionAsync(message, reaction.Emote, reaction.UserId);
+                        await TryReplyAsync(message, channel, messageId, "Instruction added.");
+                        await SaveCachedChannelState(channel.Id);
+                    }
+
+                    break;
                 }
+                case "🗑️":
+                case "🗑":
+                {
+                    if (!_factoidResponseMap.TryGetValue(messageId, out var metadata) || metadata.ChannelId != channel.Id)
+                    {
+                        return;
+                    }
 
-                await SaveEmbed(message);
-                break;
+                    var channelState = ChannelBots.GetOrAdd(channel.Id, _ => InitializeChannel(channel));
+                    var removed = RemoveFactoidByTerm(channelState, metadata.Term);
+
+                    if (message != null)
+                    {
+                        await TryRemoveAllReactionsForEmoteAsync(message, reaction.Emote);
+                    }
+                    var reply = removed
+                        ? $"<@{reaction.UserId}> Factoid removed: {metadata.Term}."
+                        : $"<@{reaction.UserId}> No factoid found for {metadata.Term}.";
+                    await TryReplyAsync(message, channel, messageId, reply);
+                    await SaveCachedChannelState(channel.Id);
+                    break;
+                }
+                case "🛑":
+                {
+                    if (!_factoidResponseMap.TryGetValue(messageId, out var metadata) || metadata.ChannelId != channel.Id)
+                    {
+                        return;
+                    }
+
+                    var channelState = ChannelBots.GetOrAdd(channel.Id, _ => InitializeChannel(channel));
+                    if (channelState.Options.LearningEnabled)
+                    {
+                        channelState.Options.LearningEnabled = false;
+                        await SaveCachedChannelState(channel.Id);
+                    }
+
+                    if (message != null)
+                    {
+                        await TryRemoveReactionAsync(message, reaction.Emote, reaction.UserId);
+                    }
+                    await TryReplyAsync(message, channel, messageId, "Infobot disabled for this channel.");
+                    break;
+                }
+                case "🔄":
+                {
+                    if (message == null)
+                    {
+                        return;
+                    }
+
+                    // If the message is from the bot, ignore it. These aren't prompts.
+                    if (message.Author.Id == Client.CurrentUser.Id)
+                    {
+                        return;
+                    }
+
+                    // Replay the message as a new message
+                    await HandleMessageReceivedAsync(message as SocketMessage);
+                    break;
+                }
+                case "💾":
+                {
+                    if (message == null)
+                    {
+                        return;
+                    }
+
+                    if (message.Author.Id == Client.CurrentUser.Id)
+                    {
+                        return;
+                    }
+
+                    await SaveEmbed(message);
+                    break;
+                }
             }
+        }
+        catch (Exception ex)
+        {
+            await Console.Out.WriteLineAsync($"Reaction handler failed: {ex.Message}");
+        }
+    }
 
+    private static async Task TryReplyAsync(IUserMessage message, IMessageChannel channel, ulong messageId, string reply)
+    {
+        try
+        {
+            if (message != null)
+            {
+                await message.ReplyAsync(reply);
+            }
+            else
+            {
+                await channel.SendMessageAsync(reply, messageReference: new MessageReference(messageId));
+            }
+        }
+        catch (HttpException ex)
+        {
+            await Console.Out.WriteLineAsync($"Failed to reply on {messageId}: {ex.Reason}");
+        }
+    }
+
+    private static async Task TryRemoveReactionAsync(IUserMessage message, IEmote emote, ulong userId)
+    {
+        try
+        {
+            await message.RemoveReactionAsync(emote, userId);
+        }
+        catch (HttpException ex)
+        {
+            await Console.Out.WriteLineAsync($"Failed to remove reaction {emote.Name}: {ex.Reason}");
+        }
+    }
+
+    private static async Task TryRemoveAllReactionsForEmoteAsync(IUserMessage message, IEmote emote)
+    {
+        try
+        {
+            await message.RemoveAllReactionsForEmoteAsync(emote);
+        }
+        catch (HttpException ex)
+        {
+            await Console.Out.WriteLineAsync($"Failed to clear reactions for {emote.Name}: {ex.Reason}");
         }
     }
 
