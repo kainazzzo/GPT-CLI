@@ -236,7 +236,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                     new SlashCommandOptionBuilder().WithName("list").WithDescription("List factoids")
                         .WithType(ApplicationCommandOptionType.SubCommand)
                     ,
-                    new SlashCommandOptionBuilder().WithName("matches").WithDescription("List infobot matches")
+                    new SlashCommandOptionBuilder().WithName("leaderboard").WithDescription("Show the infobot leaderboard")
                         .WithType(ApplicationCommandOptionType.SubCommand),
                     new SlashCommandOptionBuilder().WithName("clear").WithDescription("Clear all factoids for this channel")
                         .WithType(ApplicationCommandOptionType.SubCommand),
@@ -1883,7 +1883,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                             "• `/gptcli infobot get term`",
                             "• `/gptcli infobot delete term`",
                             "• `/gptcli infobot list`",
-                            "• `/gptcli infobot matches` — leaderboard",
+                            "• `/gptcli infobot leaderboard` — leaderboard",
                             "• `/gptcli infobot personality prompt:\"...\"`",
                             "",
                             "**Reactions**",
@@ -2040,7 +2040,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                                     "• `/gptcli infobot get term`",
                                     "• `/gptcli infobot delete term`",
                                     "• `/gptcli infobot list`",
-                                    "• `/gptcli infobot matches` — leaderboard",
+                                    "• `/gptcli infobot leaderboard` — leaderboard",
                                     "• `/gptcli infobot clear`",
                                     "",
                                     "**Personality**",
@@ -2155,16 +2155,16 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                                     "• `/gptcli infobot list`"
                                     ,
                                     "• `/gptcli infobot clear`",
-                                    "• `/gptcli infobot matches`"
+                                    "• `/gptcli infobot leaderboard`"
                                 });
                                 responses.Add($"{summary}{footer}");
                                 break;
                             }
-                            case "matches":
+                            case "leaderboard":
                             {
                                 if (channel is IPrivateChannel)
                                 {
-                                    responses.Add("Infobot matches are not tracked in DMs.");
+                                    responses.Add("Infobot leaderboard is not tracked in DMs.");
                                     break;
                                 }
 
@@ -2211,7 +2211,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                                     .ToList();
 
                                 var footer = $"Total matches: {stats.TotalMatches}.";
-                                var summary = $"**Infobot matches leaderboard**\n{string.Join("\n", leaderboard)}\n{footer}";
+                                var summary = $"**Infobot leaderboard**\n{string.Join("\n", leaderboard)}\n{footer}";
                                 responses.Add(summary);
                                 break;
                             }
