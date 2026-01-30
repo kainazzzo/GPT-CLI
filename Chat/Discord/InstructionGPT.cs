@@ -84,6 +84,8 @@ public class InstructionGPT : DiscordBotBase, IHostedService
         // Load embeddings and factoids
         await LoadEmbeddings();
         await LoadFactoids();
+        await LoadFactoidMatches();
+        await LoadFactoidMatchStats();
 
         await Client.StartAsync();
 
@@ -234,6 +236,8 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                     new SlashCommandOptionBuilder().WithName("list").WithDescription("List factoids")
                         .WithType(ApplicationCommandOptionType.SubCommand)
                     ,
+                    new SlashCommandOptionBuilder().WithName("matches").WithDescription("List infobot matches")
+                        .WithType(ApplicationCommandOptionType.SubCommand),
                     new SlashCommandOptionBuilder().WithName("clear").WithDescription("Clear all factoids for this channel")
                         .WithType(ApplicationCommandOptionType.SubCommand),
                     new SlashCommandOptionBuilder().WithName("personality").WithDescription("Set the infobot personality prompt")
@@ -898,9 +902,64 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                 new Emoji("🗑️"),
                 new Emoji("🛑")
             });
+            await TrackFactoidMatchAsync(channel, message, exactMatch, queries[0], responseMessage);
         }
 
         return true;
+    }
+
+    private async Task TrackFactoidMatchAsync(ChannelState channel, SocketMessage message, FactoidEntry factoid, string query, IUserMessage responseMessage)
+    {
+        if (message.Channel is IPrivateChannel)
+        {
+            return;
+        }
+
+        if (responseMessage == null || channel == null)
+        {
+            return;
+        }
+
+        if (message.Channel is IGuildChannel guildChannel)
+        {
+            EnsureChannelStateMetadata(channel, guildChannel);
+        }
+
+        var matches = ChannelFactoidMatches.GetOrAdd(message.Channel.Id, _ => new List<FactoidMatchEntry>());
+        var entry = new FactoidMatchEntry
+        {
+            Term = factoid.Term,
+            Query = query,
+            QueryMessageId = message.Id,
+            ResponseMessageId = responseMessage.Id,
+            UserId = message.Author?.Id ?? 0,
+            MatchedAt = DateTimeOffset.UtcNow
+        };
+        matches.Add(entry);
+
+        const int maxMatches = 50;
+        if (matches.Count > maxMatches)
+        {
+            matches.RemoveRange(0, matches.Count - maxMatches);
+        }
+
+        await SaveFactoidMatchesAsync(channel, matches);
+
+        var stats = ChannelFactoidMatchStats.GetOrAdd(message.Channel.Id, _ => new FactoidMatchStats());
+        stats = EnsureMatchStats(stats);
+        ChannelFactoidMatchStats[message.Channel.Id] = stats;
+        var normalizedTerm = NormalizeTerm(factoid.Term) ?? NormalizeTerm(query) ?? "unknown";
+        var displayTerm = string.IsNullOrWhiteSpace(factoid.Term) ? normalizedTerm : factoid.Term;
+        lock (stats)
+        {
+            stats.TotalMatches++;
+            stats.TermCounts[normalizedTerm] = stats.TermCounts.TryGetValue(normalizedTerm, out var count) ? count + 1 : 1;
+            stats.TermDisplayNames[normalizedTerm] = displayTerm;
+            stats.LastResponseMessageIds[normalizedTerm] = responseMessage.Id;
+            stats.LastUserIds[normalizedTerm] = message.Author?.Id ?? 0;
+        }
+
+        await SaveFactoidMatchStatsAsync(channel, stats);
     }
 
     private async Task<string> GenerateFactoidResponseAsync(ChannelState channel, string query, FactoidEntry factoid, SocketMessage message)
@@ -1011,9 +1070,9 @@ public class InstructionGPT : DiscordBotBase, IHostedService
 
     private static string PreprocessInfobotQuestion(string message)
     {
-        if (string.IsNullOrWhiteSpace(message))
+        if (message == null)
         {
-            return string.Empty;
+            return null;
         }
 
         var question = message;
@@ -1207,6 +1266,110 @@ public class InstructionGPT : DiscordBotBase, IHostedService
         }
 
         return $"https://discord.com/channels/{channel.GuildId}/{channel.ChannelId}/{messageId}";
+    }
+
+    private static FactoidMatchStats EnsureMatchStats(FactoidMatchStats stats)
+    {
+        if (stats == null)
+        {
+            return new FactoidMatchStats();
+        }
+
+        stats.TermCounts = EnsureMatchDictionary(stats.TermCounts);
+        stats.TermDisplayNames = EnsureMatchDictionary(stats.TermDisplayNames);
+        stats.LastResponseMessageIds = EnsureMatchDictionary(stats.LastResponseMessageIds);
+        stats.LastUserIds = EnsureMatchDictionary(stats.LastUserIds);
+        return stats;
+    }
+
+    private static FactoidMatchStats BuildMatchStatsFromEntries(IEnumerable<FactoidMatchEntry> matches)
+    {
+        var stats = EnsureMatchStats(new FactoidMatchStats());
+        if (matches == null)
+        {
+            return stats;
+        }
+
+        foreach (var match in matches.OrderBy(m => m.MatchedAt))
+        {
+            var normalized = NormalizeTerm(match.Term) ?? NormalizeTerm(match.Query) ?? "unknown";
+            var display = string.IsNullOrWhiteSpace(match.Term) ? normalized : match.Term;
+            stats.TotalMatches++;
+            stats.TermCounts[normalized] = stats.TermCounts.TryGetValue(normalized, out var count) ? count + 1 : 1;
+            stats.TermDisplayNames[normalized] = display;
+            if (match.ResponseMessageId != 0)
+            {
+                stats.LastResponseMessageIds[normalized] = match.ResponseMessageId;
+            }
+
+            if (match.UserId != 0)
+            {
+                stats.LastUserIds[normalized] = match.UserId;
+            }
+        }
+
+        return stats;
+    }
+
+    private static Dictionary<string, int> EnsureMatchDictionary(Dictionary<string, int> dictionary)
+    {
+        if (dictionary == null)
+        {
+            return new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        return dictionary.Comparer == StringComparer.OrdinalIgnoreCase
+            ? dictionary
+            : new Dictionary<string, int>(dictionary, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static Dictionary<string, string> EnsureMatchDictionary(Dictionary<string, string> dictionary)
+    {
+        if (dictionary == null)
+        {
+            return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        return dictionary.Comparer == StringComparer.OrdinalIgnoreCase
+            ? dictionary
+            : new Dictionary<string, string>(dictionary, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static Dictionary<string, ulong> EnsureMatchDictionary(Dictionary<string, ulong> dictionary)
+    {
+        if (dictionary == null)
+        {
+            return new Dictionary<string, ulong>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        return dictionary.Comparer == StringComparer.OrdinalIgnoreCase
+            ? dictionary
+            : new Dictionary<string, ulong>(dictionary, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static string NormalizeSingleLine(string input)
+    {
+        if (string.IsNullOrWhiteSpace(input))
+        {
+            return string.Empty;
+        }
+
+        return input.Replace("\r", " ").Replace("\n", " ").Trim();
+    }
+
+    private static string TruncateText(string input, int maxLength)
+    {
+        if (string.IsNullOrEmpty(input) || input.Length <= maxLength)
+        {
+            return input;
+        }
+
+        if (maxLength <= 3)
+        {
+            return input[..maxLength];
+        }
+
+        return $"{input[..(maxLength - 3)].TrimEnd()}...";
     }
 
     private static List<FactoidEntry> FindMostSimilarFactoids(List<FactoidEntry> factoids, List<double> queryEmbedding, int limit, double threshold)
@@ -1471,7 +1634,54 @@ public class InstructionGPT : DiscordBotBase, IHostedService
         }
     }
 
+    private async Task LoadFactoidMatches()
+    {
+        Directory.CreateDirectory("channels");
+        var matchFiles = Directory.GetFiles("channels", "matches.json", SearchOption.AllDirectories).ToList();
+        foreach (var file in matchFiles)
+        {
+            if (!TryGetChannelIdFromMatchPath(file, out var channelId))
+            {
+                continue;
+            }
+
+            await using var fileStream = File.OpenRead(file);
+            var matches = await JsonSerializer.DeserializeAsync<List<FactoidMatchEntry>>(fileStream) ?? new List<FactoidMatchEntry>();
+            ChannelFactoidMatches[channelId] = matches;
+        }
+    }
+
+    private async Task LoadFactoidMatchStats()
+    {
+        Directory.CreateDirectory("channels");
+        var matchFiles = Directory.GetFiles("channels", "matches.stats.json", SearchOption.AllDirectories).ToList();
+        foreach (var file in matchFiles)
+        {
+            if (!TryGetChannelIdFromMatchPath(file, out var channelId))
+            {
+                continue;
+            }
+
+            await using var fileStream = File.OpenRead(file);
+            var stats = await JsonSerializer.DeserializeAsync<FactoidMatchStats>(fileStream) ?? new FactoidMatchStats();
+            ChannelFactoidMatchStats[channelId] = EnsureMatchStats(stats);
+        }
+    }
+
     private static bool TryGetChannelIdFromFactoidPath(string file, out ulong channelId)
+    {
+        channelId = 0;
+        var channelDirectory = Path.GetDirectoryName(file);
+        if (string.IsNullOrWhiteSpace(channelDirectory))
+        {
+            return false;
+        }
+
+        var channelFolder = new DirectoryInfo(channelDirectory).Name;
+        return TryParseIdFromName(channelFolder, out channelId);
+    }
+
+    private static bool TryGetChannelIdFromMatchPath(string file, out ulong channelId)
     {
         channelId = 0;
         var channelDirectory = Path.GetDirectoryName(file);
@@ -1503,6 +1713,16 @@ public class InstructionGPT : DiscordBotBase, IHostedService
     private static string GetChannelFactoidFile(ChannelState channelState)
     {
         return Path.Combine(GetChannelDirectory(channelState), "facts.json");
+    }
+
+    private static string GetChannelMatchFile(ChannelState channelState)
+    {
+        return Path.Combine(GetChannelDirectory(channelState), "matches.json");
+    }
+
+    private static string GetChannelMatchStatsFile(ChannelState channelState)
+    {
+        return Path.Combine(GetChannelDirectory(channelState), "matches.stats.json");
     }
 
 
@@ -1663,6 +1883,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                             "• `/gptcli infobot get term`",
                             "• `/gptcli infobot delete term`",
                             "• `/gptcli infobot list`",
+                            "• `/gptcli infobot matches` — leaderboard",
                             "• `/gptcli infobot personality prompt:\"...\"`",
                             "",
                             "**Reactions**",
@@ -1819,6 +2040,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                                     "• `/gptcli infobot get term`",
                                     "• `/gptcli infobot delete term`",
                                     "• `/gptcli infobot list`",
+                                    "• `/gptcli infobot matches` — leaderboard",
                                     "• `/gptcli infobot clear`",
                                     "",
                                     "**Personality**",
@@ -1932,9 +2154,65 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                                     "• `/gptcli infobot delete term`",
                                     "• `/gptcli infobot list`"
                                     ,
-                                    "• `/gptcli infobot clear`"
+                                    "• `/gptcli infobot clear`",
+                                    "• `/gptcli infobot matches`"
                                 });
                                 responses.Add($"{summary}{footer}");
+                                break;
+                            }
+                            case "matches":
+                            {
+                                if (channel is IPrivateChannel)
+                                {
+                                    responses.Add("Infobot matches are not tracked in DMs.");
+                                    break;
+                                }
+
+                                var channelState = ChannelBots.GetOrAdd(channel.Id, _ => InitializeChannel(channel));
+                                if (channel is IGuildChannel guildChannel)
+                                {
+                                    EnsureChannelStateMetadata(channelState, guildChannel);
+                                }
+
+                                var stats = ChannelFactoidMatchStats.GetOrAdd(channel.Id, _ => new FactoidMatchStats());
+                                stats = EnsureMatchStats(stats);
+                                ChannelFactoidMatchStats[channel.Id] = stats;
+
+                                if (stats.TotalMatches == 0 && ChannelFactoidMatches.TryGetValue(channel.Id, out var matches) && matches.Count > 0)
+                                {
+                                    stats = BuildMatchStatsFromEntries(matches);
+                                    ChannelFactoidMatchStats[channel.Id] = stats;
+                                    await SaveFactoidMatchStatsAsync(channelState, stats);
+                                }
+
+                                if (stats.TotalMatches == 0 || stats.TermCounts.Count == 0)
+                                {
+                                    responses.Add("No infobot matches recorded yet.");
+                                    break;
+                                }
+
+                                const int maxMatchesToShow = 20;
+                                var leaderboard = stats.TermCounts
+                                    .OrderByDescending(kv => kv.Value)
+                                    .ThenBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase)
+                                    .Take(maxMatchesToShow)
+                                    .Select((kv, index) =>
+                                    {
+                                        var display = stats.TermDisplayNames.TryGetValue(kv.Key, out var name) && !string.IsNullOrWhiteSpace(name)
+                                            ? name
+                                            : kv.Key;
+                                        var link = stats.LastResponseMessageIds.TryGetValue(kv.Key, out var messageId)
+                                            ? BuildDiscordMessageLink(channelState, messageId)
+                                            : null;
+                                        var linkText = string.IsNullOrWhiteSpace(link) ? "(link unavailable)" : link;
+                                        var label = kv.Value == 1 ? "match" : "matches";
+                                        return $"• {index + 1}. {display} — {kv.Value} {label} — {linkText}";
+                                    })
+                                    .ToList();
+
+                                var footer = $"Total matches: {stats.TotalMatches}.";
+                                var summary = $"**Infobot matches leaderboard**\n{string.Join("\n", leaderboard)}\n{footer}";
+                                responses.Add(summary);
                                 break;
                             }
                             case "clear":
@@ -2140,5 +2418,23 @@ public class InstructionGPT : DiscordBotBase, IHostedService
         var filePath = GetChannelFactoidFile(channel);
         await using var stream = File.Create(filePath);
         await JsonSerializer.SerializeAsync(stream, entries, new JsonSerializerOptions { WriteIndented = true });
+    }
+
+    private async Task SaveFactoidMatchesAsync(ChannelState channel, List<FactoidMatchEntry> entries)
+    {
+        var channelDirectory = GetChannelDirectory(channel);
+        Directory.CreateDirectory(channelDirectory);
+        var filePath = GetChannelMatchFile(channel);
+        await using var stream = File.Create(filePath);
+        await JsonSerializer.SerializeAsync(stream, entries, new JsonSerializerOptions { WriteIndented = true });
+    }
+
+    private async Task SaveFactoidMatchStatsAsync(ChannelState channel, FactoidMatchStats stats)
+    {
+        var channelDirectory = GetChannelDirectory(channel);
+        Directory.CreateDirectory(channelDirectory);
+        var filePath = GetChannelMatchStatsFile(channel);
+        await using var stream = File.Create(filePath);
+        await JsonSerializer.SerializeAsync(stream, stats, new JsonSerializerOptions { WriteIndented = true });
     }
 }
