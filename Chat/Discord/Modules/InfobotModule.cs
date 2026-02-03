@@ -30,11 +30,75 @@ public sealed class InfobotModule : FeatureModuleBase
         "where", "where's", "where is", "where are"
     };
 
+    private static SlashCommandOptionBuilder BuildInfobotCommands()
+    {
+        return new SlashCommandOptionBuilder
+        {
+            Name = "infobot",
+            Description = "Infobot commands",
+            Type = ApplicationCommandOptionType.SubCommandGroup,
+            Options = new()
+            {
+                new SlashCommandOptionBuilder().WithName("help").WithDescription("Show infobot help")
+                    .WithType(ApplicationCommandOptionType.SubCommand),
+                new SlashCommandOptionBuilder().WithName("set").WithDescription("Set a factoid")
+                    .WithType(ApplicationCommandOptionType.SubCommand)
+                    .AddOption(new SlashCommandOptionBuilder().WithName("term")
+                        .WithDescription("The factoid term")
+                        .WithType(ApplicationCommandOptionType.String)
+                        .WithRequired(true))
+                    .AddOption(new SlashCommandOptionBuilder().WithName("text")
+                        .WithDescription("The factoid text")
+                        .WithType(ApplicationCommandOptionType.String)
+                        .WithRequired(true)),
+                new SlashCommandOptionBuilder().WithName("get").WithDescription("Get a factoid")
+                    .WithType(ApplicationCommandOptionType.SubCommand)
+                    .AddOption(new SlashCommandOptionBuilder().WithName("term")
+                        .WithDescription("The factoid term")
+                        .WithType(ApplicationCommandOptionType.String)
+                        .WithRequired(true)),
+                new SlashCommandOptionBuilder().WithName("delete").WithDescription("Delete a factoid")
+                    .WithType(ApplicationCommandOptionType.SubCommand)
+                    .AddOption(new SlashCommandOptionBuilder().WithName("term")
+                        .WithDescription("The factoid term")
+                        .WithType(ApplicationCommandOptionType.String)
+                        .WithRequired(true)),
+                new SlashCommandOptionBuilder().WithName("list").WithDescription("List factoids")
+                    .WithType(ApplicationCommandOptionType.SubCommand),
+                new SlashCommandOptionBuilder().WithName("leaderboard").WithDescription("Show the infobot leaderboard")
+                    .WithType(ApplicationCommandOptionType.SubCommand),
+                new SlashCommandOptionBuilder().WithName("clear").WithDescription("Clear all factoids for this channel")
+                    .WithType(ApplicationCommandOptionType.SubCommand),
+                new SlashCommandOptionBuilder().WithName("personality").WithDescription("Set the infobot personality prompt")
+                    .WithType(ApplicationCommandOptionType.SubCommand)
+                    .AddOption(new SlashCommandOptionBuilder().WithName("prompt")
+                        .WithDescription("The personality prompt")
+                        .WithType(ApplicationCommandOptionType.String)
+                        .WithRequired(true))
+            }
+        };
+    }
+
+    private static SlashCommandOptionBuilder BuildInfobotToggleOption()
+    {
+        return new SlashCommandOptionBuilder().WithName("infobot").WithDescription("Enable or disable infobot learning")
+            .WithType(ApplicationCommandOptionType.Boolean);
+    }
+
     public override async Task InitializeAsync(DiscordModuleContext context, CancellationToken cancellationToken)
     {
         await LoadFactoids(context);
         await LoadFactoidMatches(context);
         await LoadFactoidMatchStats(context);
+    }
+
+    public override IReadOnlyList<SlashCommandContribution> GetSlashCommandContributions(DiscordModuleContext context)
+    {
+        return new[]
+        {
+            SlashCommandContribution.TopLevel(BuildInfobotCommands()),
+            SlashCommandContribution.ForOption("set", BuildInfobotToggleOption())
+        };
     }
 
     public override async Task OnMessageReceivedAsync(DiscordModuleContext context, SocketMessage message, CancellationToken cancellationToken)

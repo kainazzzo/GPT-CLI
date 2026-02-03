@@ -18,4 +18,5 @@ public interface IFeatureModule
     Task<bool> OnInteractionAsync(DiscordModuleContext context, SocketInteraction interaction, CancellationToken cancellationToken);
     Task OnMessageCommandExecutedAsync(DiscordModuleContext context, SocketMessageCommand command, CancellationToken cancellationToken);
     Task<IReadOnlyList<ChatMessage>> GetAdditionalMessageContextAsync(DiscordModuleContext context, SocketMessage message, InstructionGPT.ChannelState channel, CancellationToken cancellationToken);
+    IReadOnlyList<SlashCommandContribution> GetSlashCommandContributions(DiscordModuleContext context);
 }

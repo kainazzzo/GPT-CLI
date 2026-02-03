@@ -109,6 +109,33 @@ public sealed class DiscordModulePipeline
         return combined;
     }
 
+    public IReadOnlyList<SlashCommandContribution> GetSlashCommandContributions()
+    {
+        if (_modules.Count == 0)
+        {
+            return Array.Empty<SlashCommandContribution>();
+        }
+
+        var contributions = new List<SlashCommandContribution>();
+        foreach (var module in _modules)
+        {
+            try
+            {
+                var moduleContributions = module.GetSlashCommandContributions(_context);
+                if (moduleContributions is { Count: > 0 })
+                {
+                    contributions.AddRange(moduleContributions);
+                }
+            }
+            catch (Exception ex)
+            {
+                _log($"Module {module.Id} failed to provide slash command contributions: {ex.GetType().Name} - {ex.Message}");
+            }
+        }
+
+        return contributions;
+    }
+
     private async Task SafeInvokeAsync(IFeatureModule module, Func<Task> handler)
     {
         try

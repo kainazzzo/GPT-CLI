@@ -20,8 +20,6 @@ namespace GPT.CLI.Chat.Discord;
 public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 {
     private readonly IServiceProvider _services;
-    private readonly ConcurrentDictionary<ulong, FactoidResponseMetadata> _factoidResponseMap = new();
-    private record FactoidResponseMetadata(ulong ChannelId, string Term);
     private readonly ConcurrentDictionary<ulong, HashSet<string>> _imageResponseMap = new();
     private DiscordModulePipeline _modulePipeline;
     private DiscordModuleContext _moduleContext;
@@ -201,15 +199,15 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 
     private async Task CreateGlobalCommand()
     {
-        var command = new SlashCommandBuilder()
-            .WithName("gptcli")
-            .WithDescription("GPT-CLI commands")
-            .AddOptions(new()
+        var options = new List<SlashCommandOptionBuilder>
+        {
+            new()
             {
                 Name = "help",
                 Description = "Show help",
                 Type = ApplicationCommandOptionType.SubCommand,
-            }, new()
+            },
+            new()
             {
                 Name = "instruction",
                 Description = "Instruction commands",
@@ -246,7 +244,8 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
                         .WithDescription("Clear all instructions")
                         .WithType(ApplicationCommandOptionType.SubCommand)
                 }
-            }, new()
+            },
+            new()
             {
                 Name = "clear",
                 Description = "Clear the instructions or messages, or all",
@@ -260,14 +259,14 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
                     new SlashCommandOptionBuilder().WithName("all").WithDescription("Clear all")
                         .WithType(ApplicationCommandOptionType.String).AddChoice("all", "all"),
                 }
-            }, new()
+            },
+            new()
             {
                 Name = "set",
                 Description = "Settings",
                 Type = ApplicationCommandOptionType.SubCommand,
                 Options = new()
                 {
-
                     new SlashCommandOptionBuilder().WithName("enabled").WithDescription("Enable or disable the chat bot")
                         .WithType(ApplicationCommandOptionType.Boolean),
                     new SlashCommandOptionBuilder().WithName("mute").WithDescription("Mute or unmute the chat bot")
@@ -282,55 +281,61 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
                         .WithType(ApplicationCommandOptionType.Integer).WithMinValue(50),
                     new SlashCommandOptionBuilder().WithName("model").WithDescription("Set the model")
                         .WithType(ApplicationCommandOptionType.String).AddChoice("gpt-5.2", "gpt-5.2"),
-                    new SlashCommandOptionBuilder().WithName("infobot").WithDescription("Enable or disable infobot learning")
-                        .WithType(ApplicationCommandOptionType.Boolean)
                 }
-            }, new()
+            }
+        };
+
+        if (_modulePipeline != null)
+        {
+            var contributions = _modulePipeline.GetSlashCommandContributions();
+            if (contributions.Count > 0)
             {
-                Name = "infobot",
-                Description = "Infobot commands",
-                Type = ApplicationCommandOptionType.SubCommandGroup,
-                Options = new()
+                var topLevel = options.ToDictionary(option => option.Name, StringComparer.OrdinalIgnoreCase);
+                foreach (var contribution in contributions)
                 {
-                    new SlashCommandOptionBuilder().WithName("help").WithDescription("Show infobot help")
-                        .WithType(ApplicationCommandOptionType.SubCommand),
-                    new SlashCommandOptionBuilder().WithName("set").WithDescription("Set a factoid")
-                        .WithType(ApplicationCommandOptionType.SubCommand)
-                        .AddOption(new SlashCommandOptionBuilder().WithName("term")
-                            .WithDescription("The factoid term")
-                            .WithType(ApplicationCommandOptionType.String)
-                            .WithRequired(true))
-                        .AddOption(new SlashCommandOptionBuilder().WithName("text")
-                            .WithDescription("The factoid text")
-                            .WithType(ApplicationCommandOptionType.String)
-                            .WithRequired(true)),
-                    new SlashCommandOptionBuilder().WithName("get").WithDescription("Get a factoid")
-                        .WithType(ApplicationCommandOptionType.SubCommand)
-                        .AddOption(new SlashCommandOptionBuilder().WithName("term")
-                            .WithDescription("The factoid term")
-                            .WithType(ApplicationCommandOptionType.String)
-                            .WithRequired(true)),
-                    new SlashCommandOptionBuilder().WithName("delete").WithDescription("Delete a factoid")
-                        .WithType(ApplicationCommandOptionType.SubCommand)
-                        .AddOption(new SlashCommandOptionBuilder().WithName("term")
-                            .WithDescription("The factoid term")
-                            .WithType(ApplicationCommandOptionType.String)
-                            .WithRequired(true)),
-                    new SlashCommandOptionBuilder().WithName("list").WithDescription("List factoids")
-                        .WithType(ApplicationCommandOptionType.SubCommand)
-                    ,
-                    new SlashCommandOptionBuilder().WithName("leaderboard").WithDescription("Show the infobot leaderboard")
-                        .WithType(ApplicationCommandOptionType.SubCommand),
-                    new SlashCommandOptionBuilder().WithName("clear").WithDescription("Clear all factoids for this channel")
-                        .WithType(ApplicationCommandOptionType.SubCommand),
-                    new SlashCommandOptionBuilder().WithName("personality").WithDescription("Set the infobot personality prompt")
-                        .WithType(ApplicationCommandOptionType.SubCommand)
-                        .AddOption(new SlashCommandOptionBuilder().WithName("prompt")
-                            .WithDescription("The personality prompt")
-                            .WithType(ApplicationCommandOptionType.String)
-                            .WithRequired(true))
+                    if (contribution?.Option == null || string.IsNullOrWhiteSpace(contribution.Option.Name))
+                    {
+                        continue;
+                    }
+
+                    if (string.IsNullOrWhiteSpace(contribution.TargetOption))
+                    {
+                        if (topLevel.ContainsKey(contribution.Option.Name))
+                        {
+                            await Console.Out.WriteLineAsync(
+                                $"Slash command option conflict: '{contribution.Option.Name}' already exists. Skipping module option.");
+                            continue;
+                        }
+
+                        options.Add(contribution.Option);
+                        topLevel[contribution.Option.Name] = contribution.Option;
+                        continue;
+                    }
+
+                    if (!topLevel.TryGetValue(contribution.TargetOption, out var target))
+                    {
+                        await Console.Out.WriteLineAsync(
+                            $"Slash command option target '{contribution.TargetOption}' not found. Skipping module option '{contribution.Option.Name}'.");
+                        continue;
+                    }
+
+                    var existing = target.Options?.Any(opt => string.Equals(opt.Name, contribution.Option.Name, StringComparison.OrdinalIgnoreCase)) == true;
+                    if (existing)
+                    {
+                        await Console.Out.WriteLineAsync(
+                            $"Slash command option conflict: '{contribution.TargetOption} {contribution.Option.Name}' already exists. Skipping module option.");
+                        continue;
+                    }
+
+                    target.AddOption(contribution.Option);
                 }
-            });
+            }
+        }
+
+        var command = new SlashCommandBuilder()
+            .WithName("gptcli")
+            .WithDescription("GPT-CLI commands")
+            .AddOptions(options.ToArray());
 
         DiscordRestClient restClient = Client.Rest;
 
@@ -1094,555 +1099,6 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
         await SaveCachedChannelState(message.Channel.Id);
     }
 
-    private async Task<List<ChatMessage>> BuildFactoidContextMessagesAsync(ChannelState channel, SocketMessage message)
-    {
-        if (!IsChannelGuildMatch(channel, message.Channel, "factoid-context"))
-        {
-            return new List<ChatMessage>();
-        }
-
-        var channelFactoids = ChannelFactoids.GetOrAdd(message.Channel.Id, _ => new List<FactoidEntry>());
-        var guildId = GetGuildId(message.Channel);
-        var usableFactoids = FilterFactoidsForChannel(channelFactoids, guildId, message.Channel.Id);
-        if (usableFactoids.Count == 0)
-        {
-            return new List<ChatMessage>();
-        }
-
-        var embedding = await OpenAILogic.GetEmbeddingForPrompt(message.Content);
-        var threshold = channel.Options.FactoidSimilarityThreshold;
-        var closestChannel = FindMostSimilarFactoids(usableFactoids, embedding, channel.InstructionChat.ChatBotState.Parameters.ClosestMatchLimit, threshold);
-        if (closestChannel.Count == 0)
-        {
-            return new List<ChatMessage>();
-        }
-
-        var messages = new List<ChatMessage>
-        {
-            new(StaticValues.ChatMessageRoles.System,
-                "Factoid context for the next message. Use these facts if relevant:")
-        };
-        foreach (var factoid in closestChannel)
-        {
-            messages.Add(new ChatMessage(StaticValues.ChatMessageRoles.System,
-                $"---factoid---\r\n{factoid.Text}\r\n--end factoid---"));
-        }
-
-        return messages;
-    }
-
-    private async Task HandleInfobotMessageAsync(ChannelState channel, SocketMessage message, bool isTagged)
-    {
-        if (string.IsNullOrWhiteSpace(message.Content))
-        {
-            return;
-        }
-
-        var hasExplicitMention = message.MentionedUsers.Any(user => user.Id == Client.CurrentUser.Id);
-        var isListening = channel.Options.LearningEnabled;
-        if (!isListening)
-        {
-            return;
-        }
-
-        var content = message.Content.Trim();
-        if (isTagged)
-        {
-            content = content.Replace($"<@{Client.CurrentUser.Id}>", string.Empty, StringComparison.OrdinalIgnoreCase)
-                             .Replace($"<@!{Client.CurrentUser.Id}>", string.Empty, StringComparison.OrdinalIgnoreCase)
-                             .Trim();
-        }
-
-        var hasQuestionMark = content.Trim().EndsWith("?", StringComparison.Ordinal);
-        if (isTagged || hasQuestionMark)
-        {
-            var question = PreprocessInfobotQuestion(content);
-            var queries = BuildInfobotQueries(question, message.Author.Username, isTagged, Client.CurrentUser.Username);
-            if (queries.Count > 0)
-            {
-                if (!isTagged && !hasQuestionMark)
-                {
-                    return;
-                }
-
-                if (!isTagged)
-                {
-                    const int minLen = 2;
-                    const int maxLen = 512;
-                    var queryLength = queries[0].Length;
-                    if (queryLength < minLen || queryLength > maxLen)
-                    {
-                        return;
-                    }
-                }
-
-                var matched = await RespondWithFactoidMatchAsync(channel, message, queries);
-                if (matched || hasQuestionMark)
-                {
-                    return;
-                }
-            }
-        }
-
-        if (TryParseInfobotSet(content, out var term, out var fact))
-        {
-            if (isListening && !hasExplicitMention)
-            {
-                await SaveFactoidAsync(channel, message, term, fact);
-                if (isTagged)
-                {
-                    await SendFactoidAcknowledgementAsync(channel, message, term, fact, "Learned a new factoid.");
-                }
-            }
-            return;
-        }
-    }
-
-    private static bool TryParseInfobotSet(string content, out string term, out string fact)
-    {
-        term = null;
-        fact = null;
-
-        var isIndex = content.IndexOf(" is ", StringComparison.OrdinalIgnoreCase);
-        var areIndex = content.IndexOf(" are ", StringComparison.OrdinalIgnoreCase);
-        var wasIndex = content.IndexOf(" was ", StringComparison.OrdinalIgnoreCase);
-        var wereIndex = content.IndexOf(" were ", StringComparison.OrdinalIgnoreCase);
-        var separatorIndex = new[] { isIndex, areIndex, wasIndex, wereIndex }
-            .Where(index => index >= 0)
-            .DefaultIfEmpty(-1)
-            .Min();
-        if (separatorIndex <= 0)
-        {
-            return false;
-        }
-
-        var separatorLength = separatorIndex == isIndex
-            ? 4
-            : separatorIndex == wereIndex
-                ? 6
-                : 5;
-        term = content[..separatorIndex].Trim();
-        fact = content[(separatorIndex + separatorLength)..].Trim();
-        return !string.IsNullOrWhiteSpace(term) && !string.IsNullOrWhiteSpace(fact);
-    }
-
-    private async Task<bool> RespondWithFactoidMatchAsync(ChannelState channel, SocketMessage message, IReadOnlyList<string> queries)
-    {
-        if (!IsChannelGuildMatch(channel, message.Channel, "factoid-match"))
-        {
-            return false;
-        }
-
-        var factoids = ChannelFactoids.GetOrAdd(message.Channel.Id, _ => new List<FactoidEntry>());
-        var guildId = GetGuildId(message.Channel);
-        var usableFactoids = FilterFactoidsForChannel(factoids, guildId, message.Channel.Id);
-        if (usableFactoids.Count == 0)
-        {
-            return false;
-        }
-
-        FactoidEntry exactMatch = null;
-        foreach (var query in queries)
-        {
-            var normalizedQuery = NormalizeTerm(query);
-            if (string.IsNullOrWhiteSpace(normalizedQuery))
-            {
-                continue;
-            }
-
-            exactMatch = usableFactoids.FirstOrDefault(f =>
-                f.Term != null && string.Equals(NormalizeTerm(f.Term), normalizedQuery, StringComparison.OrdinalIgnoreCase));
-            if (exactMatch != null)
-            {
-                break;
-            }
-        }
-        if (exactMatch == null)
-        {
-            return false;
-        }
-
-        using var typingState = message.Channel.EnterTypingState();
-        var response = await GenerateFactoidResponseAsync(channel, queries[0], exactMatch, message);
-        if (string.IsNullOrWhiteSpace(response))
-        {
-            return false;
-        }
-
-        IUserMessage responseMessage;
-        if (message is IUserMessage userMessage)
-        {
-            responseMessage = await userMessage.ReplyAsync(response);
-        }
-        else
-        {
-            responseMessage = await message.Channel.SendMessageAsync(response);
-        }
-
-        if (responseMessage != null && !string.IsNullOrWhiteSpace(exactMatch.Term))
-        {
-            _factoidResponseMap[responseMessage.Id] = new FactoidResponseMetadata(message.Channel.Id, exactMatch.Term);
-            await responseMessage.AddReactionsAsync(new IEmote[]
-            {
-                new Emoji("🗑️"),
-                new Emoji("🛑")
-            });
-            await TrackFactoidMatchAsync(channel, message, exactMatch, queries[0], responseMessage);
-        }
-
-        return true;
-    }
-
-    private async Task TrackFactoidMatchAsync(ChannelState channel, SocketMessage message, FactoidEntry factoid, string query, IUserMessage responseMessage)
-    {
-        if (message.Channel is IPrivateChannel)
-        {
-            return;
-        }
-
-        if (responseMessage == null || channel == null)
-        {
-            return;
-        }
-
-        if (message.Channel is IGuildChannel guildChannel)
-        {
-            EnsureChannelStateMetadata(channel, guildChannel);
-        }
-
-        var matches = ChannelFactoidMatches.GetOrAdd(message.Channel.Id, _ => new List<FactoidMatchEntry>());
-        var entry = new FactoidMatchEntry
-        {
-            Term = factoid.Term,
-            Query = query,
-            QueryMessageId = message.Id,
-            ResponseMessageId = responseMessage.Id,
-            UserId = message.Author?.Id ?? 0,
-            MatchedAt = DateTimeOffset.UtcNow
-        };
-        matches.Add(entry);
-
-        const int maxMatches = 50;
-        if (matches.Count > maxMatches)
-        {
-            matches.RemoveRange(0, matches.Count - maxMatches);
-        }
-
-        await SaveFactoidMatchesAsync(channel, matches);
-
-        var stats = ChannelFactoidMatchStats.GetOrAdd(message.Channel.Id, _ => new FactoidMatchStats());
-        stats = EnsureMatchStats(stats);
-        ChannelFactoidMatchStats[message.Channel.Id] = stats;
-        var normalizedTerm = NormalizeTerm(factoid.Term) ?? NormalizeTerm(query) ?? "unknown";
-        var displayTerm = string.IsNullOrWhiteSpace(factoid.Term) ? normalizedTerm : factoid.Term;
-        lock (stats)
-        {
-            stats.TotalMatches++;
-            stats.TermCounts[normalizedTerm] = stats.TermCounts.TryGetValue(normalizedTerm, out var count) ? count + 1 : 1;
-            stats.TermDisplayNames[normalizedTerm] = displayTerm;
-            stats.LastResponseMessageIds[normalizedTerm] = responseMessage.Id;
-            stats.LastUserIds[normalizedTerm] = message.Author?.Id ?? 0;
-        }
-
-        await SaveFactoidMatchStatsAsync(channel, stats);
-    }
-
-    private async Task<string> GenerateFactoidResponseAsync(ChannelState channel, string query, FactoidEntry factoid, SocketMessage message)
-    {
-        var mention = factoid.SourceUserId != 0 ? $"<@{factoid.SourceUserId}>" : (factoid.SourceUsername ?? "unknown");
-        var messageLink = BuildDiscordMessageLink(channel, factoid.SourceMessageId);
-        var sourceLine = messageLink == null
-            ? $"Source: {mention} on {factoid.CreatedAt:O}."
-            : $"Source: {mention} in {messageLink} on {factoid.CreatedAt:O}.";
-        var includeSourcesInstruction = messageLink == null
-            ? "Include the mention verbatim."
-            : "Include the mention and link verbatim.";
-        var term = string.IsNullOrWhiteSpace(factoid.Term) ? query : factoid.Term;
-        var prompt = $"Matched factoid\nTerm: {term}\nFact: {factoid.Text}\n{sourceLine}\n" +
-                     $"Respond in one short paragraph: lead with an infobot-style sentence that repeats the fact verbatim, " +
-                     $"then add a short, personable blurb that explains why it matches the question or provides likely context. {includeSourcesInstruction}";
-        var personalityPrompt = channel.Options.LearningPersonalityPrompt ?? DefaultParameters.LearningPersonalityPrompt;
-        var systemPrompt = string.IsNullOrWhiteSpace(personalityPrompt)
-            ? "You are a concise, personable Discord bot. Answer matched factoids in an infobot-inspired style. Never wrap replies in triple backtick code fences (including ```discord) unless the user explicitly asks for a code block. If prior conversation includes code fences, override that style and respond without code fences."
-            : $"You are a concise, personable Discord bot. Answer matched factoids in an infobot-inspired style. Never wrap replies in triple backtick code fences (including ```discord) unless the user explicitly asks for a code block. If prior conversation includes code fences, override that style and respond without code fences.\n{personalityPrompt}";
-        var request = new ChatCompletionCreateRequest
-        {
-            Model = channel.InstructionChat.ChatBotState.Parameters.Model,
-            Messages = new List<ChatMessage>
-            {
-                new(StaticValues.ChatMessageRoles.System, systemPrompt),
-                new(StaticValues.ChatMessageRoles.User, prompt)
-            }
-        };
-
-        var response = await OpenAILogic.CreateChatCompletionAsync(request);
-        if (!response.Successful)
-        {
-            await Console.Out.WriteLineAsync($"Factoid response failed: {response.Error?.Message}");
-            return null;
-        }
-
-        var content = response.Choices.FirstOrDefault()?.Message?.Content;
-        if (string.IsNullOrWhiteSpace(content))
-        {
-            return content;
-        }
-
-        var missingPieces = new List<string>();
-        if (!string.IsNullOrWhiteSpace(mention) && !content.Contains(mention, StringComparison.Ordinal))
-        {
-            missingPieces.Add(mention);
-        }
-        if (!string.IsNullOrWhiteSpace(messageLink) && !content.Contains(messageLink, StringComparison.Ordinal))
-        {
-            missingPieces.Add(messageLink);
-        }
-        if (!string.IsNullOrWhiteSpace(factoid.Text) && !content.Contains(factoid.Text, StringComparison.Ordinal))
-        {
-            missingPieces.Add($"Fact: {factoid.Text}");
-        }
-        if (missingPieces.Count > 0)
-        {
-            content = $"{content}\n\nSource: {string.Join(" ", missingPieces)}";
-        }
-
-        if (!string.IsNullOrWhiteSpace(messageLink))
-        {
-            var originalMessageLine = $"Original message: {messageLink}";
-            if (!content.Contains(originalMessageLine, StringComparison.OrdinalIgnoreCase))
-            {
-                content = $"{content}\n{originalMessageLine}";
-            }
-        }
-
-        content = $"{content}\n\nReact with 🛑 to disable infobot here, or 🗑️ to delete this factoid.";
-
-        return content;
-    }
-
-    private async Task SendFactoidAcknowledgementAsync(ChannelState channel, SocketMessage message, string term, string fact, string prefix)
-    {
-        var info = $"{prefix} `{term}` → {fact}";
-        if (message is IUserMessage userMessage)
-        {
-            await userMessage.ReplyAsync(info);
-        }
-        else
-        {
-            await message.Channel.SendMessageAsync(info);
-        }
-    }
-
-    private static string NormalizeTerm(string term)
-    {
-        if (string.IsNullOrWhiteSpace(term))
-        {
-            return null;
-        }
-
-        var normalized = term.Trim().TrimEnd('?');
-        normalized = Regex.Replace(normalized, @"^(the|da|an?)\s+", string.Empty, RegexOptions.IgnoreCase);
-        normalized = normalized.Trim();
-        return normalized.Length == 0 ? null : normalized.ToLowerInvariant();
-    }
-
-    private static readonly string[] InfobotQuestionPrefixes =
-    {
-        "who", "who is", "who are",
-        "what", "what's", "what is", "what are",
-        "where", "where's", "where is", "where are"
-    };
-
-    private static string PreprocessInfobotQuestion(string message)
-    {
-        if (message == null)
-        {
-            return null;
-        }
-
-        var question = message;
-        question = Regex.Replace(question, @"^where is ", string.Empty, RegexOptions.IgnoreCase);
-        question = Regex.Replace(question, @"\s+\?$", "?", RegexOptions.IgnoreCase);
-        question = Regex.Replace(question, @"^whois ", string.Empty, RegexOptions.IgnoreCase);
-        question = Regex.Replace(question, @"^who is ", string.Empty, RegexOptions.IgnoreCase);
-        question = Regex.Replace(question, @"^what is (a|an)?", string.Empty, RegexOptions.IgnoreCase);
-        question = Regex.Replace(question, @"^how do i ", string.Empty, RegexOptions.IgnoreCase);
-        question = Regex.Replace(question, @"^where can i (find|get|download)", string.Empty, RegexOptions.IgnoreCase);
-        question = Regex.Replace(question, @"^how about ", string.Empty, RegexOptions.IgnoreCase);
-        question = Regex.Replace(question, @" da ", " the ", RegexOptions.IgnoreCase);
-
-        question = Regex.Replace(question, @"^(stupid )?q(uestion)?:\s+", string.Empty, RegexOptions.IgnoreCase);
-        question = Regex.Replace(question, @"^(does )?(any|ne)(1|one|body) know ", string.Empty, RegexOptions.IgnoreCase);
-        question = Regex.Replace(question, @"^[uh]+m*[,\.]* +", string.Empty, RegexOptions.IgnoreCase);
-        question = Regex.Replace(question, @"^well([, ]+)", string.Empty, RegexOptions.IgnoreCase);
-        question = Regex.Replace(question, @"^still([, ]+)", string.Empty, RegexOptions.IgnoreCase);
-        question = Regex.Replace(question, @"^(gee|boy|golly|gosh)([, ]+)", string.Empty, RegexOptions.IgnoreCase);
-        question = Regex.Replace(question, @"^(well|and|but|or|yes)([, ]+)", string.Empty, RegexOptions.IgnoreCase);
-        question = Regex.Replace(question, @"^o+[hk]+(a+y+)?([,. ]+)", string.Empty, RegexOptions.IgnoreCase);
-        question = Regex.Replace(question, @"^g(eez|osh|olly)([,. ]+)", string.Empty, RegexOptions.IgnoreCase);
-        question = Regex.Replace(question, @"^w(ow|hee|o+ho+)([,. ]+)", string.Empty, RegexOptions.IgnoreCase);
-        question = Regex.Replace(question, @"^heya?,?( folks)?([,. ]+)", string.Empty, RegexOptions.IgnoreCase);
-
-        return question;
-    }
-
-    private static string NormalizeInfobotQuery(string input, ref bool finalQMark)
-    {
-        if (string.IsNullOrWhiteSpace(input))
-        {
-            return string.Empty;
-        }
-
-        var query = $" {input} ";
-
-        query = Regex.Replace(query, @" (where|what|who)\s+(\S+)\s+(is|are) ", " $1 $3 $2 ", RegexOptions.IgnoreCase);
-        query = Regex.Replace(query, @" (where|what|who)\s+(.*)\s+(is|are) ", " $1 $3 $2 ", RegexOptions.IgnoreCase);
-        query = Regex.Replace(query, @"^\s*(.*?)\s*", "$1");
-        query = Regex.Replace(query, @"be tellin'?g?", "tell", RegexOptions.IgnoreCase);
-        query = Regex.Replace(query, @" '?bout", " about", RegexOptions.IgnoreCase);
-        query = Regex.Replace(query, @",? any(hoo?w?|ways?)", " ", RegexOptions.IgnoreCase);
-        query = Regex.Replace(query, @",?\s*(pretty )*please\??\s*$", "?", RegexOptions.IgnoreCase);
-
-        var countryMatch = Regex.IsMatch(query,
-            @"wh(at|ich)\s+(add?res?s|country|place|net (suffix|domain))",
-            RegexOptions.IgnoreCase);
-        if (countryMatch)
-        {
-            if (query.Trim().Length == 2 && !query.Trim().StartsWith(".", StringComparison.Ordinal))
-            {
-                query = "." + query.Trim();
-            }
-            query = query.TrimEnd() + "?";
-        }
-
-        query = Regex.Replace(query,
-            @"th(e|at|is) (((m(o|u)th(a|er) ?)?fuck(in'?g?)?|hell|heck|(god-?)?damn?(ed)?) ?)+",
-            string.Empty, RegexOptions.IgnoreCase);
-        query = Regex.Replace(query, @"wtf", "where", RegexOptions.IgnoreCase);
-        query = Regex.Replace(query, @"this (.*) thingy?", " $1", RegexOptions.IgnoreCase);
-        query = Regex.Replace(query, @"this thingy? (called )?", string.Empty, RegexOptions.IgnoreCase);
-        query = Regex.Replace(query, @"ha(s|ve) (an?y?|some|ne) (idea|clue|guess|seen) ", "know ", RegexOptions.IgnoreCase);
-        query = Regex.Replace(query, @"does (any|ne|some) ?(1|one|body) know ", string.Empty, RegexOptions.IgnoreCase);
-        query = Regex.Replace(query, @"do you know ", string.Empty, RegexOptions.IgnoreCase);
-        query = Regex.Replace(query, @"can (you|u|((any|ne|some) ?(1|one|body)))( please)? tell (me|us|him|her)", string.Empty, RegexOptions.IgnoreCase);
-        query = Regex.Replace(query, @"where (\S+) can \S+ (a|an|the)?", string.Empty, RegexOptions.IgnoreCase);
-        query = Regex.Replace(query, @"(can|do) (i|you|one|we|he|she) (find|get)( this)?", "is", RegexOptions.IgnoreCase);
-        query = Regex.Replace(query, @"(i|one|we|he|she) can (find|get)", "is", RegexOptions.IgnoreCase);
-        query = Regex.Replace(query, @"(the )?(address|url) (for|to) ", string.Empty, RegexOptions.IgnoreCase);
-        query = Regex.Replace(query, @"(where is )+", "where is ", RegexOptions.IgnoreCase);
-        query = Regex.Replace(query, @"\s+", " ");
-        query = Regex.Replace(query, @"^\s+", string.Empty);
-
-        if (Regex.IsMatch(query, @"\s*[\/?!]*\?+\s*$"))
-        {
-            finalQMark = true;
-            query = Regex.Replace(query, @"\s*[\/?!]*\?+\s*$", string.Empty);
-        }
-
-        query = Regex.Replace(query, @"\s+", " ");
-        query = Regex.Replace(query, @"^\s*(.*?)\s*$", "$1");
-        query = query.Trim();
-
-        return query;
-    }
-
-    private static string SwitchPerson(string input, string who, bool addressed, string botName)
-    {
-        if (string.IsNullOrWhiteSpace(input))
-        {
-            return input;
-        }
-
-        var text = input;
-
-        if (!string.IsNullOrWhiteSpace(who))
-        {
-            text = Regex.Replace(text, @"(^|\W)" + Regex.Escape(who) + @"s\s+", "$1" + who + "'s ", RegexOptions.IgnoreCase);
-            text = Regex.Replace(text, @"(^|\W)" + Regex.Escape(who) + @"s$", "$1" + who + "'s", RegexOptions.IgnoreCase);
-            text = Regex.Replace(text, @"(^|\W)" + Regex.Escape(who) + @"'(\s|$)", "$1" + who + "'s$2", RegexOptions.IgnoreCase);
-            text = Regex.Replace(text, @"(^|\s)i'm(\W|$)", "$1" + who + " is$2", RegexOptions.IgnoreCase);
-            text = Regex.Replace(text, @"(^|\s)i've(\W|$)", "$1" + who + " has$2", RegexOptions.IgnoreCase);
-            text = Regex.Replace(text, @"(^|\s)i have(\W|$)", "$1" + who + " has$2", RegexOptions.IgnoreCase);
-            text = Regex.Replace(text, @"(^|\s)i haven'?t(\W|$)", "$1" + who + " has not$2", RegexOptions.IgnoreCase);
-            text = Regex.Replace(text, @"(^|\s)i(\W|$)", "$1" + who + "$2", RegexOptions.IgnoreCase);
-            text = Regex.Replace(text, @" am\b", " is", RegexOptions.IgnoreCase);
-            text = Regex.Replace(text, @"\bam ", "is ", RegexOptions.IgnoreCase);
-            text = Regex.Replace(text, @"(^|\s)(me|myself)(\W|$)", "$1" + who + "$3", RegexOptions.IgnoreCase);
-            text = Regex.Replace(text, @"(^|\s)my(\W|$)", "$1" + who + "'s$2", RegexOptions.IgnoreCase);
-            text = Regex.Replace(text, @"(^|\W)you'?re(\W|$)", "$1you are$2", RegexOptions.IgnoreCase);
-        }
-
-        if (addressed && !string.IsNullOrWhiteSpace(botName))
-        {
-            text = Regex.Replace(text, @"yourself", botName, RegexOptions.IgnoreCase);
-            text = Regex.Replace(text, @"(^|\W)are you(\W|$)", "$1is " + botName + "$2", RegexOptions.IgnoreCase);
-            text = Regex.Replace(text, @"(^|\W)you are(\W|$)", "$1" + botName + " is$2", RegexOptions.IgnoreCase);
-            text = Regex.Replace(text, @"(^|\W)you(\W|$)", "$1" + botName + "$2", RegexOptions.IgnoreCase);
-            text = Regex.Replace(text, @"(^|\W)your(\W|$)", "$1" + botName + "'s$2", RegexOptions.IgnoreCase);
-        }
-
-        return text;
-    }
-
-    private static List<string> BuildInfobotQueries(string message, string who, bool addressed, string botName)
-    {
-        var finalQMark = false;
-        if (string.IsNullOrWhiteSpace(message))
-        {
-            return new List<string>();
-        }
-
-        var query = message.Trim();
-        if (Regex.IsMatch(query, @"\?+\s*$"))
-        {
-            finalQMark = true;
-            query = Regex.Replace(query, @"\?+\s*$", string.Empty).Trim();
-        }
-
-        var queries = new List<string> { query };
-
-        if (query.EndsWith(".", StringComparison.Ordinal) || query.EndsWith("!", StringComparison.Ordinal))
-        {
-            var trimmed = query[..^1].Trim();
-            if (!string.IsNullOrWhiteSpace(trimmed))
-            {
-                queries.Add(trimmed);
-            }
-        }
-
-        var normalized = NormalizeInfobotQuery(query, ref finalQMark);
-        if (!string.Equals(normalized, query, StringComparison.Ordinal))
-        {
-            queries.Add(normalized);
-        }
-
-        var switched = SwitchPerson(normalized, who, addressed, botName);
-        if (!string.Equals(switched, normalized, StringComparison.Ordinal))
-        {
-            queries.Add(switched);
-        }
-
-        var cleaned = switched;
-        cleaned = Regex.Replace(cleaned, @"\s+at\s*(\?*)$", "$1", RegexOptions.IgnoreCase);
-        cleaned = Regex.Replace(cleaned, @"^explain\s*(\?*)", "$1", RegexOptions.IgnoreCase);
-        cleaned = $" {cleaned} ";
-
-        var qregex = string.Join("|", InfobotQuestionPrefixes.Select(Regex.Escape));
-        var match = Regex.Match(cleaned, @"^\s(" + qregex + @")\s", RegexOptions.IgnoreCase);
-        if (match.Success)
-        {
-            cleaned = Regex.Replace(cleaned, @"^\s(" + qregex + @")\s", " ", RegexOptions.IgnoreCase);
-        }
-
-        cleaned = cleaned.Trim();
-        if (!string.IsNullOrWhiteSpace(cleaned) && !queries.Contains(cleaned))
-        {
-            queries.Add(cleaned);
-        }
-
-        return queries;
-    }
-
     internal static string BuildDiscordMessageLink(ChannelState channel, ulong messageId)
     {
         if (channel == null || channel.GuildId == 0 || channel.ChannelId == 0 || messageId == 0)
@@ -1651,85 +1107,6 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
         }
 
         return $"https://discord.com/channels/{channel.GuildId}/{channel.ChannelId}/{messageId}";
-    }
-
-    private static FactoidMatchStats EnsureMatchStats(FactoidMatchStats stats)
-    {
-        if (stats == null)
-        {
-            return new FactoidMatchStats();
-        }
-
-        stats.TermCounts = EnsureMatchDictionary(stats.TermCounts);
-        stats.TermDisplayNames = EnsureMatchDictionary(stats.TermDisplayNames);
-        stats.LastResponseMessageIds = EnsureMatchDictionary(stats.LastResponseMessageIds);
-        stats.LastUserIds = EnsureMatchDictionary(stats.LastUserIds);
-        return stats;
-    }
-
-    private static FactoidMatchStats BuildMatchStatsFromEntries(IEnumerable<FactoidMatchEntry> matches)
-    {
-        var stats = EnsureMatchStats(new FactoidMatchStats());
-        if (matches == null)
-        {
-            return stats;
-        }
-
-        foreach (var match in matches.OrderBy(m => m.MatchedAt))
-        {
-            var normalized = NormalizeTerm(match.Term) ?? NormalizeTerm(match.Query) ?? "unknown";
-            var display = string.IsNullOrWhiteSpace(match.Term) ? normalized : match.Term;
-            stats.TotalMatches++;
-            stats.TermCounts[normalized] = stats.TermCounts.TryGetValue(normalized, out var count) ? count + 1 : 1;
-            stats.TermDisplayNames[normalized] = display;
-            if (match.ResponseMessageId != 0)
-            {
-                stats.LastResponseMessageIds[normalized] = match.ResponseMessageId;
-            }
-
-            if (match.UserId != 0)
-            {
-                stats.LastUserIds[normalized] = match.UserId;
-            }
-        }
-
-        return stats;
-    }
-
-    private static Dictionary<string, int> EnsureMatchDictionary(Dictionary<string, int> dictionary)
-    {
-        if (dictionary == null)
-        {
-            return new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        }
-
-        return dictionary.Comparer == StringComparer.OrdinalIgnoreCase
-            ? dictionary
-            : new Dictionary<string, int>(dictionary, StringComparer.OrdinalIgnoreCase);
-    }
-
-    private static Dictionary<string, string> EnsureMatchDictionary(Dictionary<string, string> dictionary)
-    {
-        if (dictionary == null)
-        {
-            return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        }
-
-        return dictionary.Comparer == StringComparer.OrdinalIgnoreCase
-            ? dictionary
-            : new Dictionary<string, string>(dictionary, StringComparer.OrdinalIgnoreCase);
-    }
-
-    private static Dictionary<string, ulong> EnsureMatchDictionary(Dictionary<string, ulong> dictionary)
-    {
-        if (dictionary == null)
-        {
-            return new Dictionary<string, ulong>(StringComparer.OrdinalIgnoreCase);
-        }
-
-        return dictionary.Comparer == StringComparer.OrdinalIgnoreCase
-            ? dictionary
-            : new Dictionary<string, ulong>(dictionary, StringComparer.OrdinalIgnoreCase);
     }
 
     private static string NormalizeSingleLine(string input)
@@ -1757,25 +1134,6 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
         return $"{input[..(maxLength - 3)].TrimEnd()}...";
     }
 
-    private static List<FactoidEntry> FindMostSimilarFactoids(List<FactoidEntry> factoids, List<double> queryEmbedding, int limit, double threshold)
-    {
-        var matches = new List<(FactoidEntry Factoid, double Similarity)>(factoids.Count);
-        foreach (var factoid in factoids)
-        {
-            if (factoid.Embedding == null || factoid.Embedding.Count == 0)
-            {
-                continue;
-            }
-            var similarity = CosineSimilarity.Calculate(queryEmbedding, factoid.Embedding);
-            if (similarity >= threshold)
-            {
-                matches.Add((factoid, similarity));
-            }
-        }
-
-        matches.Sort((x, y) => y.Similarity.CompareTo(x.Similarity));
-        return matches.Take(limit).Select(x => x.Factoid).ToList();
-    }
 
     private MessageComponent BuildStandardComponents()
     {
@@ -2164,197 +1522,6 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 
     }
 
-    private async Task LoadFactoids()
-    {
-        Directory.CreateDirectory("channels");
-        var factoidFiles = Directory.GetFiles("channels", "facts*.json", SearchOption.AllDirectories).ToList();
-        var channelsWithToken = new HashSet<ulong>();
-        foreach (var file in factoidFiles)
-        {
-            if (TryGetChannelIdFromFactoidPath(file, out var tokenChannelId) &&
-                TryGetGuildIdTokenFromFileName(file, out _))
-            {
-                channelsWithToken.Add(tokenChannelId);
-            }
-        }
-
-        foreach (var file in factoidFiles)
-        {
-            if (!TryGetChannelIdFromFactoidPath(file, out var channelId))
-            {
-                continue;
-            }
-
-            var hasToken = TryGetGuildIdTokenFromFileName(file, out var tokenGuildId);
-            if (!hasToken && channelsWithToken.Contains(channelId))
-            {
-                continue;
-            }
-
-            var validation = await ValidateGuildTokenForFileAsync(channelId, file, isEmbed: false, "factoids");
-            if (!validation.ShouldLoad)
-            {
-                continue;
-            }
-
-            await using var fileStream = File.OpenRead(file);
-            var factoids = await JsonSerializer.DeserializeAsync<List<FactoidEntry>>(fileStream) ?? new List<FactoidEntry>();
-            var hasPathGuild = TryGetGuildIdFromChannelPath(file, out var pathGuildId);
-            var resolvedGuildId = validation.GuildId != 0 ? validation.GuildId : (hasToken ? tokenGuildId : pathGuildId);
-            var updated = false;
-            if (factoids.Count > 0)
-            {
-                foreach (var factoid in factoids)
-                {
-                    if (factoid.SourceChannelId == 0)
-                    {
-                        factoid.SourceChannelId = channelId;
-                        updated = true;
-                    }
-
-                    if (factoid.SourceGuildId == 0 && resolvedGuildId != 0)
-                    {
-                        factoid.SourceGuildId = resolvedGuildId;
-                        updated = true;
-                    }
-                }
-            }
-            ChannelFactoids[channelId] = factoids;
-
-            if (!hasToken && hasPathGuild)
-            {
-                await ResaveLegacyJsonAsync(file, ".json", resolvedGuildId, "json", factoids,
-                    new JsonSerializerOptions { WriteIndented = true }, deleteLegacyOnSuccess: true);
-            }
-            else if (updated && hasToken)
-            {
-                await ResaveLegacyJsonAsync(file, ".json", resolvedGuildId, "json", factoids,
-                    new JsonSerializerOptions { WriteIndented = true }, overwriteExisting: true);
-            }
-        }
-    }
-
-    private async Task LoadFactoidMatches()
-    {
-        Directory.CreateDirectory("channels");
-        var matchFiles = Directory.GetFiles("channels", "matches*.json", SearchOption.AllDirectories)
-            .Where(file => !Path.GetFileName(file).StartsWith("matches.stats", StringComparison.OrdinalIgnoreCase))
-            .ToList();
-        var channelsWithToken = new HashSet<ulong>();
-        foreach (var file in matchFiles)
-        {
-            if (TryGetChannelIdFromMatchPath(file, out var tokenChannelId) &&
-                TryGetGuildIdTokenFromFileName(file, out _))
-            {
-                channelsWithToken.Add(tokenChannelId);
-            }
-        }
-
-        foreach (var file in matchFiles)
-        {
-            if (!TryGetChannelIdFromMatchPath(file, out var channelId))
-            {
-                continue;
-            }
-
-            var hasToken = TryGetGuildIdTokenFromFileName(file, out var tokenGuildId);
-            if (!hasToken && channelsWithToken.Contains(channelId))
-            {
-                continue;
-            }
-
-            var validation = await ValidateGuildTokenForFileAsync(channelId, file, isEmbed: false, "matches");
-            if (!validation.ShouldLoad)
-            {
-                continue;
-            }
-
-            await using var fileStream = File.OpenRead(file);
-            var matches = await JsonSerializer.DeserializeAsync<List<FactoidMatchEntry>>(fileStream) ?? new List<FactoidMatchEntry>();
-            ChannelFactoidMatches[channelId] = matches;
-
-            if (!hasToken && TryGetGuildIdFromChannelPath(file, out var pathGuildId))
-            {
-                var resolvedGuildId = validation.GuildId != 0 ? validation.GuildId : (hasToken ? tokenGuildId : pathGuildId);
-                await ResaveLegacyJsonAsync(file, ".json", resolvedGuildId, "json", matches,
-                    new JsonSerializerOptions { WriteIndented = true }, deleteLegacyOnSuccess: true);
-            }
-        }
-    }
-
-    private async Task LoadFactoidMatchStats()
-    {
-        Directory.CreateDirectory("channels");
-        var matchFiles = Directory.GetFiles("channels", "matches.stats*.json", SearchOption.AllDirectories).ToList();
-        var channelsWithToken = new HashSet<ulong>();
-        foreach (var file in matchFiles)
-        {
-            if (TryGetChannelIdFromMatchPath(file, out var tokenChannelId) &&
-                TryGetGuildIdTokenFromFileName(file, out _))
-            {
-                channelsWithToken.Add(tokenChannelId);
-            }
-        }
-
-        foreach (var file in matchFiles)
-        {
-            if (!TryGetChannelIdFromMatchPath(file, out var channelId))
-            {
-                continue;
-            }
-
-            var hasToken = TryGetGuildIdTokenFromFileName(file, out var tokenGuildId);
-            if (!hasToken && channelsWithToken.Contains(channelId))
-            {
-                continue;
-            }
-
-            var validation = await ValidateGuildTokenForFileAsync(channelId, file, isEmbed: false, "match-stats");
-            if (!validation.ShouldLoad)
-            {
-                continue;
-            }
-
-            await using var fileStream = File.OpenRead(file);
-            var stats = await JsonSerializer.DeserializeAsync<FactoidMatchStats>(fileStream) ?? new FactoidMatchStats();
-            ChannelFactoidMatchStats[channelId] = EnsureMatchStats(stats);
-
-            if (!hasToken && TryGetGuildIdFromChannelPath(file, out var pathGuildId))
-            {
-                var resolvedGuildId = validation.GuildId != 0 ? validation.GuildId : (hasToken ? tokenGuildId : pathGuildId);
-                await ResaveLegacyJsonAsync(file, ".json", resolvedGuildId, "json", stats,
-                    new JsonSerializerOptions { WriteIndented = true }, deleteLegacyOnSuccess: true);
-            }
-        }
-    }
-
-    private static bool TryGetChannelIdFromFactoidPath(string file, out ulong channelId)
-    {
-        channelId = 0;
-        var channelDirectory = Path.GetDirectoryName(file);
-        if (string.IsNullOrWhiteSpace(channelDirectory))
-        {
-            return false;
-        }
-
-        var channelFolder = new DirectoryInfo(channelDirectory).Name;
-        return TryParseIdFromName(channelFolder, out channelId);
-    }
-
-    private static bool TryGetChannelIdFromMatchPath(string file, out ulong channelId)
-    {
-        channelId = 0;
-        var channelDirectory = Path.GetDirectoryName(file);
-        if (string.IsNullOrWhiteSpace(channelDirectory))
-        {
-            return false;
-        }
-
-        var channelFolder = new DirectoryInfo(channelDirectory).Name;
-        return TryParseIdFromName(channelFolder, out channelId);
-    }
-
-
     private static void EnsureChannelStateMetadata(ChannelState channelState, IGuildChannel guildChannel)
     {
         channelState.GuildId = guildChannel.GuildId;
@@ -2738,19 +1905,6 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 
         ChannelGuildIds.TryAdd(channelState.ChannelId, guildId);
         return true;
-    }
-
-    private static List<FactoidEntry> FilterFactoidsForChannel(IEnumerable<FactoidEntry> factoids, ulong guildId, ulong channelId)
-    {
-        if (factoids == null)
-        {
-            return new List<FactoidEntry>();
-        }
-
-        return factoids.Where(f =>
-                (f.SourceGuildId == 0 || f.SourceGuildId == guildId) &&
-                (f.SourceChannelId == 0 || f.SourceChannelId == channelId))
-            .ToList();
     }
 
     internal static async Task SendEphemeralResponseAsync(SocketSlashCommand command, string content)
@@ -4188,183 +3342,6 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
         await SendEphemeralResponseAsync(command, responseText);
 
         await SaveCachedChannelState(channel.Id);
-    }
-
-    private FactoidEntry FindExactTermFactoid(ulong channelId, ulong guildId, string term)
-    {
-        if (!ChannelFactoids.TryGetValue(channelId, out var factoids))
-        {
-            return null;
-        }
-
-        var usableFactoids = FilterFactoidsForChannel(factoids, guildId, channelId);
-        var normalized = NormalizeTerm(term);
-        return usableFactoids.FirstOrDefault(f => f.Term != null &&
-                                            string.Equals(NormalizeTerm(f.Term), normalized, StringComparison.OrdinalIgnoreCase));
-    }
-
-    private bool RemoveFactoidByTerm(ChannelState channel, ulong guildId, string term)
-    {
-        if (!ChannelFactoids.TryGetValue(channel.ChannelId, out var factoids))
-        {
-            return false;
-        }
-
-        var normalized = NormalizeTerm(term);
-        var removed = factoids.RemoveAll(f => f.Term != null &&
-                                              string.Equals(NormalizeTerm(f.Term), normalized, StringComparison.OrdinalIgnoreCase) &&
-                                              (f.SourceGuildId == 0 || f.SourceGuildId == guildId) &&
-                                              (f.SourceChannelId == 0 || f.SourceChannelId == channel.ChannelId));
-        if (removed == 0)
-        {
-            return false;
-        }
-
-        _ = SaveFactoidsAsync(channel, factoids);
-        return true;
-    }
-
-    private async Task SaveFactoidAsync(ChannelState channel, SocketMessage message, string term, string text)
-    {
-        var normalizedTerm = NormalizeTerm(term);
-        var sourceGuildId = GetGuildId(message.Channel);
-        var entry = new FactoidEntry
-        {
-            Term = normalizedTerm,
-            Text = text.Trim(),
-            SourceGuildId = sourceGuildId,
-            SourceChannelId = message.Channel.Id,
-            SourceMessageId = message.Id,
-            SourceUserId = message.Author.Id,
-            SourceUsername = message.Author.Username,
-            CreatedAt = DateTimeOffset.UtcNow
-        };
-
-        var documents = await Document.ChunkToDocumentsAsync(entry.Text, channel.InstructionChat.ChatBotState.Parameters.ChunkSize);
-        if (documents.Count == 0)
-        {
-            return;
-        }
-
-        var embeddings = await OpenAILogic.CreateEmbeddings(documents);
-        if (!embeddings.Successful)
-        {
-            return;
-        }
-
-        foreach (var doc in documents)
-        {
-            if (doc.Embedding == null)
-            {
-                continue;
-            }
-
-            var chunkEntry = new FactoidEntry
-            {
-                Term = entry.Term,
-                Text = doc.Text,
-                Embedding = doc.Embedding,
-                SourceGuildId = entry.SourceGuildId,
-                SourceChannelId = entry.SourceChannelId,
-                SourceMessageId = entry.SourceMessageId,
-                SourceUserId = entry.SourceUserId,
-                SourceUsername = entry.SourceUsername,
-                CreatedAt = entry.CreatedAt
-            };
-
-            var list = ChannelFactoids.GetOrAdd(message.Channel.Id, _ => new List<FactoidEntry>());
-            list.Add(chunkEntry);
-        }
-
-        if (ChannelFactoids.TryGetValue(message.Channel.Id, out var channelList))
-        {
-            await SaveFactoidsAsync(channel, channelList);
-        }
-    }
-
-    private async Task SaveFactoidAsync(ChannelState channel, IUser user, IMessageChannel messageChannel, string term, string text)
-    {
-        var normalizedTerm = NormalizeTerm(term);
-        var sourceGuildId = GetGuildId(messageChannel);
-        var entry = new FactoidEntry
-        {
-            Term = normalizedTerm,
-            Text = text.Trim(),
-            SourceGuildId = sourceGuildId,
-            SourceChannelId = messageChannel.Id,
-            SourceMessageId = 0,
-            SourceUserId = user.Id,
-            SourceUsername = user.Username,
-            CreatedAt = DateTimeOffset.UtcNow
-        };
-
-        var documents = await Document.ChunkToDocumentsAsync(entry.Text, channel.InstructionChat.ChatBotState.Parameters.ChunkSize);
-        if (documents.Count == 0)
-        {
-            return;
-        }
-
-        var embeddings = await OpenAILogic.CreateEmbeddings(documents);
-        if (!embeddings.Successful)
-        {
-            return;
-        }
-
-        foreach (var doc in documents)
-        {
-            if (doc.Embedding == null)
-            {
-                continue;
-            }
-
-            var chunkEntry = new FactoidEntry
-            {
-                Term = entry.Term,
-                Text = doc.Text,
-                Embedding = doc.Embedding,
-                SourceGuildId = entry.SourceGuildId,
-                SourceChannelId = entry.SourceChannelId,
-                SourceMessageId = entry.SourceMessageId,
-                SourceUserId = entry.SourceUserId,
-                SourceUsername = entry.SourceUsername,
-                CreatedAt = entry.CreatedAt
-            };
-
-            var list = ChannelFactoids.GetOrAdd(messageChannel.Id, _ => new List<FactoidEntry>());
-            list.Add(chunkEntry);
-        }
-
-        if (ChannelFactoids.TryGetValue(messageChannel.Id, out var channelList))
-        {
-            await SaveFactoidsAsync(channel, channelList);
-        }
-    }
-
-    private async Task SaveFactoidsAsync(ChannelState channel, List<FactoidEntry> entries)
-    {
-        var channelDirectory = GetChannelDirectory(channel);
-        Directory.CreateDirectory(channelDirectory);
-        var filePath = GetChannelFactoidFile(channel);
-        await using var stream = File.Create(filePath);
-        await JsonSerializer.SerializeAsync(stream, entries, new JsonSerializerOptions { WriteIndented = true });
-    }
-
-    private async Task SaveFactoidMatchesAsync(ChannelState channel, List<FactoidMatchEntry> entries)
-    {
-        var channelDirectory = GetChannelDirectory(channel);
-        Directory.CreateDirectory(channelDirectory);
-        var filePath = GetChannelMatchFile(channel);
-        await using var stream = File.Create(filePath);
-        await JsonSerializer.SerializeAsync(stream, entries, new JsonSerializerOptions { WriteIndented = true });
-    }
-
-    private async Task SaveFactoidMatchStatsAsync(ChannelState channel, FactoidMatchStats stats)
-    {
-        var channelDirectory = GetChannelDirectory(channel);
-        Directory.CreateDirectory(channelDirectory);
-        var filePath = GetChannelMatchStatsFile(channel);
-        await using var stream = File.Create(filePath);
-        await JsonSerializer.SerializeAsync(stream, stats, new JsonSerializerOptions { WriteIndented = true });
     }
 
     InstructionGPT.ChannelState IDiscordModuleHost.GetOrCreateChannelState(IChannel channel)

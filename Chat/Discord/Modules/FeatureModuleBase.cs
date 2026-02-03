@@ -20,4 +20,6 @@ public abstract class FeatureModuleBase : IFeatureModule
     public virtual Task OnMessageCommandExecutedAsync(DiscordModuleContext context, SocketMessageCommand command, CancellationToken cancellationToken) => Task.CompletedTask;
     public virtual Task<IReadOnlyList<ChatMessage>> GetAdditionalMessageContextAsync(DiscordModuleContext context, SocketMessage message, InstructionGPT.ChannelState channel, CancellationToken cancellationToken)
         => Task.FromResult<IReadOnlyList<ChatMessage>>(Array.Empty<ChatMessage>());
+    public virtual IReadOnlyList<SlashCommandContribution> GetSlashCommandContributions(DiscordModuleContext context)
+        => Array.Empty<SlashCommandContribution>();
 }
