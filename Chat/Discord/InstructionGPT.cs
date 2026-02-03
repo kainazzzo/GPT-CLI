@@ -831,6 +831,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService
         var selectedImageDocs = SelectRelevantImageDocuments(message, newImageDocs, explicitImageDocs, replyImageDocs, bestSimilarityImageMatch);
         if (selectedImageDocs.Count > 0)
         {
+            selectedImageDocs = await EnsureVisionDescriptionsAsync(channel, message, selectedImageDocs);
             imageContextMessages.AddRange(BuildImageContextMessages(selectedImageDocs));
         }
 
@@ -1806,7 +1807,8 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                     var storedFilePath = Path.Combine(embedFilesDirectory, storedFileName);
                     await File.WriteAllBytesAsync(storedFilePath, bytes);
 
-                    var description = BuildImageDescriptionFromMessage(message, attachment);
+                    var description = await GenerateImageDescriptionAsync(channelState, message, attachment.Filename, bytes, contentType)
+                                     ?? BuildImageDescriptionFromMessage(message, attachment);
                     if (await CreateAndSaveImageEmbedding(description, embedFilePath, storedFilePath, attachment, message.Id, channelState.InstructionChat.ChatBotState.Parameters.ChunkSize) is { Count: > 0 } attachmentDocs)
                     {
                         channelDocs.AddRange(attachmentDocs);
@@ -1869,6 +1871,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService
             doc.SourceFileName = attachment?.Filename;
             doc.StoredFilePath = storedFilePath;
             doc.SourceMessageId = messageId;
+            doc.Description = description;
         }
 
         if (documents.Count > 0)
@@ -1924,12 +1927,25 @@ public class InstructionGPT : DiscordBotBase, IHostedService
             }
 
             var hasPathGuild = TryGetGuildIdFromEmbedPath(file, out var pathGuildId);
+            var resolvedGuildId = validation.GuildId != 0 ? validation.GuildId : (hasToken ? tokenGuildId : pathGuildId);
 
-            await using var fileStream = File.OpenRead(file);
-            var documents = await JsonSerializer.DeserializeAsync<List<Document>>(fileStream);
+            List<Document> documents;
+            await using (var fileStream = File.OpenRead(file))
+            {
+                documents = await JsonSerializer.DeserializeAsync<List<Document>>(fileStream);
+            }
             if (documents == null || documents.Count == 0)
             {
                 continue;
+            }
+
+            var updated = false;
+            foreach (var doc in documents)
+            {
+                if (EnsureImageDescription(doc))
+                {
+                    updated = true;
+                }
             }
 
             var channelDocs = Documents.GetOrAdd(channelId, _ => new List<Document>());
@@ -1937,8 +1953,12 @@ public class InstructionGPT : DiscordBotBase, IHostedService
 
             if (!hasToken && hasPathGuild)
             {
-                var resolvedGuildId = validation.GuildId != 0 ? validation.GuildId : (hasToken ? tokenGuildId : pathGuildId);
                 await ResaveLegacyJsonAsync(file, ".embed.json", resolvedGuildId, "embed.json", documents, deleteLegacyOnSuccess: true);
+            }
+            else if (updated && hasToken)
+            {
+                await using var outStream = File.Create(file);
+                await JsonSerializer.SerializeAsync(outStream, documents);
             }
         }
 
@@ -2708,7 +2728,8 @@ public class InstructionGPT : DiscordBotBase, IHostedService
             var storedFilePath = Path.Combine(embedFilesDirectory, storedFileName);
             await File.WriteAllBytesAsync(storedFilePath, bytes);
 
-            var description = BuildImageDescriptionFromMessage(message, attachment);
+            var description = await GenerateImageDescriptionAsync(channelState, message, attachment.Filename, bytes, contentType)
+                             ?? BuildImageDescriptionFromMessage(message, attachment);
             var docs = await CreateAndSaveImageEmbedding(description, embedFilePath, storedFilePath, attachment, message.Id,
                 channelState.InstructionChat.ChatBotState.Parameters.ChunkSize);
             if (docs.Count > 0)
@@ -2732,7 +2753,11 @@ public class InstructionGPT : DiscordBotBase, IHostedService
         foreach (var doc in imageDocs.Where(d => d.IsImage))
         {
             var name = string.IsNullOrWhiteSpace(doc.SourceFileName) ? "image" : doc.SourceFileName;
-            messages.Add(new ChatMessage(StaticValues.ChatMessageRoles.System, $"Image context ({name}): {doc.Text}"));
+            var description = !string.IsNullOrWhiteSpace(doc.Description) ? doc.Description : doc.Text;
+            if (!string.IsNullOrWhiteSpace(description))
+            {
+                messages.Add(new ChatMessage(StaticValues.ChatMessageRoles.System, $"Image context ({name}): {description}"));
+            }
         }
 
         return messages;
@@ -2866,6 +2891,86 @@ public class InstructionGPT : DiscordBotBase, IHostedService
             normalized.Contains(term, StringComparison.OrdinalIgnoreCase));
     }
 
+    private async Task<string> GenerateImageDescriptionAsync(ChannelState channelState, IMessage message, string fileName,
+        byte[] bytes, string contentType)
+    {
+        if (bytes == null || bytes.Length == 0)
+        {
+            return null;
+        }
+
+        var visionModel = ResolveVisionModel(channelState);
+        if (string.IsNullOrWhiteSpace(visionModel))
+        {
+            return null;
+        }
+
+        var mediaType = !string.IsNullOrWhiteSpace(contentType) &&
+                        contentType.StartsWith("image/", StringComparison.OrdinalIgnoreCase)
+            ? contentType
+            : GetImageMediaType(fileName, fileName);
+        if (string.IsNullOrWhiteSpace(mediaType))
+        {
+            return null;
+        }
+
+        var prompt = BuildUploadVisionPrompt(message, fileName);
+        var contentItems = new List<MessageContent>
+        {
+            MessageContent.TextContent(prompt),
+            MessageContent.ImageBinaryContent(bytes, mediaType, "auto")
+        };
+
+        var request = new ChatCompletionCreateRequest
+        {
+            Model = visionModel,
+            Messages = new List<ChatMessage>
+            {
+                new(StaticValues.ChatMessageRoles.System,
+                    "You describe images for a Discord bot. Return only the description text. No markdown or code fences."),
+                new ChatMessage(StaticValues.ChatMessageRoles.User, contentItems)
+            },
+            Stream = false,
+            Temperature = 0.2f,
+            TopP = 1.0f,
+            MaxTokens = ResolveVisionDescriptionMaxTokens(channelState.InstructionChat.ChatBotState.Parameters)
+        };
+
+        var response = await OpenAILogic.CreateChatCompletionAsync(request);
+        if (!response.Successful)
+        {
+            await Console.Out.WriteLineAsync(
+                $"Vision upload description failed: {response.Error?.Code} {response.Error?.Message}");
+            return null;
+        }
+
+        return response.Choices.FirstOrDefault()?.Message?.Content?.Trim();
+    }
+
+    private static string BuildUploadVisionPrompt(IMessage message, string fileName)
+    {
+        var builder = new StringBuilder();
+        builder.AppendLine("Describe the image in 2-4 sentences. Mention notable objects, setting, and any visible text verbatim.");
+        if (!string.IsNullOrWhiteSpace(fileName))
+        {
+            builder.AppendLine($"File name: {fileName}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(message?.Content))
+        {
+            builder.AppendLine($"User context: {message.Content}");
+        }
+
+        builder.Append("Be concise and factual.");
+        return builder.ToString();
+    }
+
+    private static int ResolveVisionDescriptionMaxTokens(GptOptions parameters)
+    {
+        var requested = ClampVisionMaxTokens(parameters.MaxTokens) ?? 512;
+        return Math.Min(requested, 512);
+    }
+
     private async Task<string> GenerateVisionResponseAsync(ChannelState channel, SocketMessage message, IReadOnlyList<ChatMessage> additionalMessages,
         IReadOnlyList<Document> imageDocuments)
     {
@@ -2983,10 +3088,13 @@ public class InstructionGPT : DiscordBotBase, IHostedService
             builder.AppendLine($"User message: {message.Content}");
         }
 
-        var contextDoc = imageDocuments?.FirstOrDefault(doc => !string.IsNullOrWhiteSpace(doc?.Text));
+        var contextDoc = imageDocuments?.FirstOrDefault(doc =>
+            !string.IsNullOrWhiteSpace(doc?.Description) || !string.IsNullOrWhiteSpace(doc?.Text));
         if (contextDoc != null)
         {
-            var context = NormalizeSingleLine(contextDoc.Text);
+            var context = NormalizeSingleLine(string.IsNullOrWhiteSpace(contextDoc.Description)
+                ? contextDoc.Text
+                : contextDoc.Description);
             const int maxContextLength = 600;
             if (context.Length > maxContextLength)
             {
@@ -3104,6 +3212,217 @@ public class InstructionGPT : DiscordBotBase, IHostedService
         }
 
         return string.Join(" ", parts);
+    }
+
+    private static bool NeedsVisionDescription(Document document)
+    {
+        if (document == null || !document.IsImage)
+        {
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(document.Description))
+        {
+            return true;
+        }
+
+        var description = document.Description.Trim();
+        if (description.StartsWith("Image attachment \"", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (description.Contains("Message context:", StringComparison.OrdinalIgnoreCase) ||
+            description.Contains("Uploaded by", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool EnsureImageDescription(Document document)
+    {
+        if (document == null || !document.IsImage)
+        {
+            return false;
+        }
+
+        var updated = false;
+        if (string.IsNullOrWhiteSpace(document.Description) && !string.IsNullOrWhiteSpace(document.Text))
+        {
+            document.Description = document.Text;
+            updated = true;
+        }
+
+        if (string.IsNullOrWhiteSpace(document.Text) && !string.IsNullOrWhiteSpace(document.Description))
+        {
+            document.Text = document.Description;
+            updated = true;
+        }
+
+        if (string.IsNullOrWhiteSpace(document.Text))
+        {
+            var fallback = BuildFallbackImageDescription(document);
+            document.Text = fallback;
+            document.Description = fallback;
+            updated = true;
+        }
+
+        return updated;
+    }
+
+    private async Task<List<Document>> EnsureVisionDescriptionsAsync(ChannelState channelState, SocketMessage message, List<Document> documents)
+    {
+        var result = new List<Document>();
+        if (documents == null || documents.Count == 0)
+        {
+            return result;
+        }
+
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var doc in documents)
+        {
+            if (doc == null || !doc.IsImage)
+            {
+                continue;
+            }
+
+            var key = !string.IsNullOrWhiteSpace(doc.StoredFilePath)
+                ? $"path:{ResolveStoredFilePath(doc.StoredFilePath)}"
+                : $"name:{doc.SourceFileName ?? doc.Text}";
+
+            if (!seen.Add(key))
+            {
+                continue;
+            }
+
+            if (NeedsVisionDescription(doc) && HasStoredFile(doc))
+            {
+                var refreshed = await RefreshImageEmbedFromVisionAsync(channelState, message, doc);
+                if (refreshed.Count > 0)
+                {
+                    result.AddRange(refreshed);
+                    continue;
+                }
+            }
+
+            result.Add(doc);
+        }
+
+        return result;
+    }
+
+    private async Task<List<Document>> RefreshImageEmbedFromVisionAsync(ChannelState channelState, SocketMessage message, Document imageDoc)
+    {
+        var refreshed = new List<Document>();
+        var resolvedPath = ResolveStoredFilePath(imageDoc.StoredFilePath);
+        if (!File.Exists(resolvedPath))
+        {
+            await Console.Out.WriteLineAsync($"Image refresh skipped missing file: {resolvedPath}");
+            return refreshed;
+        }
+
+        var bytes = await File.ReadAllBytesAsync(resolvedPath);
+        var fileName = string.IsNullOrWhiteSpace(imageDoc.SourceFileName)
+            ? Path.GetFileName(resolvedPath)
+            : imageDoc.SourceFileName;
+
+        var description = await GenerateImageDescriptionAsync(channelState, message, fileName, bytes, null);
+        if (string.IsNullOrWhiteSpace(description))
+        {
+            return refreshed;
+        }
+
+        var chunkSize = channelState.InstructionChat.ChatBotState.Parameters.ChunkSize;
+        var newDocs = await Document.ChunkToDocumentsAsync(description, chunkSize);
+        foreach (var doc in newDocs)
+        {
+            doc.IsImage = true;
+            doc.SourceFileName = imageDoc.SourceFileName;
+            doc.StoredFilePath = imageDoc.StoredFilePath;
+            doc.SourceMessageId = imageDoc.SourceMessageId;
+            doc.Description = description;
+        }
+
+        var embeds = await OpenAILogic.CreateEmbeddings(newDocs);
+        if (!embeds.Successful)
+        {
+            return refreshed;
+        }
+
+        var embedPath = ResolveEmbedPathForImage(channelState, imageDoc);
+        if (!string.IsNullOrWhiteSpace(embedPath))
+        {
+            await using var outStream = File.Create(embedPath);
+            await JsonSerializer.SerializeAsync(outStream, newDocs);
+        }
+
+        if (Documents.TryGetValue(channelState.ChannelId, out var channelDocs))
+        {
+            channelDocs.RemoveAll(doc => doc.IsImage &&
+                                         string.Equals(doc.StoredFilePath, imageDoc.StoredFilePath, StringComparison.OrdinalIgnoreCase));
+            channelDocs.AddRange(newDocs);
+        }
+
+        refreshed.AddRange(newDocs);
+        return refreshed;
+    }
+
+    private static string ResolveEmbedPathForImage(ChannelState channelState, Document imageDoc)
+    {
+        if (channelState == null || imageDoc == null)
+        {
+            return null;
+        }
+
+        var baseName = ExtractImageEmbedBaseName(imageDoc.StoredFilePath);
+        if (string.IsNullOrWhiteSpace(baseName))
+        {
+            return null;
+        }
+
+        var channelDirectory = GetChannelDirectory(channelState);
+        var embedDirectory = Path.Combine(channelDirectory, "embeds");
+        if (channelState.GuildId != 0)
+        {
+            var tokenPath = Path.Combine(embedDirectory, BuildTokenizedFileName(baseName, channelState.GuildId, "embed.json"));
+            if (File.Exists(tokenPath))
+            {
+                return tokenPath;
+            }
+        }
+
+        var matches = Directory.GetFiles(embedDirectory, $"{baseName}*.embed.json");
+        return matches.FirstOrDefault();
+    }
+
+    private static string ExtractImageEmbedBaseName(string storedFilePath)
+    {
+        var fileName = Path.GetFileName(storedFilePath);
+        if (string.IsNullOrWhiteSpace(fileName))
+        {
+            return null;
+        }
+
+        var parts = fileName.Split('.', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length < 2)
+        {
+            return null;
+        }
+
+        if (!ulong.TryParse(parts[0], out _) || !ulong.TryParse(parts[1], out _))
+        {
+            return null;
+        }
+
+        return $"{parts[0]}.{parts[1]}";
+    }
+
+    private static string BuildFallbackImageDescription(Document document)
+    {
+        var name = string.IsNullOrWhiteSpace(document?.SourceFileName) ? "image" : document.SourceFileName;
+        return $"Image attachment \"{name}\".";
     }
 
     private static bool HasStoredFile(Document document)

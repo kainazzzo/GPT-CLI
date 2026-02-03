@@ -9,6 +9,9 @@ namespace GPT.CLI.Embeddings
         [JsonPropertyName("text")]
         public string Text { get; set; }
 
+        [JsonPropertyName("description")]
+        public string Description { get; set; }
+
         [JsonPropertyName("embed")]
         public List<double> Embedding { get; set; }
 
