@@ -1,0 +1,12 @@
+@echo off
+setlocal
+
+set SCRIPT_DIR=%~dp0
+set OUTPUT_DIR=%SCRIPT_DIR%..\..\
+
+dotnet build "%SCRIPT_DIR%CasinoModuleExample.slnx" -c Release
+
+copy /Y "%SCRIPT_DIR%CasinoModuleExample\bin\Release\net10.0\CasinoModuleExample.dll" "%OUTPUT_DIR%"
+
+echo Module copied to %OUTPUT_DIR%CasinoModuleExample.dll
+endlocal

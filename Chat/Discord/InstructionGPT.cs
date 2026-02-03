@@ -71,6 +71,9 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 
         [JsonPropertyName("factoid-similarity-threshold")]
         public double FactoidSimilarityThreshold { get; set; } = 0.80;
+
+        [JsonPropertyName("casino-enabled")]
+        public bool CasinoEnabled { get; set; }
     }
 
 
@@ -87,6 +90,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
         {
             modulesPath = Path.Combine(Directory.GetCurrentDirectory(), modulesPath);
         }
+        Directory.CreateDirectory(modulesPath);
 
         Action<string> moduleLog = message => Console.Out.WriteLine(message);
         _moduleContext = new DiscordModuleContext(

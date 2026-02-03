@@ -7,3 +7,4 @@ services:
     volumes:
       - ./deploy/appsettings.json:/app/appsettings.json:ro
       - /usr/local/discord/channels:/app/channels
+      - /usr/local/discord/modules:/app/modules

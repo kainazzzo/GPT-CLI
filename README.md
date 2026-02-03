@@ -73,6 +73,65 @@ GPT__VISIONMODEL="gpt-4o" \
 gpt
 ```
 
+### Discord modules
+
+GPT-CLI can load Discord feature modules from a folder at startup. Each module is a .NET class library that implements `GPT.CLI.Chat.Discord.Modules.IFeatureModule`. Modules can add their own `/gptcli` subcommands and hook into message/reaction/interaction events.
+
+Defaults:
+- Modules are loaded from `./modules` (relative to the working directory).
+- Override with `Discord:ModulesPath` (env var: `DISCORD__MODULESPATH`).
+- GPT-CLI scans the folder for `*.dll` assemblies and loads any `IFeatureModule` implementations.
+
+#### Build a module (example)
+
+1) Create a class library targeting `net10.0`.
+2) Reference GPT-CLI so you can implement `IFeatureModule`.
+3) Build and copy the output DLL (and any extra dependencies not already in the app) into the modules folder.
+
+Example from a separate repo:
+
+```bash
+dotnet new classlib -n MyGptCliModule
+cd MyGptCliModule
+dotnet add reference /path/to/GPT-CLI/gpt.csproj
+dotnet build -c Release
+cp bin/Release/net10.0/MyGptCliModule.dll /path/to/gpt-cli/modules/
+```
+
+Example module in this repo:
+- Source: `modules/examples/CasinoModuleExample`
+- Build: `modules/examples/CasinoModuleExample/build-module.sh` or `modules/examples/CasinoModuleExample/build-module.bat`
+- Output DLL is copied to `modules/` so it loads on next bot restart.
+- The example implements a casino game mode and uses the built-in instruction set to style responses.
+
+Minimal module skeleton:
+
+```csharp
+using GPT.CLI.Chat.Discord.Modules;
+
+public sealed class MyModule : FeatureModuleBase
+{
+    public override string Id => "my-module";
+
+    public override IReadOnlyList<SlashCommandContribution> GetSlashCommandContributions(DiscordModuleContext context)
+    {
+        return new[]
+        {
+            SlashCommandContribution.TopLevel(
+                new Discord.SlashCommandOptionBuilder()
+                    .WithName("my-module")
+                    .WithDescription("My module commands")
+                    .WithType(Discord.ApplicationCommandOptionType.SubCommandGroup))
+        };
+    }
+}
+```
+
+Notes:
+- Use unique top-level subcommand names (e.g., `my-module`) to avoid conflicts.
+- If you contribute to existing groups (like `set`), your subcommand name must be unique within that group.
+- Modules are discovered on startup; restart the bot after adding/updating DLLs.
+
 ## Discord bot setup
 
 1) Create a Discord application and bot token in the Discord Developer Portal.
@@ -99,6 +158,7 @@ https://discordutils.com/bot-invite-generator
 Notes:
 - The bot stores per-channel state in `channels/<guild>_<id>/<channel>_<id>/`.
 - Use `/gptcli help` in Discord for available commands and reactions.
+- Modules are loaded from `modules/` (or `Discord:ModulesPath` if set).
 
 ### Docker (deploy/deploy.sh)
 
@@ -122,6 +182,7 @@ Common commands:
 Notes:
 - `docker-compose.yml` mounts `./deploy/appsettings.json` to `/app/appsettings.json` (read-only).
 - Channel state is persisted to `/usr/local/discord/channels` on the host.
+- Modules can be mounted to `/app/modules` via `/usr/local/discord/modules` on the host.
 
 ## Features
 
