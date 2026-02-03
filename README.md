@@ -100,6 +100,29 @@ Notes:
 - The bot stores per-channel state in `channels/<guild>_<id>/<channel>_<id>/`.
 - Use `/gptcli help` in Discord for available commands and reactions.
 
+### Docker (deploy/deploy.sh)
+
+The repo includes a Docker setup for the Discord bot. It mounts `deploy/appsettings.json` and persists channel state.
+
+1) Create `deploy/appsettings.json` with your Discord/OpenAI settings.
+2) Run:
+```bash
+./deploy/deploy.sh up
+```
+
+Common commands:
+```bash
+./deploy/deploy.sh build
+./deploy/deploy.sh up
+./deploy/deploy.sh restart
+./deploy/deploy.sh logs
+./deploy/deploy.sh stop
+```
+
+Notes:
+- `docker-compose.yml` mounts `./deploy/appsettings.json` to `/app/appsettings.json` (read-only).
+- Channel state is persisted to `/usr/local/discord/channels` on the host.
+
 ## Features
 
 GPT, or Generative Pre-trained Transformer, is known for its remarkable language understanding and generation abilities. Here are some features that you might have already experienced using OpenAI's GPT model, whether it's through the API or ChatGPT:
