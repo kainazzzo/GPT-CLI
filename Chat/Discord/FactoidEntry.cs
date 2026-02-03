@@ -13,6 +13,12 @@ public record FactoidEntry
     [JsonPropertyName("embedding")]
     public List<double> Embedding { get; set; }
 
+    [JsonPropertyName("source-guild-id")]
+    public ulong SourceGuildId { get; set; }
+
+    [JsonPropertyName("source-channel-id")]
+    public ulong SourceChannelId { get; set; }
+
     [JsonPropertyName("source-message-id")]
     public ulong SourceMessageId { get; set; }
 

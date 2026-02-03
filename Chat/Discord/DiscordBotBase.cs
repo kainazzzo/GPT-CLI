@@ -35,6 +35,7 @@ public abstract class DiscordBotBase : IHostedService
     protected readonly ConcurrentDictionary<ulong, List<FactoidEntry>> ChannelFactoids = new();
     protected readonly ConcurrentDictionary<ulong, List<FactoidMatchEntry>> ChannelFactoidMatches = new();
     protected readonly ConcurrentDictionary<ulong, FactoidMatchStats> ChannelFactoidMatchStats = new();
+    protected readonly ConcurrentDictionary<ulong, ulong> ChannelGuildIds = new();
 
 
 }

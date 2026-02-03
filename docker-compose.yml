@@ -3,6 +3,7 @@ services:
     build:
         context: .
         dockerfile: Dockerfile.discord
+    restart: unless-stopped
     volumes:
       - ./deploy/appsettings.json:/app/appsettings.json:ro
       - /usr/local/discord/channels:/app/channels

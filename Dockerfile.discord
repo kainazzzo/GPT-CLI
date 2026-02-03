@@ -1,9 +1,14 @@
+# syntax=docker/dockerfile:1.5
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
-COPY . .
+COPY gpt.csproj ./
+COPY GPT-CLI.sln ./
+RUN --mount=type=cache,id=nuget,target=/root/.nuget/packages \
+    dotnet restore gpt.csproj -r linux-x64
 
-RUN ls -lah
-RUN dotnet publish gpt.csproj -c Release -r linux-x64 -o /app/publish --self-contained true -p:PublishSingleFile=true
+COPY . .
+RUN --mount=type=cache,id=nuget,target=/root/.nuget/packages \
+    dotnet publish gpt.csproj -c Release -r linux-x64 -o /app/publish --self-contained true -p:PublishSingleFile=true --no-restore
 
 FROM redhat/ubi9
 WORKDIR /app

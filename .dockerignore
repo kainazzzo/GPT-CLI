@@ -6,3 +6,4 @@ channels/
 embeds/
 bin/
 obj/
+.git/

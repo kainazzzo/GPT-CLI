@@ -165,6 +165,43 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                 Type = ApplicationCommandOptionType.SubCommand,
             }, new()
             {
+                Name = "instruction",
+                Description = "Instruction commands",
+                Type = ApplicationCommandOptionType.SubCommandGroup,
+                Options = new()
+                {
+                    new SlashCommandOptionBuilder().WithName("add")
+                        .WithDescription("Add a system instruction")
+                        .WithType(ApplicationCommandOptionType.SubCommand)
+                        .AddOption(new SlashCommandOptionBuilder().WithName("text")
+                            .WithDescription("Instruction text")
+                            .WithType(ApplicationCommandOptionType.String)
+                            .WithRequired(true)),
+                    new SlashCommandOptionBuilder().WithName("list")
+                        .WithDescription("List current instructions")
+                        .WithType(ApplicationCommandOptionType.SubCommand),
+                    new SlashCommandOptionBuilder().WithName("get")
+                        .WithDescription("Get an instruction by index")
+                        .WithType(ApplicationCommandOptionType.SubCommand)
+                        .AddOption(new SlashCommandOptionBuilder().WithName("index")
+                            .WithDescription("1-based instruction index")
+                            .WithType(ApplicationCommandOptionType.Integer)
+                            .WithRequired(true)
+                            .WithMinValue(1)),
+                    new SlashCommandOptionBuilder().WithName("delete")
+                        .WithDescription("Delete an instruction by index")
+                        .WithType(ApplicationCommandOptionType.SubCommand)
+                        .AddOption(new SlashCommandOptionBuilder().WithName("index")
+                            .WithDescription("1-based instruction index")
+                            .WithType(ApplicationCommandOptionType.Integer)
+                            .WithRequired(true)
+                            .WithMinValue(1)),
+                    new SlashCommandOptionBuilder().WithName("clear")
+                        .WithDescription("Clear all instructions")
+                        .WithType(ApplicationCommandOptionType.SubCommand)
+                }
+            }, new()
+            {
                 Name = "clear",
                 Description = "Clear the instructions or messages, or all",
                 Type = ApplicationCommandOptionType.SubCommand,
@@ -361,7 +398,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                     }
 
                     var channelState = ChannelBots.GetOrAdd(channel.Id, _ => InitializeChannel(channel));
-                    var removed = RemoveFactoidByTerm(channelState, metadata.Term);
+                    var removed = RemoveFactoidByTerm(channelState, GetGuildId(channel), metadata.Term);
 
                     if (message != null)
                     {
@@ -483,10 +520,32 @@ public class InstructionGPT : DiscordBotBase, IHostedService
     {
         await Console.Out.WriteLineAsync("Loading state...");
         Directory.CreateDirectory("channels");
-        var files = Directory.GetFiles("channels", "*.state.json", SearchOption.AllDirectories);
+        var files = Directory.GetFiles("channels", "*.state.json", SearchOption.AllDirectories).ToList();
+        var channelsWithToken = new HashSet<ulong>();
+        foreach (var file in files)
+        {
+            if (TryGetChannelIdFromStatePath(file, out var tokenChannelId) &&
+                TryGetGuildIdTokenFromFileName(file, out _))
+            {
+                channelsWithToken.Add(tokenChannelId);
+            }
+        }
+
         foreach (var file in files)
         {
             if (!TryGetChannelIdFromStatePath(file, out var channelId))
+            {
+                continue;
+            }
+
+            var hasToken = TryGetGuildIdTokenFromFileName(file, out var tokenGuildId);
+            if (!hasToken && channelsWithToken.Contains(channelId))
+            {
+                continue;
+            }
+
+            var validation = await ValidateGuildTokenForFileAsync(channelId, file, isEmbed: false, "state");
+            if (!validation.ShouldLoad)
             {
                 continue;
             }
@@ -497,6 +556,19 @@ public class InstructionGPT : DiscordBotBase, IHostedService
             if (channelState == null)
             {
                 continue;
+            }
+
+            if (validation.GuildId != 0 && channelState.GuildId != 0 && channelState.GuildId != validation.GuildId)
+            {
+                await Console.Out.WriteLineAsync(
+                    $"Skipping state for channel {channelId}: guild mismatch (state {channelState.GuildId}, token {validation.GuildId}).");
+                ChannelBots.TryRemove(channelId, out _);
+                continue;
+            }
+
+            if (validation.GuildId != 0 && channelState.GuildId == 0)
+            {
+                channelState.GuildId = validation.GuildId;
             }
 
             channelState.ChannelId = channelId;
@@ -513,6 +585,22 @@ public class InstructionGPT : DiscordBotBase, IHostedService
             channelState.InstructionChat.OpenAILogic = OpenAILogic;
             channelState.Options ??= new ChannelOptions();
             channelState.Options.LearningPersonalityPrompt ??= DefaultParameters.LearningPersonalityPrompt;
+
+            if (!hasToken)
+            {
+                var resolvedGuildId = channelState.GuildId;
+                if (resolvedGuildId == 0 && TryGetGuildIdFromChannelPath(file, out var pathGuildId))
+                {
+                    resolvedGuildId = pathGuildId;
+                }
+                else if (resolvedGuildId == 0)
+                {
+                    resolvedGuildId = tokenGuildId;
+                }
+
+                await ResaveLegacyJsonAsync(file, ".state.json", resolvedGuildId, "state.json", channelState,
+                    new JsonSerializerOptions { WriteIndented = true }, deleteLegacyOnSuccess: true);
+            }
         }
     }
 
@@ -545,9 +633,14 @@ public class InstructionGPT : DiscordBotBase, IHostedService
             }
         }
 
+        if (channelState.GuildId == 0 && ChannelGuildIds.TryGetValue(channelId, out var storedGuildId))
+        {
+            channelState.GuildId = storedGuildId;
+        }
+
         var channelDirectory = GetChannelDirectory(channelState);
         Directory.CreateDirectory(channelDirectory);
-        var stateFileName = $"{GetChannelFileName(channelState)}.state.json";
+        var stateFileName = BuildTokenizedFileName(GetChannelFileName(channelState), channelState.GuildId, "state.json");
 
         await using var stream = File.Create(Path.Combine(channelDirectory, stateFileName));
         await WriteAsync(channelId, stream);
@@ -610,6 +703,12 @@ public class InstructionGPT : DiscordBotBase, IHostedService
         // Handle the received message here
         // ...
         var channel = ChannelBots.GetOrAdd(message.Channel.Id, _ => InitializeChannel(message.Channel));
+        if (message.Channel is IGuildChannel guildChannel)
+        {
+            EnsureChannelStateMetadata(channel, guildChannel);
+        }
+
+        var guildMatch = IsChannelGuildMatch(channel, message.Channel, "message");
         var isTagged = message.MentionedUsers.Any(user => user.Id == Client.CurrentUser.Id);
         var isDirectMessage = message.Channel is IPrivateChannel;
         var shouldRespond = isTagged || isDirectMessage;
@@ -619,7 +718,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService
             channel.InstructionChat.ChatBotState.PrimeDirectives = PrimeDirective.ToList();
         }
 
-        if (channel.Options.LearningEnabled && !string.IsNullOrWhiteSpace(message.Content))
+        if (guildMatch && channel.Options.LearningEnabled && !string.IsNullOrWhiteSpace(message.Content))
         {
             await HandleInfobotMessageAsync(channel, message, shouldRespond);
         }
@@ -644,14 +743,16 @@ public class InstructionGPT : DiscordBotBase, IHostedService
         }
 
         // Always record the message for context, but only respond to @mentions.
-        channel.InstructionChat.AddMessage(new ChatMessage(StaticValues.ChatMessageRoles.User, $"<{message.Author.Username}> {message.Content}"));
+        var mentionToken = $"<@{message.Author.Id}>";
+        channel.InstructionChat.AddMessage(new ChatMessage(StaticValues.ChatMessageRoles.User,
+            $"{message.Author.Username} (mention: {mentionToken}): {message.Content}"));
         if (!shouldRespond)
         {
             await SaveCachedChannelState(message.Channel.Id);
             return;
         }
 
-        if (Documents.GetOrAdd(message.Channel.Id, new List<Document>()) is {Count: > 0} documents)
+        if (guildMatch && Documents.GetOrAdd(message.Channel.Id, new List<Document>()) is {Count: > 0} documents)
         {
             // Search for the closest few documents and add those if they aren't used yet
             var closestDocuments =
@@ -668,7 +769,9 @@ public class InstructionGPT : DiscordBotBase, IHostedService
             }
         }
 
-        var factoidContextMessages = await BuildFactoidContextMessagesAsync(channel, message);
+        var factoidContextMessages = guildMatch
+            ? await BuildFactoidContextMessagesAsync(channel, message)
+            : new List<ChatMessage>();
 
         if (!channel.Options.Muted)
         {
@@ -696,28 +799,16 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                 }
             }
 
-            int chunkSize = 2000;
-            int currentPosition = 0;
+            var responseText = sb.ToString();
+            var (cleanedText, filePayloads) = ExtractFilePayloads(responseText);
+            cleanedText = ReplacePseudoMentions(cleanedText, message.Author);
 
-            while (currentPosition < sb.Length)
+            await SendResponseAsync(message, cleanedText, filePayloads, BuildStandardComponents());
+
+            var historyText = BuildHistoryText(cleanedText, filePayloads);
+            if (!string.IsNullOrWhiteSpace(historyText))
             {
-                var size = Math.Min(chunkSize, sb.Length - currentPosition);
-                var chunk = sb.ToString(currentPosition, size);
-                currentPosition += size;
-
-                var responseMessage = new ChatMessage(StaticValues.ChatMessageRoles.Assistant, chunk);
-
-                channel.InstructionChat.AddMessage(responseMessage);
-                // Convert message to SocketMessage
-
-                if (message is IUserMessage userMessage)
-                {
-                    _ = await userMessage.ReplyAsync(responseMessage.Content, components: BuildStandardComponents());
-                }
-                else
-                {
-                    _ = await message.Channel.SendMessageAsync(responseMessage.Content, components: BuildStandardComponents());
-                }
+                channel.InstructionChat.AddMessage(new ChatMessage(StaticValues.ChatMessageRoles.Assistant, historyText));
             }
         }
 
@@ -726,15 +817,22 @@ public class InstructionGPT : DiscordBotBase, IHostedService
 
     private async Task<List<ChatMessage>> BuildFactoidContextMessagesAsync(ChannelState channel, SocketMessage message)
     {
+        if (!IsChannelGuildMatch(channel, message.Channel, "factoid-context"))
+        {
+            return new List<ChatMessage>();
+        }
+
         var channelFactoids = ChannelFactoids.GetOrAdd(message.Channel.Id, _ => new List<FactoidEntry>());
-        if (channelFactoids.Count == 0)
+        var guildId = GetGuildId(message.Channel);
+        var usableFactoids = FilterFactoidsForChannel(channelFactoids, guildId, message.Channel.Id);
+        if (usableFactoids.Count == 0)
         {
             return new List<ChatMessage>();
         }
 
         var embedding = await OpenAILogic.GetEmbeddingForPrompt(message.Content);
         var threshold = channel.Options.FactoidSimilarityThreshold;
-        var closestChannel = FindMostSimilarFactoids(channelFactoids, embedding, channel.InstructionChat.ChatBotState.Parameters.ClosestMatchLimit, threshold);
+        var closestChannel = FindMostSimilarFactoids(usableFactoids, embedding, channel.InstructionChat.ChatBotState.Parameters.ClosestMatchLimit, threshold);
         if (closestChannel.Count == 0)
         {
             return new List<ChatMessage>();
@@ -761,6 +859,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService
             return;
         }
 
+        var hasExplicitMention = message.MentionedUsers.Any(user => user.Id == Client.CurrentUser.Id);
         var isListening = channel.Options.LearningEnabled;
         if (!isListening)
         {
@@ -808,7 +907,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService
 
         if (TryParseInfobotSet(content, out var term, out var fact))
         {
-            if (isListening)
+            if (isListening && !hasExplicitMention)
             {
                 await SaveFactoidAsync(channel, message, term, fact);
                 if (isTagged)
@@ -850,8 +949,15 @@ public class InstructionGPT : DiscordBotBase, IHostedService
 
     private async Task<bool> RespondWithFactoidMatchAsync(ChannelState channel, SocketMessage message, IReadOnlyList<string> queries)
     {
+        if (!IsChannelGuildMatch(channel, message.Channel, "factoid-match"))
+        {
+            return false;
+        }
+
         var factoids = ChannelFactoids.GetOrAdd(message.Channel.Id, _ => new List<FactoidEntry>());
-        if (factoids.Count == 0)
+        var guildId = GetGuildId(message.Channel);
+        var usableFactoids = FilterFactoidsForChannel(factoids, guildId, message.Channel.Id);
+        if (usableFactoids.Count == 0)
         {
             return false;
         }
@@ -865,7 +971,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                 continue;
             }
 
-            exactMatch = factoids.FirstOrDefault(f =>
+            exactMatch = usableFactoids.FirstOrDefault(f =>
                 f.Term != null && string.Equals(NormalizeTerm(f.Term), normalizedQuery, StringComparison.OrdinalIgnoreCase));
             if (exactMatch != null)
             {
@@ -1406,8 +1512,9 @@ public class InstructionGPT : DiscordBotBase, IHostedService
         new
         (StaticValues.ChatMessageRoles.System,
             "This is the Prime Directive: This is a chat bot running in [GPT-CLI](https://github.com/kainazzzo/GPT-CLI). Answer questions and" +
-            " provide responses in Discord message formatting. Encourage users to add instructions with /gptcli or by using the :up_arrow:" +
-            " emoji reaction on any message. Instructions are like 'sticky' chat messages that provide upfront context to the bot. The the 📌 emoji reaction is for pinning a message to instructions. The 🔄 emoji reaction is for replaying a message as a new prompt.")
+            " provide responses in Discord message formatting. Encourage users to add instructions with /gptcli or by using the :up_arrow: " +
+            "emoji reaction on any message. Instructions are like 'sticky' chat messages that provide upfront context to the bot. The the 📌 emoji reaction is for pinning a message to instructions. The 🔄 emoji reaction is for replaying a message as a new prompt. " +
+            "If the user explicitly asks for a file (for example, a code snippet as a file), respond with a <gptcli_file name=\"filename.ext\">...</gptcli_file> block containing the file contents, and put any human-readable reply outside the block.")
     };
 
     private IEnumerable<ChatMessage> PrimeDirective => _defaultPrimeDirective;
@@ -1539,8 +1646,10 @@ public class InstructionGPT : DiscordBotBase, IHostedService
         Directory.CreateDirectory(embedDirectory);
 
         var channelDocs = Documents.GetOrAdd(message.Channel.Id, new List<Document>());
+        var guildId = channelState.GuildId != 0 ? channelState.GuildId : GetGuildId(message.Channel);
 
-        if (await CreateAndSaveEmbedding(message.Content, Path.Combine(embedDirectory, $"{message.Id}.embed.json"), channelState.InstructionChat.ChatBotState.Parameters.ChunkSize) is { Count: > 0 } newDocs)
+        var embedFileName = BuildTokenizedFileName($"{message.Id}", guildId, "embed.json");
+        if (await CreateAndSaveEmbedding(message.Content, Path.Combine(embedDirectory, embedFileName), channelState.InstructionChat.ChatBotState.Parameters.ChunkSize) is { Count: > 0 } newDocs)
         {
             channelDocs.AddRange(newDocs);
 
@@ -1565,7 +1674,8 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                     using var streamReader = new StreamReader(responseStream);
                     
 
-                    if (await CreateAndSaveEmbedding(await streamReader.ReadToEndAsync(), Path.Combine(embedDirectory, $"{message.Id}.{attachment.Id}.embed.json"), channelState.InstructionChat.ChatBotState.Parameters.ChunkSize) is { Count: > 0 } attachmentDocs)
+                    var attachmentEmbedFileName = BuildTokenizedFileName($"{message.Id}.{attachment.Id}", guildId, "embed.json");
+                    if (await CreateAndSaveEmbedding(await streamReader.ReadToEndAsync(), Path.Combine(embedDirectory, attachmentEmbedFileName), channelState.InstructionChat.ChatBotState.Parameters.ChunkSize) is { Count: > 0 } attachmentDocs)
                     {
                         channelDocs.AddRange(attachmentDocs);
 
@@ -1602,25 +1712,76 @@ public class InstructionGPT : DiscordBotBase, IHostedService
     {
         Directory.CreateDirectory("channels");
         var files = Directory.GetFiles("channels", "*.embed.json", SearchOption.AllDirectories).ToList();
-        
+
+        var embedKeysWithToken = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var file in files)
         {
-            await using var fileStream = File.OpenRead(file);
-            var documents = await JsonSerializer.DeserializeAsync<List<Document>>(fileStream);
+            if (TryGetEmbedKeyFromFileName(file, out var embedKey) &&
+                TryGetGuildIdTokenFromFileName(file, out _))
+            {
+                embedKeysWithToken.Add(embedKey);
+            }
+        }
+
+        foreach (var file in files)
+        {
             if (!TryGetChannelIdFromEmbedPath(file, out var channelId))
             {
                 continue;
             }
+
+            if (!TryGetEmbedKeyFromFileName(file, out var embedKey))
+            {
+                continue;
+            }
+
+            var hasToken = TryGetGuildIdTokenFromFileName(file, out var tokenGuildId);
+            if (!hasToken && embedKeysWithToken.Contains(embedKey))
+            {
+                continue;
+            }
+
+            var validation = await ValidateGuildTokenForFileAsync(channelId, file, isEmbed: true, "embeddings");
+            if (!validation.ShouldLoad)
+            {
+                continue;
+            }
+
+            var hasPathGuild = TryGetGuildIdFromEmbedPath(file, out var pathGuildId);
+
+            await using var fileStream = File.OpenRead(file);
+            var documents = await JsonSerializer.DeserializeAsync<List<Document>>(fileStream);
+            if (documents == null || documents.Count == 0)
+            {
+                continue;
+            }
+
             var channelDocs = Documents.GetOrAdd(channelId, _ => new List<Document>());
             channelDocs.AddRange(documents);
+
+            if (!hasToken && hasPathGuild)
+            {
+                var resolvedGuildId = validation.GuildId != 0 ? validation.GuildId : (hasToken ? tokenGuildId : pathGuildId);
+                await ResaveLegacyJsonAsync(file, ".embed.json", resolvedGuildId, "embed.json", documents, deleteLegacyOnSuccess: true);
+            }
         }
-    
+
     }
 
     private async Task LoadFactoids()
     {
         Directory.CreateDirectory("channels");
-        var factoidFiles = Directory.GetFiles("channels", "facts.json", SearchOption.AllDirectories).ToList();
+        var factoidFiles = Directory.GetFiles("channels", "facts*.json", SearchOption.AllDirectories).ToList();
+        var channelsWithToken = new HashSet<ulong>();
+        foreach (var file in factoidFiles)
+        {
+            if (TryGetChannelIdFromFactoidPath(file, out var tokenChannelId) &&
+                TryGetGuildIdTokenFromFileName(file, out _))
+            {
+                channelsWithToken.Add(tokenChannelId);
+            }
+        }
+
         foreach (var file in factoidFiles)
         {
             if (!TryGetChannelIdFromFactoidPath(file, out var channelId))
@@ -1628,19 +1789,86 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                 continue;
             }
 
+            var hasToken = TryGetGuildIdTokenFromFileName(file, out var tokenGuildId);
+            if (!hasToken && channelsWithToken.Contains(channelId))
+            {
+                continue;
+            }
+
+            var validation = await ValidateGuildTokenForFileAsync(channelId, file, isEmbed: false, "factoids");
+            if (!validation.ShouldLoad)
+            {
+                continue;
+            }
+
             await using var fileStream = File.OpenRead(file);
             var factoids = await JsonSerializer.DeserializeAsync<List<FactoidEntry>>(fileStream) ?? new List<FactoidEntry>();
+            var hasPathGuild = TryGetGuildIdFromChannelPath(file, out var pathGuildId);
+            var resolvedGuildId = validation.GuildId != 0 ? validation.GuildId : (hasToken ? tokenGuildId : pathGuildId);
+            var updated = false;
+            if (factoids.Count > 0)
+            {
+                foreach (var factoid in factoids)
+                {
+                    if (factoid.SourceChannelId == 0)
+                    {
+                        factoid.SourceChannelId = channelId;
+                        updated = true;
+                    }
+
+                    if (factoid.SourceGuildId == 0 && resolvedGuildId != 0)
+                    {
+                        factoid.SourceGuildId = resolvedGuildId;
+                        updated = true;
+                    }
+                }
+            }
             ChannelFactoids[channelId] = factoids;
+
+            if (!hasToken && hasPathGuild)
+            {
+                await ResaveLegacyJsonAsync(file, ".json", resolvedGuildId, "json", factoids,
+                    new JsonSerializerOptions { WriteIndented = true }, deleteLegacyOnSuccess: true);
+            }
+            else if (updated && hasToken)
+            {
+                await ResaveLegacyJsonAsync(file, ".json", resolvedGuildId, "json", factoids,
+                    new JsonSerializerOptions { WriteIndented = true }, overwriteExisting: true);
+            }
         }
     }
 
     private async Task LoadFactoidMatches()
     {
         Directory.CreateDirectory("channels");
-        var matchFiles = Directory.GetFiles("channels", "matches.json", SearchOption.AllDirectories).ToList();
+        var matchFiles = Directory.GetFiles("channels", "matches*.json", SearchOption.AllDirectories)
+            .Where(file => !Path.GetFileName(file).StartsWith("matches.stats", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        var channelsWithToken = new HashSet<ulong>();
+        foreach (var file in matchFiles)
+        {
+            if (TryGetChannelIdFromMatchPath(file, out var tokenChannelId) &&
+                TryGetGuildIdTokenFromFileName(file, out _))
+            {
+                channelsWithToken.Add(tokenChannelId);
+            }
+        }
+
         foreach (var file in matchFiles)
         {
             if (!TryGetChannelIdFromMatchPath(file, out var channelId))
+            {
+                continue;
+            }
+
+            var hasToken = TryGetGuildIdTokenFromFileName(file, out var tokenGuildId);
+            if (!hasToken && channelsWithToken.Contains(channelId))
+            {
+                continue;
+            }
+
+            var validation = await ValidateGuildTokenForFileAsync(channelId, file, isEmbed: false, "matches");
+            if (!validation.ShouldLoad)
             {
                 continue;
             }
@@ -1648,13 +1876,30 @@ public class InstructionGPT : DiscordBotBase, IHostedService
             await using var fileStream = File.OpenRead(file);
             var matches = await JsonSerializer.DeserializeAsync<List<FactoidMatchEntry>>(fileStream) ?? new List<FactoidMatchEntry>();
             ChannelFactoidMatches[channelId] = matches;
+
+            if (!hasToken && TryGetGuildIdFromChannelPath(file, out var pathGuildId))
+            {
+                var resolvedGuildId = validation.GuildId != 0 ? validation.GuildId : (hasToken ? tokenGuildId : pathGuildId);
+                await ResaveLegacyJsonAsync(file, ".json", resolvedGuildId, "json", matches,
+                    new JsonSerializerOptions { WriteIndented = true }, deleteLegacyOnSuccess: true);
+            }
         }
     }
 
     private async Task LoadFactoidMatchStats()
     {
         Directory.CreateDirectory("channels");
-        var matchFiles = Directory.GetFiles("channels", "matches.stats.json", SearchOption.AllDirectories).ToList();
+        var matchFiles = Directory.GetFiles("channels", "matches.stats*.json", SearchOption.AllDirectories).ToList();
+        var channelsWithToken = new HashSet<ulong>();
+        foreach (var file in matchFiles)
+        {
+            if (TryGetChannelIdFromMatchPath(file, out var tokenChannelId) &&
+                TryGetGuildIdTokenFromFileName(file, out _))
+            {
+                channelsWithToken.Add(tokenChannelId);
+            }
+        }
+
         foreach (var file in matchFiles)
         {
             if (!TryGetChannelIdFromMatchPath(file, out var channelId))
@@ -1662,9 +1907,28 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                 continue;
             }
 
+            var hasToken = TryGetGuildIdTokenFromFileName(file, out var tokenGuildId);
+            if (!hasToken && channelsWithToken.Contains(channelId))
+            {
+                continue;
+            }
+
+            var validation = await ValidateGuildTokenForFileAsync(channelId, file, isEmbed: false, "match-stats");
+            if (!validation.ShouldLoad)
+            {
+                continue;
+            }
+
             await using var fileStream = File.OpenRead(file);
             var stats = await JsonSerializer.DeserializeAsync<FactoidMatchStats>(fileStream) ?? new FactoidMatchStats();
             ChannelFactoidMatchStats[channelId] = EnsureMatchStats(stats);
+
+            if (!hasToken && TryGetGuildIdFromChannelPath(file, out var pathGuildId))
+            {
+                var resolvedGuildId = validation.GuildId != 0 ? validation.GuildId : (hasToken ? tokenGuildId : pathGuildId);
+                await ResaveLegacyJsonAsync(file, ".json", resolvedGuildId, "json", stats,
+                    new JsonSerializerOptions { WriteIndented = true }, deleteLegacyOnSuccess: true);
+            }
         }
     }
 
@@ -1712,17 +1976,17 @@ public class InstructionGPT : DiscordBotBase, IHostedService
 
     private static string GetChannelFactoidFile(ChannelState channelState)
     {
-        return Path.Combine(GetChannelDirectory(channelState), "facts.json");
+        return Path.Combine(GetChannelDirectory(channelState), BuildTokenizedFileName("facts", channelState.GuildId, "json"));
     }
 
     private static string GetChannelMatchFile(ChannelState channelState)
     {
-        return Path.Combine(GetChannelDirectory(channelState), "matches.json");
+        return Path.Combine(GetChannelDirectory(channelState), BuildTokenizedFileName("matches", channelState.GuildId, "json"));
     }
 
     private static string GetChannelMatchStatsFile(ChannelState channelState)
     {
-        return Path.Combine(GetChannelDirectory(channelState), "matches.stats.json");
+        return Path.Combine(GetChannelDirectory(channelState), BuildTokenizedFileName("matches.stats", channelState.GuildId, "json"));
     }
 
 
@@ -1815,6 +2079,532 @@ public class InstructionGPT : DiscordBotBase, IHostedService
         return string.IsNullOrWhiteSpace(sanitized) ? "unknown" : sanitized;
     }
 
+    private static string BuildTokenizedFileName(string baseName, ulong guildId, string extension)
+    {
+        return $"{baseName}.{guildId}.token.{extension}";
+    }
+
+    private static bool TryGetGuildIdTokenFromFileName(string filePath, out ulong guildId)
+    {
+        guildId = 0;
+        var fileName = Path.GetFileName(filePath);
+        if (string.IsNullOrWhiteSpace(fileName))
+        {
+            return false;
+        }
+
+        var parts = fileName.Split('.', StringSplitOptions.RemoveEmptyEntries);
+        for (var i = 1; i < parts.Length; i++)
+        {
+            if (!string.Equals(parts[i], "token", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (ulong.TryParse(parts[i - 1], out guildId))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool TryGetGuildIdFromChannelPath(string filePath, out ulong guildId)
+    {
+        guildId = 0;
+        var channelDirectory = Path.GetDirectoryName(filePath);
+        if (string.IsNullOrWhiteSpace(channelDirectory))
+        {
+            return false;
+        }
+
+        var guildDirectory = Directory.GetParent(channelDirectory);
+        if (guildDirectory == null)
+        {
+            return false;
+        }
+
+        return TryParseIdFromName(guildDirectory.Name, out guildId);
+    }
+
+    private static bool TryGetGuildIdFromEmbedPath(string filePath, out ulong guildId)
+    {
+        guildId = 0;
+        var embedDirectory = Path.GetDirectoryName(filePath);
+        if (string.IsNullOrWhiteSpace(embedDirectory))
+        {
+            return false;
+        }
+
+        var embedDirectoryInfo = new DirectoryInfo(embedDirectory);
+        var channelDirectory = embedDirectoryInfo.Parent;
+        if (channelDirectory?.Parent == null)
+        {
+            return false;
+        }
+
+        return TryParseIdFromName(channelDirectory.Parent.Name, out guildId);
+    }
+
+    private static bool TryGetEmbedKeyFromFileName(string filePath, out string embedKey)
+    {
+        embedKey = null;
+        var fileName = Path.GetFileName(filePath);
+        if (string.IsNullOrWhiteSpace(fileName))
+        {
+            return false;
+        }
+
+        const string suffix = ".embed.json";
+        if (!fileName.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var core = fileName[..^suffix.Length];
+        if (TryStripGuildToken(core, out var stripped))
+        {
+            core = stripped;
+        }
+
+        if (string.IsNullOrWhiteSpace(core))
+        {
+            return false;
+        }
+
+        embedKey = core;
+        return true;
+    }
+
+    private static bool TryStripGuildToken(string input, out string stripped)
+    {
+        stripped = input;
+        if (string.IsNullOrWhiteSpace(input))
+        {
+            return false;
+        }
+
+        var parts = input.Split('.', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length < 2)
+        {
+            return false;
+        }
+
+        var lastIndex = parts.Length - 1;
+        if (!string.Equals(parts[lastIndex], "token", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (!ulong.TryParse(parts[lastIndex - 1], out _))
+        {
+            return false;
+        }
+
+        stripped = string.Join('.', parts.Take(lastIndex - 1));
+        return true;
+    }
+
+    private static bool TryGetBaseNameFromFileName(string filePath, string suffix, out string baseName)
+    {
+        baseName = null;
+        var fileName = Path.GetFileName(filePath);
+        if (string.IsNullOrWhiteSpace(fileName) ||
+            !fileName.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var core = fileName[..^suffix.Length];
+        if (TryStripGuildToken(core, out var stripped))
+        {
+            core = stripped;
+        }
+
+        if (string.IsNullOrWhiteSpace(core))
+        {
+            return false;
+        }
+
+        baseName = core;
+        return true;
+    }
+
+    private static async Task<bool> ResaveLegacyJsonAsync<T>(string filePath, string suffix, ulong guildId, string extension, T payload, JsonSerializerOptions options = null, bool overwriteExisting = false, bool deleteLegacyOnSuccess = false)
+    {
+        if (!TryGetBaseNameFromFileName(filePath, suffix, out var baseName))
+        {
+            return false;
+        }
+
+        var directory = Path.GetDirectoryName(filePath);
+        if (string.IsNullOrWhiteSpace(directory))
+        {
+            return false;
+        }
+
+        var tokenPath = Path.Combine(directory, BuildTokenizedFileName(baseName, guildId, extension));
+        if (!overwriteExisting && File.Exists(tokenPath))
+        {
+            return false;
+        }
+
+        await using var stream = File.Create(tokenPath);
+        if (options == null)
+        {
+            await JsonSerializer.SerializeAsync(stream, payload);
+        }
+        else
+        {
+            await JsonSerializer.SerializeAsync(stream, payload, options);
+        }
+
+        if (deleteLegacyOnSuccess && !string.Equals(filePath, tokenPath, StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                File.Delete(filePath);
+            }
+            catch (Exception ex)
+            {
+                await Console.Out.WriteLineAsync($"Failed to delete legacy file {filePath}: {ex.Message}");
+            }
+        }
+
+        return true;
+    }
+
+    private static ulong GetGuildId(IMessageChannel channel)
+    {
+        return channel is IGuildChannel guildChannel ? guildChannel.GuildId : 0;
+    }
+
+    private async Task<(bool ShouldLoad, ulong GuildId)> ValidateGuildTokenForFileAsync(ulong channelId, string filePath, bool isEmbed, string label)
+    {
+        var hasToken = TryGetGuildIdTokenFromFileName(filePath, out var tokenGuildId);
+        ulong pathGuildId;
+        var hasPathGuild = isEmbed
+            ? TryGetGuildIdFromEmbedPath(filePath, out pathGuildId)
+            : TryGetGuildIdFromChannelPath(filePath, out pathGuildId);
+
+        if (hasToken && hasPathGuild && tokenGuildId != pathGuildId)
+        {
+            await Console.Out.WriteLineAsync(
+                $"Skipping {label} for channel {channelId}: token guild {tokenGuildId} does not match path guild {pathGuildId} ({filePath}).");
+            return (false, 0);
+        }
+
+        var guildId = hasToken ? tokenGuildId : (hasPathGuild ? pathGuildId : 0);
+        if (hasToken || hasPathGuild)
+        {
+            if (!ChannelGuildIds.TryGetValue(channelId, out var existing))
+            {
+                ChannelGuildIds[channelId] = guildId;
+            }
+            else if (existing != guildId)
+            {
+                await Console.Out.WriteLineAsync(
+                    $"Skipping {label} for channel {channelId}: guild mismatch (expected {existing}, found {guildId}) ({filePath}).");
+                return (false, guildId);
+            }
+        }
+
+        return (true, guildId);
+    }
+
+    private bool IsChannelGuildMatch(ChannelState channelState, IMessageChannel channel, string context)
+    {
+        if (channelState == null || channel == null)
+        {
+            return false;
+        }
+
+        var guildId = GetGuildId(channel);
+        if (channelState.GuildId == 0 && guildId != 0)
+        {
+            channelState.GuildId = guildId;
+        }
+
+        if (channelState.GuildId != 0 && channelState.GuildId != guildId)
+        {
+            Console.WriteLine(
+                $"Guild mismatch for channel {channelState.ChannelId} in {context}: state {channelState.GuildId}, actual {guildId}.");
+            return false;
+        }
+
+        if (ChannelGuildIds.TryGetValue(channelState.ChannelId, out var expected) && expected != guildId)
+        {
+            Console.WriteLine(
+                $"Guild mismatch for channel {channelState.ChannelId} in {context}: expected {expected}, actual {guildId}.");
+            return false;
+        }
+
+        ChannelGuildIds.TryAdd(channelState.ChannelId, guildId);
+        return true;
+    }
+
+    private static List<FactoidEntry> FilterFactoidsForChannel(IEnumerable<FactoidEntry> factoids, ulong guildId, ulong channelId)
+    {
+        if (factoids == null)
+        {
+            return new List<FactoidEntry>();
+        }
+
+        return factoids.Where(f =>
+                (f.SourceGuildId == 0 || f.SourceGuildId == guildId) &&
+                (f.SourceChannelId == 0 || f.SourceChannelId == channelId))
+            .ToList();
+    }
+
+    private static async Task SendEphemeralResponseAsync(SocketSlashCommand command, string content)
+    {
+        if (string.IsNullOrWhiteSpace(content))
+        {
+            content = "No response content.";
+        }
+
+        const int maxLength = 2000;
+        var chunks = new List<string>();
+        for (var i = 0; i < content.Length; i += maxLength)
+        {
+            var size = Math.Min(maxLength, content.Length - i);
+            chunks.Add(content.Substring(i, size));
+        }
+
+        if (chunks.Count == 0)
+        {
+            chunks.Add(content);
+        }
+
+        if (!command.HasResponded)
+        {
+            await command.RespondAsync(chunks[0], ephemeral: true);
+        }
+        else
+        {
+            await command.FollowupAsync(chunks[0], ephemeral: true);
+        }
+
+        for (var i = 1; i < chunks.Count; i++)
+        {
+            await command.FollowupAsync(chunks[i], ephemeral: true);
+        }
+    }
+
+    private record FilePayload(string Name, string Content);
+
+    private static (string CleanedText, List<FilePayload> Files) ExtractFilePayloads(string content)
+    {
+        var files = new List<FilePayload>();
+        if (string.IsNullOrWhiteSpace(content))
+        {
+            return (content, files);
+        }
+
+        var pattern = new Regex(
+            "<gptcli_file\\s+name=\\\"(?<name>[^\\\"]+)\\\"\\s*>(?<content>.*?)</gptcli_file>",
+            RegexOptions.IgnoreCase | RegexOptions.Singleline);
+
+        var cleaned = pattern.Replace(content, match =>
+        {
+            var name = NormalizeFileName(match.Groups["name"].Value);
+            var fileContent = match.Groups["content"].Value ?? string.Empty;
+            files.Add(new FilePayload(name, fileContent.Trim()));
+            return string.Empty;
+        });
+
+        return (cleaned.Trim(), files);
+    }
+
+    private static string ReplacePseudoMentions(string content, IUser author)
+    {
+        if (string.IsNullOrWhiteSpace(content) || author == null)
+        {
+            return content;
+        }
+
+        var username = Regex.Escape(author.Username ?? string.Empty);
+        if (string.IsNullOrWhiteSpace(username))
+        {
+            return content;
+        }
+
+        var pattern = $@"<@!?\s*{username}\s*>";
+        return Regex.Replace(content, pattern, $"<@{author.Id}>", RegexOptions.IgnoreCase);
+    }
+
+    private static string NormalizeFileName(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return "response.txt";
+        }
+
+        var trimmed = name.Trim().Replace("\\", "/");
+        var lastSlash = trimmed.LastIndexOf('/');
+        if (lastSlash >= 0 && lastSlash < trimmed.Length - 1)
+        {
+            trimmed = trimmed[(lastSlash + 1)..];
+        }
+
+        var invalidChars = Path.GetInvalidFileNameChars();
+        var builder = new StringBuilder(trimmed.Length);
+        foreach (var ch in trimmed)
+        {
+            if (invalidChars.Contains(ch))
+            {
+                builder.Append('-');
+            }
+            else
+            {
+                builder.Append(ch);
+            }
+        }
+
+        var sanitized = builder.ToString();
+        if (string.IsNullOrWhiteSpace(sanitized))
+        {
+            sanitized = "response.txt";
+        }
+
+        if (!sanitized.Contains('.'))
+        {
+            sanitized += ".txt";
+        }
+
+        const int maxLength = 120;
+        if (sanitized.Length > maxLength)
+        {
+            sanitized = sanitized[..maxLength];
+        }
+
+        return sanitized;
+    }
+
+    private static async Task SendResponseAsync(SocketMessage message, string cleanedText, IReadOnlyList<FilePayload> files, MessageComponent components)
+    {
+        var chunks = string.IsNullOrWhiteSpace(cleanedText)
+            ? new List<string>()
+            : SplitMessageChunks(cleanedText);
+
+        var remainingFiles = files?.ToList() ?? new List<FilePayload>();
+        if (remainingFiles.Count > 0)
+        {
+            var firstFile = remainingFiles[0];
+            remainingFiles.RemoveAt(0);
+
+            var firstChunk = chunks.Count > 0 ? chunks[0] : string.Empty;
+            if (chunks.Count > 0)
+            {
+                chunks.RemoveAt(0);
+            }
+
+            var sentFile = await TrySendFileAsync(message, firstFile, firstChunk, components);
+            if (!sentFile && !string.IsNullOrWhiteSpace(firstChunk))
+            {
+                await SendTextMessageAsync(message, firstChunk, components);
+            }
+        }
+        else if (chunks.Count > 0)
+        {
+            await SendTextMessageAsync(message, chunks[0], components);
+            chunks.RemoveAt(0);
+        }
+
+        foreach (var chunk in chunks)
+        {
+            await SendTextMessageAsync(message, chunk, components);
+        }
+
+        if (remainingFiles.Count > 0)
+        {
+            foreach (var file in remainingFiles)
+            {
+                await TrySendFileAsync(message, file, null, null);
+            }
+        }
+    }
+
+    private static List<string> SplitMessageChunks(string content)
+    {
+        var chunks = new List<string>();
+        if (string.IsNullOrWhiteSpace(content))
+        {
+            return chunks;
+        }
+
+        const int maxLength = 2000;
+        for (var i = 0; i < content.Length; i += maxLength)
+        {
+            var size = Math.Min(maxLength, content.Length - i);
+            chunks.Add(content.Substring(i, size));
+        }
+
+        return chunks;
+    }
+
+    private static async Task SendTextMessageAsync(SocketMessage message, string content, MessageComponent components)
+    {
+        if (string.IsNullOrWhiteSpace(content))
+        {
+            return;
+        }
+
+        if (message is IUserMessage userMessage)
+        {
+            _ = await userMessage.ReplyAsync(content, components: components);
+        }
+        else
+        {
+            _ = await message.Channel.SendMessageAsync(content, components: components);
+        }
+    }
+
+    private static async Task<bool> TrySendFileAsync(SocketMessage message, FilePayload file, string content, MessageComponent components)
+    {
+        if (file == null)
+        {
+            return false;
+        }
+
+        const int maxBytes = 7_500_000;
+        var contentBytes = Encoding.UTF8.GetBytes(file.Content ?? string.Empty);
+        if (contentBytes.Length > maxBytes)
+        {
+            var warning = $"File `{file.Name}` is too large to attach ({contentBytes.Length} bytes).";
+            await SendTextMessageAsync(message, warning, null);
+            return false;
+        }
+
+        await using var stream = new MemoryStream(contentBytes);
+        var reference = new MessageReference(message.Id);
+        await message.Channel.SendFileAsync(stream, file.Name, content, messageReference: reference, components: components);
+        return true;
+    }
+
+    private static string BuildHistoryText(string cleanedText, IReadOnlyList<FilePayload> files)
+    {
+        var builder = new StringBuilder();
+        if (!string.IsNullOrWhiteSpace(cleanedText))
+        {
+            builder.Append(cleanedText.Trim());
+        }
+
+        if (files != null && files.Count > 0)
+        {
+            if (builder.Length > 0)
+            {
+                builder.Append('\n');
+            }
+
+            var fileList = string.Join(", ", files.Select(f => f.Name));
+            builder.Append($"[Attached file(s): {fileList}]");
+        }
+
+        return builder.ToString();
+    }
+
     private async Task HandleInstructionCommand(SocketMessageComponent command)
     {
         var channelState = ChannelBots.GetOrAdd(command.Channel.Id, _ => InitializeChannel(command.Channel));
@@ -1843,6 +2633,20 @@ public class InstructionGPT : DiscordBotBase, IHostedService
             chatBot = InitializeChannel(channel);
         }
 
+        if (!IsChannelGuildMatch(chatBot, command.Channel, "slash-command"))
+        {
+            var warning = "Guild mismatch detected for cached channel data. Refusing to apply command.";
+            if (command.HasResponded)
+            {
+                await command.FollowupAsync(warning, ephemeral: true);
+            }
+            else
+            {
+                await command.RespondAsync(warning, ephemeral: true);
+            }
+            return;
+        }
+
         var responses = new List<string>();
         var options = command.Data.Options;
         if (options == null || options.Count == 0)
@@ -1865,6 +2669,11 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                             "",
                             "**Core commands**",
                             "• `/gptcli help` — show this message",
+                            "• `/gptcli instruction add text:\"...\"`",
+                            "• `/gptcli instruction list`",
+                            "• `/gptcli instruction get index:<n>`",
+                            "• `/gptcli instruction delete index:<n>`",
+                            "• `/gptcli instruction clear`",
                             "• `/gptcli clear messages|instructions|all`",
                             "",
                             "**Bot settings**",
@@ -1924,11 +2733,93 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                         responses.Add($"{char.ToUpper(clearName[0])}{clearName.Substring(1)} cleared.");
                         break;
                     case "instruction":
-                        var instruction = option.Value?.ToString();
-                        if (!string.IsNullOrWhiteSpace(instruction))
+                        if (subOption == null)
                         {
-                            chatBot.InstructionChat.AddInstruction(new(StaticValues.ChatMessageRoles.System, instruction));
-                            responses.Add("Instruction received!");
+                            responses.Add("Specify an instruction command.");
+                            break;
+                        }
+
+                        switch (subOption.Name)
+                        {
+                            case "add":
+                            {
+                                var instruction = subOption.Options?.FirstOrDefault(o => o.Name == "text")?.Value?.ToString()
+                                                  ?? subOption.Value?.ToString()
+                                                  ?? option.Value?.ToString();
+                                if (!string.IsNullOrWhiteSpace(instruction))
+                                {
+                                    chatBot.InstructionChat.AddInstruction(new(StaticValues.ChatMessageRoles.System, instruction));
+                                    responses.Add("Instruction added.");
+                                }
+                                else
+                                {
+                                    responses.Add("Provide instruction text.");
+                                }
+                                break;
+                            }
+                            case "list":
+                            {
+                                var instructions = chatBot.InstructionChat.ChatBotState.Instructions;
+                                if (instructions == null || instructions.Count == 0)
+                                {
+                                    responses.Add("No instructions stored.");
+                                    break;
+                                }
+
+                                var lines = instructions
+                                    .Select((inst, index) => $"{index + 1}. {inst.Content}")
+                                    .ToList();
+                                responses.Add($"Instructions:\n{string.Join("\n", lines)}");
+                                break;
+                            }
+                            case "get":
+                            {
+                                var indexValue = subOption.Options?.FirstOrDefault(o => o.Name == "index")?.Value;
+                                if (indexValue is not long indexLong)
+                                {
+                                    responses.Add("Provide instruction index.");
+                                    break;
+                                }
+
+                                var instructions = chatBot.InstructionChat.ChatBotState.Instructions;
+                                var index = (int)indexLong - 1;
+                                if (instructions == null || index < 0 || index >= instructions.Count)
+                                {
+                                    responses.Add("Instruction index out of range.");
+                                    break;
+                                }
+
+                                responses.Add($"{index + 1}. {instructions[index].Content}");
+                                break;
+                            }
+                            case "delete":
+                            {
+                                var indexValue = subOption.Options?.FirstOrDefault(o => o.Name == "index")?.Value;
+                                if (indexValue is not long indexLong)
+                                {
+                                    responses.Add("Provide instruction index.");
+                                    break;
+                                }
+
+                                var instructions = chatBot.InstructionChat.ChatBotState.Instructions;
+                                var index = (int)indexLong - 1;
+                                if (instructions == null || index < 0 || index >= instructions.Count)
+                                {
+                                    responses.Add("Instruction index out of range.");
+                                    break;
+                                }
+
+                                chatBot.InstructionChat.RemoveInstruction(index);
+                                responses.Add($"Instruction {index + 1} deleted.");
+                                break;
+                            }
+                            case "clear":
+                                chatBot.InstructionChat.ClearInstructions();
+                                responses.Add("Instructions cleared.");
+                                break;
+                            default:
+                                responses.Add($"Unknown instruction command: {subOption.Name}");
+                                break;
                         }
                         break;
                     case "instructions":
@@ -2077,7 +2968,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                                     break;
                                 }
 
-                                var entry = FindExactTermFactoid(channel.Id, term);
+                                var entry = FindExactTermFactoid(channel.Id, GetGuildId(channel), term);
                                 if (entry == null)
                                 {
                                     responses.Add($"No factoid found for {term}.");
@@ -2098,7 +2989,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                                 }
 
                                 var channelState = ChannelBots.GetOrAdd(channel.Id, _ => InitializeChannel(channel));
-                                if (RemoveFactoidByTerm(channelState, term))
+                                if (RemoveFactoidByTerm(channelState, GetGuildId(channel), term))
                                 {
                                     responses.Add($"Factoid deleted: {term}.");
                                 }
@@ -2116,7 +3007,15 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                                     break;
                                 }
 
-                                var indexed = factoids
+                                var guildId = GetGuildId(channel);
+                                var usableFactoids = FilterFactoidsForChannel(factoids, guildId, channel.Id);
+                                if (usableFactoids.Count == 0)
+                                {
+                                    responses.Add("No factoids stored.");
+                                    break;
+                                }
+
+                                var indexed = usableFactoids
                                     .Select((factoid, index) => new { factoid, index })
                                     .Where(x => !string.IsNullOrWhiteSpace(x.factoid.Term))
                                     .ToList();
@@ -2262,31 +3161,26 @@ public class InstructionGPT : DiscordBotBase, IHostedService
             responses.Add("No changes made.");
         }
 
-        if (command.HasResponded)
-        {
-            await command.FollowupAsync(string.Join("\n", responses), ephemeral: true);
-        }
-        else
-        {
-            await command.RespondAsync(string.Join("\n", responses), ephemeral: true);
-        }
+        var responseText = string.Join("\n", responses);
+        await SendEphemeralResponseAsync(command, responseText);
 
         await SaveCachedChannelState(channel.Id);
     }
 
-    private FactoidEntry FindExactTermFactoid(ulong channelId, string term)
+    private FactoidEntry FindExactTermFactoid(ulong channelId, ulong guildId, string term)
     {
         if (!ChannelFactoids.TryGetValue(channelId, out var factoids))
         {
             return null;
         }
 
+        var usableFactoids = FilterFactoidsForChannel(factoids, guildId, channelId);
         var normalized = NormalizeTerm(term);
-        return factoids.FirstOrDefault(f => f.Term != null &&
+        return usableFactoids.FirstOrDefault(f => f.Term != null &&
                                             string.Equals(NormalizeTerm(f.Term), normalized, StringComparison.OrdinalIgnoreCase));
     }
 
-    private bool RemoveFactoidByTerm(ChannelState channel, string term)
+    private bool RemoveFactoidByTerm(ChannelState channel, ulong guildId, string term)
     {
         if (!ChannelFactoids.TryGetValue(channel.ChannelId, out var factoids))
         {
@@ -2295,7 +3189,9 @@ public class InstructionGPT : DiscordBotBase, IHostedService
 
         var normalized = NormalizeTerm(term);
         var removed = factoids.RemoveAll(f => f.Term != null &&
-                                              string.Equals(NormalizeTerm(f.Term), normalized, StringComparison.OrdinalIgnoreCase));
+                                              string.Equals(NormalizeTerm(f.Term), normalized, StringComparison.OrdinalIgnoreCase) &&
+                                              (f.SourceGuildId == 0 || f.SourceGuildId == guildId) &&
+                                              (f.SourceChannelId == 0 || f.SourceChannelId == channel.ChannelId));
         if (removed == 0)
         {
             return false;
@@ -2308,10 +3204,13 @@ public class InstructionGPT : DiscordBotBase, IHostedService
     private async Task SaveFactoidAsync(ChannelState channel, SocketMessage message, string term, string text)
     {
         var normalizedTerm = NormalizeTerm(term);
+        var sourceGuildId = GetGuildId(message.Channel);
         var entry = new FactoidEntry
         {
             Term = normalizedTerm,
             Text = text.Trim(),
+            SourceGuildId = sourceGuildId,
+            SourceChannelId = message.Channel.Id,
             SourceMessageId = message.Id,
             SourceUserId = message.Author.Id,
             SourceUsername = message.Author.Username,
@@ -2342,6 +3241,8 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                 Term = entry.Term,
                 Text = doc.Text,
                 Embedding = doc.Embedding,
+                SourceGuildId = entry.SourceGuildId,
+                SourceChannelId = entry.SourceChannelId,
                 SourceMessageId = entry.SourceMessageId,
                 SourceUserId = entry.SourceUserId,
                 SourceUsername = entry.SourceUsername,
@@ -2361,10 +3262,13 @@ public class InstructionGPT : DiscordBotBase, IHostedService
     private async Task SaveFactoidAsync(ChannelState channel, IUser user, IMessageChannel messageChannel, string term, string text)
     {
         var normalizedTerm = NormalizeTerm(term);
+        var sourceGuildId = GetGuildId(messageChannel);
         var entry = new FactoidEntry
         {
             Term = normalizedTerm,
             Text = text.Trim(),
+            SourceGuildId = sourceGuildId,
+            SourceChannelId = messageChannel.Id,
             SourceMessageId = 0,
             SourceUserId = user.Id,
             SourceUsername = user.Username,
@@ -2395,6 +3299,8 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                 Term = entry.Term,
                 Text = doc.Text,
                 Embedding = doc.Embedding,
+                SourceGuildId = entry.SourceGuildId,
+                SourceChannelId = entry.SourceChannelId,
                 SourceMessageId = entry.SourceMessageId,
                 SourceUserId = entry.SourceUserId,
                 SourceUsername = entry.SourceUsername,

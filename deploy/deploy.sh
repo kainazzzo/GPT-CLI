@@ -5,6 +5,9 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEPLOY_DIR="${ROOT_DIR}/deploy"
 APPSETTINGS="${DEPLOY_DIR}/appsettings.json"
 
+export DOCKER_BUILDKIT=1
+export COMPOSE_DOCKER_CLI_BUILD=1
+
 if [[ "${1:-}" == "completion" ]]; then
   cat "${DEPLOY_DIR}/deploy-completion.bash"
   exit 0
