@@ -12,6 +12,18 @@ namespace GPT.CLI.Embeddings
         [JsonPropertyName("embed")]
         public List<double> Embedding { get; set; }
 
+        [JsonPropertyName("is-image")]
+        public bool IsImage { get; set; }
+
+        [JsonPropertyName("source-filename")]
+        public string SourceFileName { get; set; }
+
+        [JsonPropertyName("stored-path")]
+        public string StoredFilePath { get; set; }
+
+        [JsonPropertyName("source-message-id")]
+        public ulong SourceMessageId { get; set; }
+
         public static List<Document> LoadEmbeddings(Stream input)
         {
             try
