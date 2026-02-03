@@ -20,6 +20,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService
 {
     private readonly ConcurrentDictionary<ulong, FactoidResponseMetadata> _factoidResponseMap = new();
     private record FactoidResponseMetadata(ulong ChannelId, string Term);
+    private readonly ConcurrentDictionary<ulong, HashSet<string>> _imageResponseMap = new();
 
     public InstructionGPT (DiscordSocketClient client, IConfiguration configuration, OpenAILogic openAILogic,
         GptOptions defaultParameters) : base(client, configuration, openAILogic, defaultParameters)
@@ -464,6 +465,28 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                     await SaveEmbed(message);
                     break;
                 }
+                case "🧹":
+                {
+                    if (message == null)
+                    {
+                        return;
+                    }
+
+                    var channelState = ChannelBots.GetOrAdd(channel.Id, _ => InitializeChannel(channel));
+                    if (!IsChannelGuildMatch(channelState, channel, "image-embed-delete"))
+                    {
+                        await TryReplyAsync(message, channel, messageId, "Guild mismatch detected for image embeds. Refusing delete.");
+                        return;
+                    }
+
+                    var result = await DeleteImageEmbedsForMessageAsync(channelState, message);
+                    await TryRemoveReactionAsync(message, reaction.Emote, reaction.UserId);
+                    var reply = result.TotalDeleted > 0
+                        ? $"<@{reaction.UserId}> Deleted {result.TotalDeleted} image embed(s) and {result.FilesDeleted} file(s)."
+                        : $"<@{reaction.UserId}> No image embeds found to delete for that message.";
+                    await TryReplyAsync(message, channel, messageId, reply);
+                    break;
+                }
             }
         }
         catch (Exception ex)
@@ -513,6 +536,139 @@ public class InstructionGPT : DiscordBotBase, IHostedService
         {
             await Console.Out.WriteLineAsync($"Failed to clear reactions for {emote.Name}: {ex.Reason}");
         }
+    }
+
+    private record ImageEmbedDeleteResult(int TotalDeleted, int FilesDeleted);
+
+    private async Task<ImageEmbedDeleteResult> DeleteImageEmbedsForMessageAsync(ChannelState channelState, IUserMessage message)
+    {
+        if (channelState == null || message == null)
+        {
+            return new ImageEmbedDeleteResult(0, 0);
+        }
+
+        var channelDocs = Documents.GetOrAdd(channelState.ChannelId, _ => new List<Document>());
+        var embedDirectory = Path.Combine(GetChannelDirectory(channelState), "embeds");
+        var embedFilesDirectory = Path.Combine(embedDirectory, "files");
+
+        var embedFilesToDelete = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var storedFilesToDelete = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var docsToRemove = new List<Document>();
+
+        if (_imageResponseMap.TryRemove(message.Id, out var mappedPaths))
+        {
+            lock (mappedPaths)
+            {
+                foreach (var path in mappedPaths)
+                {
+                    if (string.IsNullOrWhiteSpace(path))
+                    {
+                        continue;
+                    }
+
+                    storedFilesToDelete.Add(path);
+                    docsToRemove.AddRange(channelDocs.Where(doc =>
+                        doc.IsImage && HasStoredFile(doc) &&
+                        string.Equals(ResolveStoredFilePath(doc.StoredFilePath), path, StringComparison.OrdinalIgnoreCase)));
+                }
+            }
+        }
+
+        if (message.Attachments is { Count: > 0 })
+        {
+            foreach (var attachment in message.Attachments)
+            {
+                var contentType = attachment.ContentType;
+                if (!IsImageAttachment(attachment, contentType))
+                {
+                    continue;
+                }
+
+                var baseName = $"{message.Id}.{attachment.Id}";
+                if (channelState.GuildId != 0)
+                {
+                    embedFilesToDelete.Add(Path.Combine(embedDirectory, BuildTokenizedFileName(baseName, channelState.GuildId, "embed.json")));
+                }
+
+                embedFilesToDelete.Add(Path.Combine(embedDirectory, $"{baseName}.embed.json"));
+
+                if (Directory.Exists(embedFilesDirectory))
+                {
+                    foreach (var storedFile in Directory.GetFiles(embedFilesDirectory, $"{baseName}.*"))
+                    {
+                        storedFilesToDelete.Add(storedFile);
+                    }
+                }
+
+                docsToRemove.AddRange(channelDocs.Where(doc =>
+                    doc.IsImage &&
+                    (doc.SourceMessageId == message.Id ||
+                     string.Equals(doc.SourceFileName, attachment.Filename, StringComparison.OrdinalIgnoreCase) ||
+                     (!string.IsNullOrWhiteSpace(doc.StoredFilePath) &&
+                      Path.GetFileName(doc.StoredFilePath).StartsWith(baseName + ".", StringComparison.OrdinalIgnoreCase)))));
+            }
+        }
+        else
+        {
+            var referenceId = message.Reference?.MessageId;
+            if (referenceId.HasValue && referenceId.Value.IsSpecified)
+            {
+                var referencedId = referenceId.Value.Value;
+                docsToRemove.AddRange(channelDocs.Where(doc => doc.IsImage && doc.SourceMessageId == referencedId));
+            }
+        }
+
+        foreach (var doc in docsToRemove.Where(HasStoredFile))
+        {
+            storedFilesToDelete.Add(ResolveStoredFilePath(doc.StoredFilePath));
+            var embedPath = ResolveEmbedPathForImage(channelState, doc);
+            if (!string.IsNullOrWhiteSpace(embedPath))
+            {
+                embedFilesToDelete.Add(embedPath);
+            }
+        }
+
+        foreach (var path in embedFilesToDelete)
+        {
+            if (File.Exists(path))
+            {
+                try
+                {
+                    File.Delete(path);
+                }
+                catch (Exception ex)
+                {
+                    await Console.Out.WriteLineAsync($"Failed to delete embed file {path}: {ex.Message}");
+                }
+            }
+        }
+
+        foreach (var path in storedFilesToDelete)
+        {
+            if (File.Exists(path))
+            {
+                try
+                {
+                    File.Delete(path);
+                }
+                catch (Exception ex)
+                {
+                    await Console.Out.WriteLineAsync($"Failed to delete stored file {path}: {ex.Message}");
+                }
+            }
+        }
+
+        if (docsToRemove.Count > 0)
+        {
+            var storedPathSet = new HashSet<string>(
+                docsToRemove.Where(HasStoredFile).Select(d => ResolveStoredFilePath(d.StoredFilePath)),
+                StringComparer.OrdinalIgnoreCase);
+            channelDocs.RemoveAll(doc =>
+                doc.IsImage && (storedPathSet.Contains(ResolveStoredFilePath(doc.StoredFilePath)) ||
+                                doc.SourceMessageId == message.Id));
+        }
+
+        return new ImageEmbedDeleteResult(embedFilesToDelete.Count, storedFilesToDelete.Count);
     }
 
 
@@ -731,9 +887,15 @@ public class InstructionGPT : DiscordBotBase, IHostedService
         if (message.Content.StartsWith("!ignore"))
             return;
 
-        if (message.Attachments is {Count: > 0})
+        if (message.Attachments is {Count: > 0} && message is IUserMessage userMessage)
         {
-            await message.AddReactionAsync(new Emoji("💾"));
+            var emojis = new List<IEmote> { new Emoji("💾") };
+            if (message.Attachments.Any(att => IsImageAttachment(att, att.ContentType)))
+            {
+                emojis.Add(new Emoji("🧹"));
+            }
+
+            await userMessage.AddReactionsAsync(emojis.ToArray());
         }
 
 
@@ -832,6 +994,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService
         if (selectedImageDocs.Count > 0)
         {
             selectedImageDocs = await EnsureVisionDescriptionsAsync(channel, message, selectedImageDocs);
+            selectedImageDocs = DeduplicateImageDocuments(selectedImageDocs);
             imageContextMessages.AddRange(BuildImageContextMessages(selectedImageDocs));
         }
 
@@ -851,6 +1014,13 @@ public class InstructionGPT : DiscordBotBase, IHostedService
         if (imageContextMessages.Count > 0)
         {
             additionalMessages.AddRange(imageContextMessages);
+        }
+        if (imageAttachments.Count > 0)
+        {
+            var imageNames = string.Join(", ", imageAttachments.Select(att => att.Name));
+            additionalMessages.Add(new ChatMessage(StaticValues.ChatMessageRoles.System,
+                $"Your response will include the image file(s) attached: {imageNames}. " +
+                "Do not say you cannot show, attach, or resend the image."));
         }
 
         if (!channel.Options.Muted)
@@ -1617,6 +1787,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService
             "emoji reaction on any message. Instructions are like 'sticky' chat messages that provide upfront context to the bot. The the 📌 emoji reaction is for pinning a message to instructions. The 🔄 emoji reaction is for replaying a message as a new prompt. " +
             "Never wrap replies in triple backtick code fences (including ```discord) unless the user explicitly asks for a code block. Discord already renders markdown. " +
             "If prior conversation shows code fences, actively override that style and respond without code fences. " +
+            "If you are attaching image files in your response, never claim you cannot show, attach, or resend the image. " +
             "If the user explicitly asks for a file (for example, a code snippet as a file), respond with a <gptcli_file name=\"filename.ext\">...</gptcli_file> block containing the file contents, and put any human-readable reply outside the block.")
     };
 
@@ -1777,9 +1948,13 @@ public class InstructionGPT : DiscordBotBase, IHostedService
             using var embedStream = new MemoryStream();
             await JsonSerializer.SerializeAsync(embedStream, newDocs);
 
-            await message.Channel.SendFileAsync(embedStream, $"{message.Id}.embed.json",
-                $"Message saved as {newDocs.Count} documents.",
-                messageReference: message.Reference);
+                        var embedMessage = await message.Channel.SendFileAsync(embedStream, $"{message.Id}.embed.json",
+                            $"Message saved as {newDocs.Count} documents.",
+                            messageReference: message.Reference);
+                        if (embedMessage != null)
+                        {
+                            await embedMessage.AddReactionAsync(new Emoji("🧹"));
+                        }
         }
 
         if (message.Attachments is { Count: > 0 })
@@ -1816,9 +1991,13 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                         using var embedStream = new MemoryStream();
                         await JsonSerializer.SerializeAsync(embedStream, attachmentDocs);
 
-                        await message.Channel.SendFileAsync(embedStream, $"{attachment.Filename}.embed.json",
+                        var embedMessage = await message.Channel.SendFileAsync(embedStream, $"{attachment.Filename}.embed.json",
                             $"Image {attachment.Filename} saved as {attachmentDocs.Count} documents.",
                             messageReference: message.Reference);
+                        if (embedMessage != null)
+                        {
+                            await embedMessage.AddReactionAsync(new Emoji("🧹"));
+                        }
                     }
                 }
                 else
@@ -1831,9 +2010,13 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                         using var embedStream = new MemoryStream();
                         await JsonSerializer.SerializeAsync(embedStream, attachmentDocs);
 
-                        await message.Channel.SendFileAsync(embedStream, $"{attachment.Filename}.embed.json",
+                        var embedMessage = await message.Channel.SendFileAsync(embedStream, $"{attachment.Filename}.embed.json",
                             $"Attachment {attachment.Filename} saved as {attachmentDocs.Count} documents.",
                             messageReference: message.Reference);
+                        if (embedMessage != null)
+                        {
+                            await embedMessage.AddReactionAsync(new Emoji("🧹"));
+                        }
                     }
                 }
             }
@@ -2990,7 +3173,9 @@ public class InstructionGPT : DiscordBotBase, IHostedService
         var messages = new List<ChatMessage>
         {
             new(StaticValues.ChatMessageRoles.System,
-                "You are a Discord bot with vision. Use the attached image(s) to answer. Be concise. Never use triple backtick code fences unless explicitly asked.")
+                "You are a Discord bot with vision. Use the attached image(s) to answer. " +
+                "The platform will attach the image file(s) to your reply. Never claim you cannot show or attach them. " +
+                "Be concise. Never use triple backtick code fences unless explicitly asked.")
         };
 
         messages.Add(visionUserMessage);
@@ -3430,6 +3615,20 @@ public class InstructionGPT : DiscordBotBase, IHostedService
         return document != null && !string.IsNullOrWhiteSpace(document.StoredFilePath);
     }
 
+    private static bool IsImageFileName(string fileName)
+    {
+        if (string.IsNullOrWhiteSpace(fileName))
+        {
+            return false;
+        }
+
+        var ext = Path.GetExtension(fileName);
+        return ext != null && ext.Length > 0 && new[]
+        {
+            ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff"
+        }.Contains(ext, StringComparer.OrdinalIgnoreCase);
+    }
+
     private static List<FilePayload> BuildImageAttachments(IEnumerable<Document> documents)
     {
         return documents
@@ -3498,7 +3697,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService
             : Path.GetFullPath(storedPath);
     }
 
-    private static async Task SendResponseAsync(SocketMessage message, string cleanedText, IReadOnlyList<FilePayload> files, MessageComponent components)
+    private async Task SendResponseAsync(SocketMessage message, string cleanedText, IReadOnlyList<FilePayload> files, MessageComponent components)
     {
         var chunks = string.IsNullOrWhiteSpace(cleanedText)
             ? new List<string>()
@@ -3577,7 +3776,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService
         }
     }
 
-    private static async Task<bool> TrySendFileAsync(SocketMessage message, FilePayload file, string content, MessageComponent components)
+    private async Task<bool> TrySendFileAsync(SocketMessage message, FilePayload file, string content, MessageComponent components)
     {
         if (file == null)
         {
@@ -3604,7 +3803,9 @@ public class InstructionGPT : DiscordBotBase, IHostedService
             }
 
             await using var fileStream = File.OpenRead(resolvedPath);
-            await message.Channel.SendFileAsync(fileStream, file.Name, content, messageReference: new MessageReference(message.Id), components: components);
+            var sentMessage = await message.Channel.SendFileAsync(fileStream, file.Name, content,
+                messageReference: new MessageReference(message.Id), components: components);
+            TrackImageResponse(sentMessage, resolvedPath, file.Name);
             return true;
         }
 
@@ -3617,7 +3818,9 @@ public class InstructionGPT : DiscordBotBase, IHostedService
         }
 
         await using var stream = new MemoryStream(contentBytes);
-        await message.Channel.SendFileAsync(stream, file.Name, content, messageReference: new MessageReference(message.Id), components: components);
+        var sentContentMessage = await message.Channel.SendFileAsync(stream, file.Name, content,
+            messageReference: new MessageReference(message.Id), components: components);
+        TrackImageResponse(sentContentMessage, null, file.Name);
         return true;
     }
 
@@ -3641,6 +3844,29 @@ public class InstructionGPT : DiscordBotBase, IHostedService
         }
 
         return builder.ToString();
+    }
+
+    private void TrackImageResponse(IUserMessage sentMessage, string filePath, string fileName)
+    {
+        if (sentMessage == null)
+        {
+            return;
+        }
+
+        if (IsImageFileName(fileName ?? filePath))
+        {
+            var normalizedPath = string.IsNullOrWhiteSpace(filePath) ? null : ResolveStoredFilePath(filePath);
+            var set = _imageResponseMap.GetOrAdd(sentMessage.Id, _ => new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+            if (!string.IsNullOrWhiteSpace(normalizedPath))
+            {
+                lock (set)
+                {
+                    set.Add(normalizedPath);
+                }
+            }
+
+            _ = sentMessage.AddReactionAsync(new Emoji("🧹"));
+        }
     }
 
     private async Task HandleInstructionCommand(SocketMessageComponent command)
@@ -3736,6 +3962,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService
                             "**Reactions**",
                             "• 📌 add message as instruction",
                             "• 💾 save message as embed",
+                            "• 🧹 delete image embeds for that message",
                             "• 🔄 replay a user message as a prompt",
                             "• 🗑️ remove matched factoid term (on infobot reply)",
                             "• 🛑 disable infobot for this channel (on infobot reply)"
