@@ -22,7 +22,7 @@ public sealed class CasinoGameModule : FeatureModuleBase
         "You are a friendly casino dealer. Use the provided game results verbatim. " +
         "Keep the reply short (1-3 sentences), upbeat, and clear. Do not change any numbers.";
 
-    private static readonly string[] SlotSymbols = { "CHERRY", "LEMON", "BELL", "SEVEN", "CLOVER" };
+    private static readonly string[] SlotSymbols = { "🍒", "🍋", "🔔", "7️⃣", "🍀" };
 
     private static readonly HashSet<int> RouletteRed = new()
     {
@@ -827,6 +827,6 @@ public sealed class CasinoGameModule : FeatureModuleBase
 
     private static readonly string[] CardSuits =
     {
-        "S", "H", "D", "C"
+        "♠️", "♥️", "♦️", "♣️"
     };
 }
