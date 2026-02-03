@@ -4,29 +4,101 @@ Welcome to GPT-CLI, a command line interface for harnessing the power of OpenAI'
 
 ## Prerequisites
 
-In order to use this CLI interface, you will need an OpenAI API key. [Sign up](https://platform.openai.com) if you haven't already, and create an [api key](https://platform.openai.com/account/apikeys). 
+You will need an OpenAI API key. [Sign up](https://platform.openai.com) if you haven't already and create an API key.
 
-Then, create an appsettings.json file in the current working directory with the following contents:
+If you build from source, you’ll need the .NET 10 SDK. The published binaries can be self-contained.
+
+## Configuration
+
+GPT-CLI uses standard .NET configuration sources (appsettings.json, environment variables, and command-line args). Most settings live under the `GPT` section, with OpenAI credentials under `OpenAI`.
+
+Create an `appsettings.json` in the working directory:
 
 ```json
 {
   "OpenAI": {
-    "ApiKey": "sk-your-apikey-here"
+    "ApiKey": "sk-your-apikey-here",
+    "BaseDomain": "https://api.openai.com/v1"
   },
   "GPT": {
+    "ApiKey": "sk-optional-override",
     "Mode": "Completion",
-    "Prompt": "generate a hello world python script"
+    "Prompt": "generate a hello world python script",
+    "Model": "gpt-5.2",
+    "VisionModel": "gpt-4o",
+    "MaxTokens": 64000,
+    "ChunkSize": 1536,
+    "MaxChatHistoryLength": 4096,
+    "BotToken": "discord-bot-token-if-using-discord"
   }
 }
 ```
 
-Alternatively, you can use environment variables:
+Notes:
+- `OpenAI:ApiKey` (or `GPT:ApiKey`) is required.
+- `GPT:Mode` can be `Completion`, `Chat`, `Embed`, or `Discord`.
+- `GPT:BotToken` is required only for `Discord` mode.
+- `OpenAI:BaseDomain` is optional and can target OpenAI-compatible endpoints.
+- Do not commit real API keys or bot tokens.
+
+Common `GPT` settings:
+- `Model` (e.g. `gpt-5.2`)
+- `VisionModel` (e.g. `gpt-4o`, used for image analysis)
+- `Prompt` (Completion mode only)
+- `MaxTokens`, `Temperature`, `TopP`
+- `ChunkSize`, `ClosestMatchLimit` (embedding behavior)
+- `MaxChatHistoryLength` (Discord chat history limit)
+- `LearningPersonalityPrompt` (Discord infobot style)
+- `EmbedFilenames` / `EmbedDirectoryNames` (arrays; use `GPT__EMBEDFILENAMES__0`, etc.)
+
+Environment variable equivalents use double underscores:
 
 ```bash
-OPENAI__APIKEY="sk-your-apikey-here" GPT__MODE="Completion" GPT__PROMPT="generate a hello world python script" gpt > hello.py
+OPENAI__APIKEY="sk-your-apikey-here" \
+GPT__MODE="Completion" \
+GPT__PROMPT="generate a hello world python script" \
+GPT__MODEL="gpt-5.2" \
+GPT__VISIONMODEL="gpt-4o" \
+gpt > hello.py
 ```
 
-Since this is a .NET 10 standalone console application, you won't need to worry about installing the .NET CLI or runtime in your environment.
+Discord bot example:
+
+```bash
+OPENAI__APIKEY="sk-your-apikey-here" \
+GPT__MODE="Discord" \
+GPT__BOTTOKEN="your-discord-bot-token" \
+GPT__MODEL="gpt-5.2" \
+GPT__VISIONMODEL="gpt-4o" \
+gpt
+```
+
+## Discord bot setup
+
+1) Create a Discord application and bot token in the Discord Developer Portal.
+2) Enable required intents in the bot settings:
+   - Message Content (required)
+3) Generate an invite link (scopes `bot` + `applications.commands`). For basic functionality, grant:
+   - View Channels
+   - Send Messages
+   - Read Message History
+   - Add Reactions
+   - Attach Files
+   - Use Application Commands
+   If you want a quick generator, use:
+```
+https://discordutils.com/bot-invite-generator
+```
+4) Set config:
+   - `OPENAI__APIKEY`
+   - `GPT__MODE=Discord`
+   - `GPT__BOTTOKEN`
+   - Optional: `GPT__MODEL`, `GPT__VISIONMODEL`, `GPT__MAXTOKENS`
+5) Run `gpt`. The bot will register `/gptcli` commands on startup.
+
+Notes:
+- The bot stores per-channel state in `channels/<guild>_<id>/<channel>_<id>/`.
+- Use `/gptcli help` in Discord for available commands and reactions.
 
 ## Features
 
@@ -90,6 +162,12 @@ grep 'ERROR' log_file.txt | GPT__PROMPT="analyze these error logs and generate a
 ```bash
 curl http://url/documentation | sed 's/<[^>]\+>//g' | GPT__MODE="Embed" GPT__CHUNKSIZE=2048 gpt > docs.dat && GPT__MODE="Chat" GPT__EMBEDFILENAMES__0=docs.dat gpt
 ```
+
+## Command-line modes
+
+- `gpt` (default) uses `GPT:Mode` (Completion/Chat/Embed/Discord).
+- `gpt chat` forces Chat mode (overrides config mode).
+- Piped input in Completion mode is treated as the “source text” and the prompt is applied to it.
 With GPT-CLI, the possibilities are limited only by your imagination and ability to prompt and string together commands.
 
 I hope this tool will empower you to integrate GPT into your workflow, streamline your tasks, and unleash your creativity.
