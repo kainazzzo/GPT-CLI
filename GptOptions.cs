@@ -10,7 +10,7 @@ public record GptOptions
 
     public string Model { get; set; } = "gpt-5.2";
 
-    public string VisionModel { get; set; } = "gpt-4o";
+    public string VisionModel { get; set; } = "gpt-5.2-nano";
 
     public int? MaxTokens { get; set; } = 64000;
 

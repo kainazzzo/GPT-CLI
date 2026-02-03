@@ -25,7 +25,7 @@ Create an `appsettings.json` in the working directory:
     "Mode": "Completion",
     "Prompt": "generate a hello world python script",
     "Model": "gpt-5.2",
-    "VisionModel": "gpt-4o",
+    "VisionModel": "gpt-5.2-nano",
     "MaxTokens": 64000,
     "ChunkSize": 1536,
     "MaxChatHistoryLength": 4096,
@@ -43,7 +43,7 @@ Notes:
 
 Common `GPT` settings:
 - `Model` (e.g. `gpt-5.2`)
-- `VisionModel` (e.g. `gpt-4o`, used for image analysis)
+- `VisionModel` (e.g. `gpt-5.2-nano`, used for image analysis)
 - `Prompt` (Completion mode only)
 - `MaxTokens`, `Temperature`, `TopP`
 - `ChunkSize`, `ClosestMatchLimit` (embedding behavior)
@@ -58,7 +58,7 @@ OPENAI__APIKEY="sk-your-apikey-here" \
 GPT__MODE="Completion" \
 GPT__PROMPT="generate a hello world python script" \
 GPT__MODEL="gpt-5.2" \
-GPT__VISIONMODEL="gpt-4o" \
+GPT__VISIONMODEL="gpt-5.2-nano" \
 gpt > hello.py
 ```
 
@@ -69,7 +69,7 @@ OPENAI__APIKEY="sk-your-apikey-here" \
 GPT__MODE="Discord" \
 GPT__BOTTOKEN="your-discord-bot-token" \
 GPT__MODEL="gpt-5.2" \
-GPT__VISIONMODEL="gpt-4o" \
+GPT__VISIONMODEL="gpt-5.2-nano" \
 gpt
 ```
 
