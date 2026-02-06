@@ -56,6 +56,9 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 
         [JsonPropertyName("casino-balances")]
         public Dictionary<ulong, decimal> CasinoBalances { get; set; }
+
+        [JsonPropertyName("welcome-state")]
+        public WelcomeState Welcome { get; set; }
     }
 
     public record ChannelOptions
@@ -77,6 +80,66 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 
         [JsonPropertyName("casino-enabled")]
         public bool CasinoEnabled { get; set; }
+    }
+
+    public record WelcomeState
+    {
+        [JsonPropertyName("enabled")]
+        public bool Enabled { get; set; }
+
+        [JsonPropertyName("welcome-channel-id")]
+        public ulong? WelcomeChannelId { get; set; }
+
+        [JsonPropertyName("welcome-role-id")]
+        public ulong? WelcomeRoleId { get; set; }
+
+        [JsonPropertyName("require-onboarding")]
+        public bool RequireOnboarding { get; set; }
+
+        [JsonPropertyName("rules-message-id")]
+        public ulong? RulesMessageId { get; set; }
+
+        [JsonPropertyName("rules")]
+        public List<WelcomeRule> Rules { get; set; } = new();
+
+        [JsonPropertyName("validations")]
+        public List<WelcomeValidationRule> Validations { get; set; } = new();
+
+        [JsonPropertyName("users")]
+        public Dictionary<ulong, WelcomeUserState> Users { get; set; } = new();
+    }
+
+    public record WelcomeRule
+    {
+        [JsonPropertyName("id")]
+        public string Id { get; set; }
+
+        [JsonPropertyName("text")]
+        public string Text { get; set; }
+    }
+
+    public record WelcomeValidationRule
+    {
+        [JsonPropertyName("id")]
+        public string Id { get; set; }
+
+        [JsonPropertyName("type")]
+        public string Type { get; set; }
+
+        [JsonPropertyName("value")]
+        public string Value { get; set; }
+    }
+
+    public record WelcomeUserState
+    {
+        [JsonPropertyName("completed")]
+        public bool Completed { get; set; }
+
+        [JsonPropertyName("completed-validations")]
+        public HashSet<string> CompletedValidations { get; set; } = new();
+
+        [JsonPropertyName("last-nudge-utc")]
+        public DateTime? LastNudgeUtc { get; set; }
     }
 
 
@@ -1256,7 +1319,8 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
             {
                 LearningPersonalityPrompt = DefaultParameters.LearningPersonalityPrompt
             },
-            CasinoBalances = new()
+            CasinoBalances = new(),
+            Welcome = new()
         };
     }
 
