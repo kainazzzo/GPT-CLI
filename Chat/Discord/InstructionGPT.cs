@@ -53,6 +53,9 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 
         [JsonPropertyName("options")]
         public ChannelOptions Options { get; set; }
+
+        [JsonPropertyName("casino-balances")]
+        public Dictionary<ulong, decimal> CasinoBalances { get; set; }
     }
 
     public record ChannelOptions
@@ -1252,7 +1255,8 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
             Options = new()
             {
                 LearningPersonalityPrompt = DefaultParameters.LearningPersonalityPrompt
-            }
+            },
+            CasinoBalances = new()
         };
     }
 

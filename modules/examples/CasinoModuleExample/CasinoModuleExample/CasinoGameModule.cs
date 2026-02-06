@@ -20,7 +20,8 @@ public sealed class CasinoGameModule : FeatureModuleBase
 
     private static readonly string DealerSystemPrompt =
         "You are a friendly casino dealer. Use the provided game results verbatim. " +
-        "Keep the reply short (1-3 sentences), upbeat, and clear. Do not change any numbers.";
+        "Keep the reply short (1-3 sentences), upbeat, and clear. Do not change any numbers. " +
+        "If balance or leaderboard details are provided, repeat them clearly.";
 
     private static readonly string[] SlotSymbols = { "🍒", "🍋", "🔔", "7️⃣", "🍀" };
 
@@ -105,24 +106,7 @@ public sealed class CasinoGameModule : FeatureModuleBase
             return;
         }
 
-        if (request.Game == GameType.Help)
-        {
-            var response = BuildHelpText();
-            await message.Channel.SendMessageAsync(response);
-            await context.Host.SaveCachedChannelStateAsync(message.Channel.Id);
-            return;
-        }
-
-        if (request.Game == GameType.Status)
-        {
-            var status = channel.Options.CasinoEnabled ? "enabled" : "disabled";
-            var response = $"Casino mode is {status} for this channel.";
-            await message.Channel.SendMessageAsync(response);
-            await context.Host.SaveCachedChannelStateAsync(message.Channel.Id);
-            return;
-        }
-
-        var result = ExecuteGame(request, channel.Options.CasinoEnabled);
+        var result = ExecuteGame(context, channel, message.Author.Id, request);
         var responseText = await BuildDealerResponseAsync(channel, result);
         if (string.IsNullOrWhiteSpace(responseText))
         {
@@ -192,7 +176,25 @@ public sealed class CasinoGameModule : FeatureModuleBase
                     .WithType(ApplicationCommandOptionType.SubCommand)
                     .AddOption(new SlashCommandOptionBuilder().WithName("bet")
                         .WithDescription("Bet amount")
-                        .WithType(ApplicationCommandOptionType.Number))
+                        .WithType(ApplicationCommandOptionType.Number)),
+                new SlashCommandOptionBuilder().WithName("buy")
+                    .WithDescription("Purchase casino credits")
+                    .WithType(ApplicationCommandOptionType.SubCommand)
+                    .AddOption(new SlashCommandOptionBuilder().WithName("amount")
+                        .WithDescription("Amount to purchase")
+                        .WithType(ApplicationCommandOptionType.Number)),
+                new SlashCommandOptionBuilder().WithName("wallet")
+                    .WithDescription("Check a wallet balance")
+                    .WithType(ApplicationCommandOptionType.SubCommand)
+                    .AddOption(new SlashCommandOptionBuilder().WithName("user")
+                        .WithDescription("User to check")
+                        .WithType(ApplicationCommandOptionType.User)),
+                new SlashCommandOptionBuilder().WithName("leaderboard")
+                    .WithDescription("Show the richest players")
+                    .WithType(ApplicationCommandOptionType.SubCommand)
+                    .AddOption(new SlashCommandOptionBuilder().WithName("top")
+                        .WithDescription("How many to show (1-10)")
+                        .WithType(ApplicationCommandOptionType.Integer))
             }
         };
     }
@@ -260,6 +262,18 @@ public sealed class CasinoGameModule : FeatureModuleBase
             case "bj":
                 gameType = GameType.Blackjack;
                 return true;
+            case "buy":
+            case "purchase":
+                gameType = GameType.Purchase;
+                return true;
+            case "wallet":
+            case "balance":
+                gameType = GameType.Wallet;
+                return true;
+            case "leaderboard":
+            case "top":
+                gameType = GameType.Leaderboard;
+                return true;
             default:
                 gameType = GameType.Help;
                 return false;
@@ -277,7 +291,7 @@ public sealed class CasinoGameModule : FeatureModuleBase
         var channelState = context.Host.GetOrCreateChannelState(channel);
         if (!context.Host.IsChannelGuildMatch(channelState, channel, "slash-command"))
         {
-            await InstructionGPT.SendEphemeralResponseAsync(command,
+            await SendEphemeralResponseAsync(command,
                 "Guild mismatch detected for cached channel data. Refusing to apply command.");
             return;
         }
@@ -293,7 +307,7 @@ public sealed class CasinoGameModule : FeatureModuleBase
             responses.Add("Provide true or false for casino setting.");
         }
 
-        await InstructionGPT.SendEphemeralResponseAsync(command, string.Join("\n", responses));
+        await SendEphemeralResponseAsync(command, string.Join("\n", responses));
         await context.Host.SaveCachedChannelStateAsync(channel.Id);
     }
 
@@ -308,7 +322,7 @@ public sealed class CasinoGameModule : FeatureModuleBase
         var channelState = context.Host.GetOrCreateChannelState(channel);
         if (!context.Host.IsChannelGuildMatch(channelState, channel, "slash-command"))
         {
-            await InstructionGPT.SendEphemeralResponseAsync(command,
+            await SendEphemeralResponseAsync(command,
                 "Guild mismatch detected for cached channel data. Refusing to apply command.");
             return;
         }
@@ -316,38 +330,61 @@ public sealed class CasinoGameModule : FeatureModuleBase
         var subOption = option.Options?.FirstOrDefault();
         if (subOption == null)
         {
-            await InstructionGPT.SendEphemeralResponseAsync(command, "Specify a casino command.");
+            await SendEphemeralResponseAsync(command, "Specify a casino command.");
             return;
         }
 
         if (!TryParseGameType(subOption.Name, out var gameType))
         {
-            await InstructionGPT.SendEphemeralResponseAsync(command, "Unknown casino command.");
-            return;
-        }
-
-        if (gameType == GameType.Status)
-        {
-            var status = channelState.Options.CasinoEnabled ? "enabled" : "disabled";
-            await InstructionGPT.SendEphemeralResponseAsync(command, $"Casino mode is {status} for this channel.");
-            return;
-        }
-
-        if (gameType == GameType.Help)
-        {
-            await InstructionGPT.SendEphemeralResponseAsync(command, BuildHelpText());
+            await SendEphemeralResponseAsync(command, "Unknown casino command.");
             return;
         }
 
         var request = BuildRequestFromSlash(gameType, subOption);
-        var result = ExecuteGame(request, channelState.Options.CasinoEnabled);
+        var result = ExecuteGame(context, channelState, command.User.Id, request);
         var response = await BuildDealerResponseAsync(channelState, result);
         if (string.IsNullOrWhiteSpace(response))
         {
             response = BuildFallbackResponse(result);
         }
 
-        await InstructionGPT.SendEphemeralResponseAsync(command, response);
+        await SendEphemeralResponseAsync(command, response);
+        await context.Host.SaveCachedChannelStateAsync(channel.Id);
+    }
+
+    private static async Task SendEphemeralResponseAsync(SocketSlashCommand command, string content)
+    {
+        if (string.IsNullOrWhiteSpace(content))
+        {
+            content = "No response content.";
+        }
+
+        const int maxLength = 2000;
+        var chunks = new List<string>();
+        for (var i = 0; i < content.Length; i += maxLength)
+        {
+            var size = Math.Min(maxLength, content.Length - i);
+            chunks.Add(content.Substring(i, size));
+        }
+
+        if (chunks.Count == 0)
+        {
+            chunks.Add(content);
+        }
+
+        if (!command.HasResponded)
+        {
+            await command.RespondAsync(chunks[0], ephemeral: true);
+        }
+        else
+        {
+            await command.FollowupAsync(chunks[0], ephemeral: true);
+        }
+
+        for (var i = 1; i < chunks.Count; i++)
+        {
+            await command.FollowupAsync(chunks[i], ephemeral: true);
+        }
     }
 
     private static GameRequest BuildRequestFromSlash(GameType gameType, SocketSlashCommandDataOption subOption)
@@ -360,23 +397,34 @@ public sealed class CasinoGameModule : FeatureModuleBase
                 continue;
             }
 
+            if (option.Value is SocketUser user)
+            {
+                args.Add(user.Id.ToString(CultureInfo.InvariantCulture));
+                continue;
+            }
+
             args.Add(option.Value.ToString());
         }
 
         return new GameRequest(gameType, args.ToArray());
     }
 
-    private static GameResult ExecuteGame(GameRequest request, bool casinoEnabled)
+    private static GameResult ExecuteGame(DiscordModuleContext context, InstructionGPT.ChannelState channelState, ulong userId, GameRequest request)
     {
+        channelState.CasinoBalances ??= new Dictionary<ulong, decimal>();
+        var casinoEnabled = channelState.Options.CasinoEnabled;
         return request.Game switch
         {
             GameType.Help => BuildHelpResult(),
             GameType.Status => BuildStatusResult(casinoEnabled),
-            GameType.Coinflip => RunCoinflip(request.Args),
-            GameType.Dice => RunDice(request.Args),
-            GameType.Roulette => RunRoulette(request.Args),
-            GameType.Slots => RunSlots(request.Args),
-            GameType.Blackjack => RunBlackjack(request.Args),
+            GameType.Purchase => RunPurchase(channelState, userId, request.Args),
+            GameType.Wallet => RunWallet(context, channelState, userId, request.Args),
+            GameType.Leaderboard => RunLeaderboard(context, channelState, request.Args),
+            GameType.Coinflip => RunWithWallet(channelState, userId, request.Args, RunCoinflip, "Coinflip"),
+            GameType.Dice => RunWithWallet(channelState, userId, request.Args, RunDice, "Dice"),
+            GameType.Roulette => RunWithWallet(channelState, userId, request.Args, RunRoulette, "Roulette"),
+            GameType.Slots => RunWithWallet(channelState, userId, request.Args, RunSlots, "Slots"),
+            GameType.Blackjack => RunWithWallet(channelState, userId, request.Args, RunBlackjack, "Blackjack"),
             _ => BuildHelpResult()
         };
     }
@@ -421,6 +469,90 @@ public sealed class CasinoGameModule : FeatureModuleBase
         var net = ComputeNet(guess != null, guess == flip, bet, bet);
         var details = guess == null ? "No guess placed." : $"Guess: {guess}.";
         return new GameResult("Coinflip", outcome, bet, net, details);
+    }
+
+    private static GameResult RunPurchase(InstructionGPT.ChannelState channelState, ulong userId, string[] args)
+    {
+        var amount = 0m;
+        if (args.Length > 0 && TryParseDecimal(args[0], out var parsed) && parsed > 0)
+        {
+            amount = parsed;
+        }
+        if (amount <= 0)
+        {
+            return new GameResult("Purchase", "No purchase amount provided.", null, null, "Provide an amount like: !casino buy 100.");
+        }
+
+        var balance = GetBalance(channelState, userId);
+        var updated = balance + amount;
+        SetBalance(channelState, userId, updated);
+
+        var details = $"Purchased {amount:0.##}.";
+        return new GameResult("Purchase", "Purchase completed.", amount, null, details, updated);
+    }
+
+    private static GameResult RunWallet(DiscordModuleContext context, InstructionGPT.ChannelState channelState, ulong requesterId, string[] args)
+    {
+        var targetId = requesterId;
+        if (args.Length > 0 && TryParseUserId(args[0], out var parsed))
+        {
+            targetId = parsed;
+        }
+
+        var balance = GetBalance(channelState, targetId);
+        var name = ResolveUserDisplayName(context, channelState, targetId);
+        var details = $"User: {name}. Balance: {balance:0.##}.";
+        return new GameResult("Wallet", "Wallet balance check.", null, null, details, balance);
+    }
+
+    private static GameResult RunLeaderboard(DiscordModuleContext context, InstructionGPT.ChannelState channelState, string[] args)
+    {
+        var count = ParseTopCount(args);
+        if (channelState.CasinoBalances == null || channelState.CasinoBalances.Count == 0)
+        {
+            return new GameResult("Leaderboard", "No balances yet.", null, null, "No one has purchased credits yet.");
+        }
+
+        var lines = channelState.CasinoBalances
+            .OrderByDescending(pair => pair.Value)
+            .ThenBy(pair => pair.Key)
+            .Take(count)
+            .Select((pair, index) =>
+            {
+                var name = ResolveUserDisplayName(context, channelState, pair.Key);
+                return $"{index + 1}. {name} - {pair.Value:0.##}";
+            })
+            .ToList();
+
+        var details = string.Join("\n", lines);
+        return new GameResult("Leaderboard", $"Top {lines.Count} balances.", null, null, details);
+    }
+
+    private static GameResult RunWithWallet(
+        InstructionGPT.ChannelState channelState,
+        ulong userId,
+        string[] args,
+        Func<string[], GameResult> runner,
+        string gameName)
+    {
+        var (requiresBet, bet) = GetBetRequirement(gameName, args);
+        var balance = GetBalance(channelState, userId);
+
+        if (requiresBet && balance < bet)
+        {
+            var details = $"Balance: {balance:0.##}. Need {bet:0.##} to place that bet.";
+            return new GameResult(gameName, "Insufficient funds.", bet, null, details, balance);
+        }
+
+        var result = runner(args);
+        if (result.Net.HasValue && result.Bet.HasValue)
+        {
+            var updated = balance + result.Net.Value;
+            SetBalance(channelState, userId, updated);
+            return result with { Balance = updated };
+        }
+
+        return result with { Balance = balance };
     }
 
     private static GameResult RunDice(string[] args)
@@ -606,18 +738,174 @@ public sealed class CasinoGameModule : FeatureModuleBase
             "- /gptcli set casino true|false (enable or disable message commands)",
             "- /gptcli casino help",
             "- /gptcli casino status",
+            "- /gptcli casino buy [amount]",
+            "- /gptcli casino wallet [user]",
+            "- /gptcli casino leaderboard [top]",
             "- /gptcli casino coinflip [guess] [bet]",
             "- /gptcli casino dice [sides] [guess] [bet]",
             "- /gptcli casino roulette [red|black|number] [bet]",
             "- /gptcli casino slots [bet]",
             "- /gptcli casino blackjack [bet]",
             "Message mode (when enabled):",
+            "- !casino buy 100",
+            "- !casino wallet",
+            "- !casino leaderboard 5",
             "- !casino coinflip heads 5",
             "- !casino dice 6 3 2",
             "- !casino roulette red 10",
             "- !casino slots 2",
             "- !casino blackjack 5"
         });
+    }
+
+    private static decimal GetBalance(InstructionGPT.ChannelState channelState, ulong userId)
+    {
+        channelState.CasinoBalances ??= new Dictionary<ulong, decimal>();
+        return channelState.CasinoBalances.TryGetValue(userId, out var balance) ? balance : 0m;
+    }
+
+    private static void SetBalance(InstructionGPT.ChannelState channelState, ulong userId, decimal balance)
+    {
+        channelState.CasinoBalances ??= new Dictionary<ulong, decimal>();
+        channelState.CasinoBalances[userId] = Math.Max(0m, balance);
+    }
+
+    private static (bool RequiresBet, decimal Bet) GetBetRequirement(string gameName, string[] args)
+    {
+        switch (gameName)
+        {
+            case "Coinflip":
+                return GetCoinflipBet(args);
+            case "Dice":
+                return GetDiceBet(args);
+            case "Roulette":
+                return GetRouletteBet(args);
+            case "Slots":
+            case "Blackjack":
+                var bet = args.Length > 0 ? ParseBet(args[0]) : DefaultBet;
+                return (true, bet);
+            default:
+                return (false, 0m);
+        }
+    }
+
+    private static (bool RequiresBet, decimal Bet) GetCoinflipBet(string[] args)
+    {
+        string guess = null;
+        var bet = DefaultBet;
+        foreach (var arg in args)
+        {
+            var normalized = NormalizeHeadsTails(arg);
+            if (normalized != null)
+            {
+                guess = normalized;
+                continue;
+            }
+
+            if (TryParseDecimal(arg, out var parsedBet) && parsedBet > 0)
+            {
+                bet = parsedBet;
+            }
+        }
+
+        return (guess != null, bet);
+    }
+
+    private static (bool RequiresBet, decimal Bet) GetDiceBet(string[] args)
+    {
+        var guess = (int?)null;
+        var bet = DefaultBet;
+        var numbers = new List<int>();
+        foreach (var arg in args)
+        {
+            if (TryParseInt(arg, out var parsed))
+            {
+                numbers.Add(parsed);
+                continue;
+            }
+
+            if (TryParseDecimal(arg, out var parsedBet) && parsedBet > 0)
+            {
+                bet = parsedBet;
+            }
+        }
+
+        if (numbers.Count >= 2)
+        {
+            guess = numbers[1];
+            if (numbers.Count >= 3)
+            {
+                bet = numbers[2] > 0 ? numbers[2] : bet;
+            }
+        }
+        else if (numbers.Count == 1)
+        {
+            guess = numbers[0];
+        }
+
+        return (guess.HasValue, bet);
+    }
+
+    private static (bool RequiresBet, decimal Bet) GetRouletteBet(string[] args)
+    {
+        var bet = DefaultBet;
+        foreach (var arg in args)
+        {
+            if (TryParseDecimal(arg, out var parsedBet) && parsedBet > 0)
+            {
+                bet = parsedBet;
+            }
+        }
+
+        return (true, bet);
+    }
+
+    private static bool TryParseUserId(string token, out ulong userId)
+    {
+        userId = 0;
+        if (string.IsNullOrWhiteSpace(token))
+        {
+            return false;
+        }
+
+        var trimmed = token.Trim();
+        if (trimmed.StartsWith("<@") && trimmed.EndsWith(">"))
+        {
+            trimmed = trimmed.Trim('<', '>', '@', '!');
+        }
+
+        return ulong.TryParse(trimmed, NumberStyles.Integer, CultureInfo.InvariantCulture, out userId);
+    }
+
+    private static int ParseTopCount(string[] args)
+    {
+        if (args.Length == 0)
+        {
+            return 5;
+        }
+
+        if (TryParseInt(args[0], out var parsed))
+        {
+            return Clamp(parsed, 1, 10);
+        }
+
+        return 5;
+    }
+
+    private static string ResolveUserDisplayName(DiscordModuleContext context, InstructionGPT.ChannelState channelState, ulong userId)
+    {
+        var channel = context.Client.GetChannel(channelState.ChannelId);
+        if (channel is SocketGuildChannel guildChannel)
+        {
+            var user = guildChannel.Guild.GetUser(userId);
+            if (user != null)
+            {
+                return user.Nickname ?? user.Username;
+            }
+        }
+
+        var fallback = context.Client.GetUser(userId);
+        return fallback?.Username ?? $"User {userId}";
     }
 
     private static string NormalizeHeadsTails(string value)
@@ -753,6 +1041,11 @@ public sealed class CasinoGameModule : FeatureModuleBase
             lines.Add($"Details: {result.Details}");
         }
 
+        if (result.Balance.HasValue)
+        {
+            lines.Add($"Balance: {result.Balance.Value:0.##}");
+        }
+
         return string.Join("\n", lines);
     }
 
@@ -776,6 +1069,11 @@ public sealed class CasinoGameModule : FeatureModuleBase
         if (!string.IsNullOrWhiteSpace(result.Details))
         {
             lines.Add(result.Details);
+        }
+
+        if (result.Balance.HasValue)
+        {
+            lines.Add($"Balance: {result.Balance.Value:0.##}");
         }
 
         return string.Join("\n", lines);
@@ -804,6 +1102,9 @@ public sealed class CasinoGameModule : FeatureModuleBase
     {
         Help,
         Status,
+        Purchase,
+        Wallet,
+        Leaderboard,
         Coinflip,
         Dice,
         Roulette,
@@ -813,7 +1114,7 @@ public sealed class CasinoGameModule : FeatureModuleBase
 
     private sealed record GameRequest(GameType Game, string[] Args);
 
-    private sealed record GameResult(string Game, string Outcome, decimal? Bet, decimal? Net, string Details);
+    private sealed record GameResult(string Game, string Outcome, decimal? Bet, decimal? Net, string Details, decimal? Balance = null);
 
     private sealed record Card(string Rank, string Suit, int Value)
     {

@@ -5,6 +5,8 @@
     <RootNamespace>GPT.CLI</RootNamespace>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>disable</Nullable>
+    <GenerateTargetFrameworkAttribute>false</GenerateTargetFrameworkAttribute>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <FileVersion>0.15.5</FileVersion>
     <AssemblyVersion>0.15.5</AssemblyVersion>
     <Version>0.15.5-beta</Version>

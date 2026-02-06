@@ -10,4 +10,4 @@ _gptcli_deploy_complete() {
   return 0
 }
 
-complete -F _gptcli_deploy_complete deploy.sh ./deploy.sh deploy
+complete -F _gptcli_deploy_complete deploy.sh ./deploy.sh ./deploy/deploy.sh deploy deploy/deploy.sh
