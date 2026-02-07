@@ -8,7 +8,7 @@ RUN --mount=type=cache,id=nuget,target=/root/.nuget/packages \
 
 COPY . .
 RUN --mount=type=cache,id=nuget,target=/root/.nuget/packages \
-    dotnet publish gpt.csproj -c Release -r linux-x64 -o /app/publish --self-contained true -p:PublishSingleFile=true --no-restore
+    dotnet publish gpt.csproj -c Release -r linux-x64 -o /app/publish --self-contained true -p:PublishSingleFile=true -p:GptSkipModuleDeploy=true --no-restore
 
 FROM redhat/ubi9
 WORKDIR /app

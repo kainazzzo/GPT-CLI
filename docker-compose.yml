@@ -8,3 +8,15 @@ services:
       - ./deploy/appsettings.json:/app/appsettings.json:ro
       - /usr/local/discord/channels:/app/channels
       - /usr/local/discord/modules:/app/modules
+  builder:
+    image: mcr.microsoft.com/dotnet/sdk:10.0
+    working_dir: /src
+    volumes:
+      - ./:/src
+      - /usr/local/discord/modules:/usr/local/discord/modules
+    command: >-
+      bash -lc "dotnet publish gpt.csproj -c Release -r linux-x64
+      --self-contained true -p:PublishSingleFile=true
+      -o /tmp/gpt-publish"
+    profiles:
+      - manual

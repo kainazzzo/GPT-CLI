@@ -1238,7 +1238,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
         await SaveCachedChannelState(message.Channel.Id);
     }
 
-    internal static string BuildDiscordMessageLink(ChannelState channel, ulong messageId)
+    public static string BuildDiscordMessageLink(ChannelState channel, ulong messageId)
     {
         if (channel == null || channel.GuildId == 0 || channel.ChannelId == 0 || messageId == 0)
         {

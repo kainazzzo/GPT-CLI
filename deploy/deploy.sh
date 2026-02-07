@@ -20,12 +20,15 @@ fi
 
 case "${1:-}" in
   build)
+    docker compose run --rm builder
     docker compose build
     ;;
   up|"")
+    docker compose run --rm builder
     docker compose up -d
     ;;
   restart)
+    docker compose run --rm builder
     docker compose build
     docker compose up -d
     ;;
