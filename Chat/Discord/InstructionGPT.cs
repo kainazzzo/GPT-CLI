@@ -1,4 +1,5 @@
 ﻿using System.Collections.Concurrent;
+using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Text.Json;
@@ -486,15 +487,34 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 
         var builtCommand = command.Build();
 
-        if (DefaultParameters.DiscordGuildId.HasValue)
+        var forceGlobalCommands = string.Equals(
+            Configuration["GPT:ForceGlobalCommands"],
+            "true",
+            StringComparison.OrdinalIgnoreCase);
+
+        // Discord global slash command updates are not immediate. If the bot is only in a single guild
+        // and no explicit guild id is configured, prefer registering guild commands for fast iteration.
+        var effectiveGuildId = DefaultParameters.DiscordGuildId;
+        if (!forceGlobalCommands && !effectiveGuildId.HasValue)
         {
-            var guild = await restClient.GetGuildAsync(DefaultParameters.DiscordGuildId.Value);
+            var guilds = Client.Guilds;
+            if (guilds is { Count: 1 })
+            {
+                effectiveGuildId = guilds.First().Id;
+                await Console.Out.WriteLineAsync(
+                    $"No GPT:DiscordGuildId configured; registering guild commands for single guild {effectiveGuildId.Value} (set GPT:ForceGlobalCommands=true to force global).");
+            }
+        }
+
+        if (effectiveGuildId.HasValue)
+        {
+            var guild = await restClient.GetGuildAsync(effectiveGuildId.Value);
             if (guild == null)
             {
-                throw new Exception($"Guild {DefaultParameters.DiscordGuildId.Value} not found.");
+                throw new Exception($"Guild {effectiveGuildId.Value} not found.");
             }
 
-            await Console.Out.WriteLineAsync($"Overwriting guild commands for {DefaultParameters.DiscordGuildId.Value}...");
+            await Console.Out.WriteLineAsync($"Overwriting guild commands for {effectiveGuildId.Value}...");
             // Ensure updates always replace existing guild commands.
             await guild.BulkOverwriteApplicationCommandsAsync(new[] { builtCommand });
             await DumpGuildCommands(guild);
@@ -1030,6 +1050,21 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
         var isTagged = message.MentionedUsers.Any(user => user.Id == Client.CurrentUser.Id);
         var isDirectMessage = message.Channel is IPrivateChannel;
         var shouldRespond = isTagged || isDirectMessage;
+
+        // Mention-based settings tool (LLM) for /gptcli set ... parity.
+        if (shouldRespond && !string.IsNullOrWhiteSpace(message.Content))
+        {
+            var stripped = StripBotMentions(message.Content, Client.CurrentUser.Id).Trim();
+            if (LooksLikeSettingsRequest(stripped))
+            {
+                var handled = await TryHandleMentionedSetToolAsync(message, channel, stripped);
+                if (handled)
+                {
+                    await SaveCachedChannelState(message.Channel.Id);
+                    return;
+                }
+            }
+        }
        
         if (channel.InstructionChat.ChatBotState.PrimeDirectives.Count != _defaultPrimeDirective.Count || channel.InstructionChat.ChatBotState.PrimeDirectives[0].Content != _defaultPrimeDirective[0].Content)
         {
@@ -1038,6 +1073,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 
         if (!channel.Options.Enabled)
         {
+            // When disabled, only allow mention-based settings changes (handled above).
             return;
         }
 
@@ -1242,6 +1278,325 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
         }
 
         await SaveCachedChannelState(message.Channel.Id);
+    }
+
+    private static bool LooksLikeSettingsRequest(string content)
+    {
+        if (string.IsNullOrWhiteSpace(content))
+        {
+            return false;
+        }
+
+        var text = content.Trim().ToLowerInvariant();
+        if (text.StartsWith("set ", StringComparison.Ordinal) || text.StartsWith("settings", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        // Keep this conservative; we only want to intercept messages that are very likely "settings".
+        // Word-boundary-ish checks without regex.
+        return text.Contains("mute", StringComparison.Ordinal)
+               || text.Contains("unmute", StringComparison.Ordinal)
+               || text.Contains("enable", StringComparison.Ordinal)
+               || text.Contains("disable", StringComparison.Ordinal)
+               || text.Contains("max tokens", StringComparison.Ordinal)
+               || text.Contains("chat history", StringComparison.Ordinal)
+               || text.Contains("history length", StringComparison.Ordinal)
+               || text.Contains("response mode", StringComparison.Ordinal)
+               || text.Contains("embed mode", StringComparison.Ordinal)
+               || text.Contains("model", StringComparison.Ordinal)
+               || text.Contains("casino", StringComparison.Ordinal);
+    }
+
+    private static string StripBotMentions(string content, ulong botUserId)
+    {
+        if (string.IsNullOrWhiteSpace(content))
+        {
+            return string.Empty;
+        }
+
+        // Discord user mentions appear as <@id> or <@!id>
+        var id = botUserId.ToString(CultureInfo.InvariantCulture);
+        return content
+            .Replace($"<@{id}>", string.Empty, StringComparison.OrdinalIgnoreCase)
+            .Replace($"<@!{id}>", string.Empty, StringComparison.OrdinalIgnoreCase)
+            .Trim();
+    }
+
+    private async Task<bool> TryHandleMentionedSetToolAsync(SocketMessage message, ChannelState channelState, string strippedContent)
+    {
+        // Only run for mentions/DMs (caller responsibility).
+        // Return false to allow the normal chat response path.
+
+        var allowedSetOptions = BuildAllowedSetOptionList();
+
+        var system = string.Join("\n", new[]
+        {
+            "You translate a user's natural language request into GPT-CLI Discord /gptcli set changes.",
+            "Return STRICT JSON only, no markdown, no extra keys.",
+            "Schema: {\"actions\":[{\"name\":\"<option>\",\"value\":<bool|number|string>}]}.",
+            "Only output actions for options explicitly requested by the user.",
+            "If the user isn't requesting settings changes, return {\"actions\":[]}.",
+            "",
+            "Valid option names and types:",
+            "- enabled: boolean",
+            "- mute: boolean",
+            "- response-mode: string (All|Matches)",
+            "- embed-mode: string (Explicit|All)",
+            "- max-chat-history-length: integer (>=100)",
+            "- max-tokens: integer (>=50)",
+            "- model: string",
+            "- plus module toggles: boolean options (names listed below)",
+            "",
+            "Module toggle option names:",
+            string.IsNullOrWhiteSpace(allowedSetOptions) ? "(none)" : allowedSetOptions
+        });
+
+        var request = new ChatCompletionCreateRequest
+        {
+            Model = channelState.InstructionChat.ChatBotState.Parameters.Model,
+            Temperature = 0,
+            MaxTokens = 400,
+            Messages = new List<ChatMessage>
+            {
+                new(StaticValues.ChatMessageRoles.System, system),
+                new(StaticValues.ChatMessageRoles.User, strippedContent)
+            }
+        };
+
+        var response = await OpenAILogic.CreateChatCompletionAsync(request);
+        if (!response.Successful)
+        {
+            await Console.Out.WriteLineAsync($"LLM set-tool failed: {response.Error?.Code} {response.Error?.Message}");
+            return false;
+        }
+
+        var content = response.Choices.FirstOrDefault()?.Message?.Content;
+        if (!TryParseLlmSetToolResult(content, out var result) || result.Actions.Count == 0)
+        {
+            return false;
+        }
+
+        var applied = ApplySetToolActions(channelState, result.Actions);
+        if (applied.Count == 0)
+        {
+            return false;
+        }
+
+        await message.Channel.SendMessageAsync($"<@{message.Author.Id}> Updated settings:\n{string.Join("\n", applied)}");
+        return true;
+    }
+
+    private string BuildAllowedSetOptionList()
+    {
+        // Only module-set options (base /gptcli set options are listed in the system prompt).
+        if (_modulePipeline == null)
+        {
+            return string.Empty;
+        }
+
+        try
+        {
+            var contributions = _modulePipeline.GetSlashCommandContributions();
+            var names = contributions
+                .Where(c => c != null
+                            && string.Equals(c.TargetOption, "set", StringComparison.OrdinalIgnoreCase)
+                            && c.Option != null
+                            && !string.IsNullOrWhiteSpace(c.Option.Name))
+                .Select(c => c.Option.Name.Trim())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            return names.Count == 0 ? string.Empty : string.Join(", ", names);
+        }
+        catch
+        {
+            return string.Empty;
+        }
+    }
+
+    private sealed class LlmSetToolResult
+    {
+        public List<LlmSetToolAction> Actions { get; set; } = new();
+    }
+
+    private sealed class LlmSetToolAction
+    {
+        public string Name { get; set; }
+        public JsonElement Value { get; set; }
+    }
+
+    private static bool TryParseLlmSetToolResult(string raw, out LlmSetToolResult result)
+    {
+        result = null;
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return false;
+        }
+
+        var content = raw.Trim();
+        if (content.StartsWith("```", StringComparison.Ordinal))
+        {
+            var firstNewline = content.IndexOf('\n');
+            if (firstNewline >= 0)
+            {
+                content = content[(firstNewline + 1)..];
+            }
+
+            if (content.EndsWith("```", StringComparison.Ordinal))
+            {
+                content = content[..^3];
+            }
+
+            content = content.Trim();
+        }
+
+        var start = content.IndexOf('{');
+        var end = content.LastIndexOf('}');
+        if (start < 0 || end <= start)
+        {
+            return false;
+        }
+
+        var json = content[start..(end + 1)];
+        try
+        {
+            result = JsonSerializer.Deserialize<LlmSetToolResult>(
+                json,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+            return result != null;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private List<string> ApplySetToolActions(ChannelState channelState, IReadOnlyList<LlmSetToolAction> actions)
+    {
+        var applied = new List<string>();
+        foreach (var action in actions)
+        {
+            var name = (action.Name ?? string.Empty).Trim().ToLowerInvariant();
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                continue;
+            }
+
+            switch (name)
+            {
+                case "enabled":
+                    if (action.Value.ValueKind == JsonValueKind.True || action.Value.ValueKind == JsonValueKind.False)
+                    {
+                        var enabled = action.Value.GetBoolean();
+                        channelState.Options.Enabled = enabled;
+                        applied.Add($"- enabled = {enabled.ToString().ToLowerInvariant()}");
+                    }
+                    break;
+                case "mute":
+                    if (action.Value.ValueKind == JsonValueKind.True || action.Value.ValueKind == JsonValueKind.False)
+                    {
+                        var muted = action.Value.GetBoolean();
+                        channelState.Options.Muted = muted;
+                        applied.Add($"- mute = {muted.ToString().ToLowerInvariant()}");
+                    }
+                    break;
+                case "max-tokens":
+                    if (action.Value.TryGetInt32(out var maxTokens) && maxTokens >= 50)
+                    {
+                        channelState.InstructionChat.ChatBotState.Parameters.MaxTokens = maxTokens;
+                        applied.Add($"- max-tokens = {maxTokens}");
+                    }
+                    break;
+                case "max-chat-history-length":
+                    if (action.Value.TryGetInt32(out var maxHistory) && maxHistory >= 100)
+                    {
+                        channelState.InstructionChat.ChatBotState.Parameters.MaxChatHistoryLength = (uint)maxHistory;
+                        applied.Add($"- max-chat-history-length = {maxHistory}");
+                    }
+                    break;
+                case "model":
+                    if (action.Value.ValueKind == JsonValueKind.String)
+                    {
+                        var model = action.Value.GetString();
+                        if (!string.IsNullOrWhiteSpace(model))
+                        {
+                            channelState.InstructionChat.ChatBotState.Parameters.Model = model.Trim();
+                            applied.Add($"- model = {model.Trim()}");
+                        }
+                    }
+                    break;
+                case "response-mode":
+                    if (action.Value.ValueKind == JsonValueKind.String
+                        && Enum.TryParse<InstructionChatBot.ResponseMode>(action.Value.GetString(), true, out var responseMode))
+                    {
+                        channelState.InstructionChat.ChatBotState.ResponseMode = responseMode;
+                        applied.Add($"- response-mode = {responseMode}");
+                    }
+                    break;
+                case "embed-mode":
+                    if (action.Value.ValueKind == JsonValueKind.String
+                        && Enum.TryParse<InstructionChatBot.EmbedMode>(action.Value.GetString(), true, out var embedMode))
+                    {
+                        channelState.InstructionChat.ChatBotState.EmbedMode = embedMode;
+                        applied.Add($"- embed-mode = {embedMode}");
+                    }
+                    break;
+                default:
+                {
+                    // Best-effort module toggle: map "casino" -> Options.CasinoEnabled, etc.
+                    if (action.Value.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                    {
+                        var value = action.Value.GetBoolean();
+                        if (TryApplyBooleanOptionByName(channelState, name, value))
+                        {
+                            applied.Add($"- {name} = {value.ToString().ToLowerInvariant()}");
+                        }
+                    }
+
+                    break;
+                }
+            }
+        }
+
+        return applied;
+    }
+
+    private static bool TryApplyBooleanOptionByName(ChannelState channelState, string optionName, bool value)
+    {
+        if (channelState?.Options == null || string.IsNullOrWhiteSpace(optionName))
+        {
+            return false;
+        }
+
+        var options = channelState.Options;
+        var type = options.GetType();
+
+        static string ToPascal(string input)
+        {
+            var parts = input.Split(new[] { '-', '_', ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            return string.Concat(parts.Select(p => char.ToUpperInvariant(p[0]) + p.Substring(1)));
+        }
+
+        var baseName = ToPascal(optionName);
+        var candidates = new[]
+        {
+            baseName,
+            baseName + "Enabled"
+        };
+
+        foreach (var candidate in candidates)
+        {
+            var prop = type.GetProperty(candidate);
+            if (prop?.PropertyType == typeof(bool) && prop.CanWrite)
+            {
+                prop.SetValue(options, value);
+                return true;
+            }
+        }
+
+        return false;
     }
 
     public static string BuildDiscordMessageLink(ChannelState channel, ulong messageId)
@@ -3299,10 +3654,30 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
                             break;
                         }
 
+                        var report = _modulePipeline.DiscoveryReport;
+                        responses.Add($"ModulesPath: `{report?.ModulesPath ?? "unknown"}`");
+
+                        if (report?.FoundDlls is { Count: > 0 })
+                        {
+                            responses.Add($"DLLs found ({report.FoundDlls.Count}):");
+                            responses.AddRange(report.FoundDlls
+                                .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+                                .Select(path => $"- {Path.GetFileName(path)}"));
+                        }
+                        else
+                        {
+                            responses.Add("DLLs found: 0");
+                        }
+
                         var modules = _modulePipeline.Modules;
                         if (modules == null || modules.Count == 0)
                         {
                             responses.Add("No modules loaded.");
+                            if (report?.LoadErrors is { Count: > 0 })
+                            {
+                                responses.Add("Load errors:");
+                                responses.AddRange(report.LoadErrors.Take(20).Select(err => $"- {err}"));
+                            }
                             break;
                         }
 
@@ -3320,6 +3695,12 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
                             .ToList();
 
                         responses.Add($"Loaded modules ({modules.Count}):\n{string.Join("\n", lines)}");
+
+                        if (report?.LoadErrors is { Count: > 0 })
+                        {
+                            responses.Add("Load errors:");
+                            responses.AddRange(report.LoadErrors.Take(20).Select(err => $"- {err}"));
+                        }
                         break;
                     }
                     case "clear":

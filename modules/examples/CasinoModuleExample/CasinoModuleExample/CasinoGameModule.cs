@@ -123,60 +123,13 @@ public sealed class CasinoGameModule : FeatureModuleBase
         return new SlashCommandOptionBuilder
         {
             Name = "casino",
-            Description = "Casino game simulations",
+            Description = "Casino wallet and controls (gameplay uses !commands)",
             Type = ApplicationCommandOptionType.SubCommandGroup,
             Options = new()
             {
                 new SlashCommandOptionBuilder().WithName("help")
                     .WithDescription("Show casino help")
                     .WithType(ApplicationCommandOptionType.SubCommand),
-                new SlashCommandOptionBuilder().WithName("status")
-                    .WithDescription("Show casino mode status")
-                    .WithType(ApplicationCommandOptionType.SubCommand),
-                new SlashCommandOptionBuilder().WithName("coinflip")
-                    .WithDescription("Flip a coin")
-                    .WithType(ApplicationCommandOptionType.SubCommand)
-                    .AddOption(new SlashCommandOptionBuilder().WithName("guess")
-                        .WithDescription("heads or tails")
-                        .WithType(ApplicationCommandOptionType.String)
-                        .AddChoice("heads", "heads")
-                        .AddChoice("tails", "tails"))
-                    .AddOption(new SlashCommandOptionBuilder().WithName("bet")
-                        .WithDescription("Bet amount")
-                        .WithType(ApplicationCommandOptionType.Number)),
-                new SlashCommandOptionBuilder().WithName("dice")
-                    .WithDescription("Roll a dice")
-                    .WithType(ApplicationCommandOptionType.SubCommand)
-                    .AddOption(new SlashCommandOptionBuilder().WithName("sides")
-                        .WithDescription("Number of sides (2-100)")
-                        .WithType(ApplicationCommandOptionType.Integer))
-                    .AddOption(new SlashCommandOptionBuilder().WithName("guess")
-                        .WithDescription("Your guess")
-                        .WithType(ApplicationCommandOptionType.Integer))
-                    .AddOption(new SlashCommandOptionBuilder().WithName("bet")
-                        .WithDescription("Bet amount")
-                        .WithType(ApplicationCommandOptionType.Number)),
-                new SlashCommandOptionBuilder().WithName("roulette")
-                    .WithDescription("Spin roulette")
-                    .WithType(ApplicationCommandOptionType.SubCommand)
-                    .AddOption(new SlashCommandOptionBuilder().WithName("choice")
-                        .WithDescription("red, black, or a number 0-36")
-                        .WithType(ApplicationCommandOptionType.String))
-                    .AddOption(new SlashCommandOptionBuilder().WithName("bet")
-                        .WithDescription("Bet amount")
-                        .WithType(ApplicationCommandOptionType.Number)),
-                new SlashCommandOptionBuilder().WithName("slots")
-                    .WithDescription("Spin slots")
-                    .WithType(ApplicationCommandOptionType.SubCommand)
-                    .AddOption(new SlashCommandOptionBuilder().WithName("bet")
-                        .WithDescription("Bet amount")
-                        .WithType(ApplicationCommandOptionType.Number)),
-                new SlashCommandOptionBuilder().WithName("blackjack")
-                    .WithDescription("Deal a blackjack hand")
-                    .WithType(ApplicationCommandOptionType.SubCommand)
-                    .AddOption(new SlashCommandOptionBuilder().WithName("bet")
-                        .WithDescription("Bet amount")
-                        .WithType(ApplicationCommandOptionType.Number)),
                 new SlashCommandOptionBuilder().WithName("buy")
                     .WithDescription("Purchase casino credits")
                     .WithType(ApplicationCommandOptionType.SubCommand)
@@ -189,12 +142,9 @@ public sealed class CasinoGameModule : FeatureModuleBase
                     .AddOption(new SlashCommandOptionBuilder().WithName("user")
                         .WithDescription("User to check")
                         .WithType(ApplicationCommandOptionType.User)),
-                new SlashCommandOptionBuilder().WithName("leaderboard")
-                    .WithDescription("Show the richest players")
+                new SlashCommandOptionBuilder().WithName("personal")
+                    .WithDescription("Show your casino info")
                     .WithType(ApplicationCommandOptionType.SubCommand)
-                    .AddOption(new SlashCommandOptionBuilder().WithName("top")
-                        .WithDescription("How many to show (1-10)")
-                        .WithType(ApplicationCommandOptionType.Integer))
             }
         };
     }
@@ -210,20 +160,28 @@ public sealed class CasinoGameModule : FeatureModuleBase
     {
         request = null;
         var trimmed = content.Trim();
-        if (!trimmed.StartsWith("!casino", StringComparison.OrdinalIgnoreCase))
+        if (!trimmed.StartsWith("!", StringComparison.Ordinal))
         {
             return false;
         }
 
         var tokens = trimmed.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        if (tokens.Length == 1)
+        if (tokens.Length == 0)
+        {
+            return false;
+        }
+
+        var first = tokens[0].TrimStart('!').ToLowerInvariant();
+        var isCasinoPrefix = string.Equals(first, "casino", StringComparison.OrdinalIgnoreCase);
+
+        if (isCasinoPrefix && tokens.Length == 1)
         {
             request = new GameRequest(GameType.Help, Array.Empty<string>());
             return true;
         }
 
-        var gameToken = tokens[1].ToLowerInvariant();
-        var args = tokens.Skip(2).ToArray();
+        var gameToken = isCasinoPrefix ? tokens[1].ToLowerInvariant() : first;
+        var args = isCasinoPrefix ? tokens.Skip(2).ToArray() : tokens.Skip(1).ToArray();
         if (!TryParseGameType(gameToken, out var gameType))
         {
             request = new GameRequest(GameType.Help, Array.Empty<string>());
@@ -243,6 +201,10 @@ public sealed class CasinoGameModule : FeatureModuleBase
                 return true;
             case "status":
                 gameType = GameType.Status;
+                return true;
+            case "personal":
+            case "me":
+                gameType = GameType.Personal;
                 return true;
             case "coinflip":
             case "flip":
@@ -340,6 +302,14 @@ public sealed class CasinoGameModule : FeatureModuleBase
             return;
         }
 
+        // Slash commands are intentionally limited; gameplay is via message commands for immersion.
+        if (gameType is GameType.Coinflip or GameType.Dice or GameType.Roulette or GameType.Slots or GameType.Blackjack or GameType.Leaderboard or GameType.Status)
+        {
+            await SendEphemeralResponseAsync(command,
+                "Casino gameplay is now message-based. Try: `!coinflip`, `!dice`, `!roulette`, `!slots`, `!blackjack`, `!leaderboard`.");
+            return;
+        }
+
         var request = BuildRequestFromSlash(gameType, subOption);
         var result = ExecuteGame(context, channelState, command.User.Id, request);
         var response = await BuildDealerResponseAsync(channelState, result);
@@ -417,6 +387,7 @@ public sealed class CasinoGameModule : FeatureModuleBase
         {
             GameType.Help => BuildHelpResult(),
             GameType.Status => BuildStatusResult(casinoEnabled),
+            GameType.Personal => BuildPersonalResult(context, channelState, userId, casinoEnabled),
             GameType.Purchase => RunPurchase(channelState, userId, request.Args),
             GameType.Wallet => RunWallet(context, channelState, userId, request.Args),
             GameType.Leaderboard => RunLeaderboard(context, channelState, request.Args),
@@ -438,6 +409,25 @@ public sealed class CasinoGameModule : FeatureModuleBase
             null,
             "Use /gptcli set casino true to enable message commands."
         );
+    }
+
+    private static GameResult BuildPersonalResult(
+        DiscordModuleContext context,
+        InstructionGPT.ChannelState channelState,
+        ulong userId,
+        bool casinoEnabled)
+    {
+        var balance = GetBalance(channelState, userId);
+        var name = ResolveUserDisplayName(context, channelState, userId);
+        var status = casinoEnabled ? "enabled" : "disabled";
+        var details = string.Join("\n", new[]
+        {
+            $"User: {name}",
+            $"Casino mode: {status}",
+            $"Balance: {balance:0.##}",
+            "Gameplay: !coinflip, !dice, !roulette, !slots, !blackjack, !leaderboard"
+        });
+        return new GameResult("Personal", "Your casino info.", null, null, details, balance);
     }
 
     private static GameResult BuildStatusResult(bool enabled)
@@ -737,24 +727,23 @@ public sealed class CasinoGameModule : FeatureModuleBase
             "Casino commands:",
             "- /gptcli set casino true|false (enable or disable message commands)",
             "- /gptcli casino help",
-            "- /gptcli casino status",
             "- /gptcli casino buy [amount]",
             "- /gptcli casino wallet [user]",
-            "- /gptcli casino leaderboard [top]",
-            "- /gptcli casino coinflip [guess] [bet]",
-            "- /gptcli casino dice [sides] [guess] [bet]",
-            "- /gptcli casino roulette [red|black|number] [bet]",
-            "- /gptcli casino slots [bet]",
-            "- /gptcli casino blackjack [bet]",
-            "Message mode (when enabled):",
-            "- !casino buy 100",
-            "- !casino wallet",
-            "- !casino leaderboard 5",
+            "- /gptcli casino personal",
+            "Gameplay (message mode, when enabled):",
+            "- !coinflip heads 5",
+            "- !dice 6 3 2",
+            "- !roulette red 10",
+            "- !slots 2",
+            "- !blackjack 5",
+            "- !leaderboard 5",
+            "Compatibility aliases (also work):",
             "- !casino coinflip heads 5",
             "- !casino dice 6 3 2",
             "- !casino roulette red 10",
             "- !casino slots 2",
-            "- !casino blackjack 5"
+            "- !casino blackjack 5",
+            "- !casino leaderboard 5"
         });
     }
 
@@ -1102,6 +1091,7 @@ public sealed class CasinoGameModule : FeatureModuleBase
     {
         Help,
         Status,
+        Personal,
         Purchase,
         Wallet,
         Leaderboard,

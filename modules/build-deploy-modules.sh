@@ -66,9 +66,11 @@ for csproj in "${csproj_files[@]}"; do
   dest_path="${TARGET_DIR}/$(basename "${dll_path}")"
 
   # If a previous deploy ran as root inside a container, the existing file may be root-owned and not writable.
-  # Removing the destination first avoids cp failing with "Permission denied" on overwrite.
-  rm -f "${dest_path}" 2>/dev/null || true
-  cp "${dll_path}" "${dest_path}"
+  # Overwrite via an atomic rename: write a temp file in the same directory, then mv -f into place.
+  tmp_path="${dest_path}.tmp.$$"
+  rm -f "${tmp_path}" 2>/dev/null || true
+  cp "${dll_path}" "${tmp_path}"
+  mv -f "${tmp_path}" "${dest_path}"
 
   # Best-effort: align ownership with the target directory so future non-root deploys can overwrite.
   if [[ -n "${target_uid}" && -n "${target_gid}" ]]; then

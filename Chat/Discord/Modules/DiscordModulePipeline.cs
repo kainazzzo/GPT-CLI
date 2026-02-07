@@ -12,21 +12,30 @@ public sealed class DiscordModulePipeline
     private readonly IReadOnlyList<IFeatureModule> _modules;
     private readonly DiscordModuleContext _context;
     private readonly Action<string> _log;
+    private readonly ModuleDiscoveryReport _discoveryReport;
 
-    private DiscordModulePipeline(DiscordModuleContext context, IReadOnlyList<IFeatureModule> modules, Action<string> log)
+    private DiscordModulePipeline(
+        DiscordModuleContext context,
+        IReadOnlyList<IFeatureModule> modules,
+        ModuleDiscoveryReport discoveryReport,
+        Action<string> log)
     {
         _context = context;
         _modules = modules;
+        _discoveryReport = discoveryReport ?? new ModuleDiscoveryReport();
         _log = log;
     }
 
     public IReadOnlyList<IFeatureModule> Modules => _modules;
+    public ModuleDiscoveryReport DiscoveryReport => _discoveryReport;
 
     public static DiscordModulePipeline Create(IServiceProvider services, DiscordModuleContext context, string modulesPath, Action<string> log)
     {
-        var modules = DiscoverModules(services, modulesPath, log);
+        var report = new ModuleDiscoveryReport { ModulesPath = modulesPath };
+        var modules = DiscoverModules(services, modulesPath, report, log);
         var ordered = OrderModules(modules, log);
-        return new DiscordModulePipeline(context, ordered, log);
+        report.LoadedModuleIds = ordered.Select(m => m.Id).ToList();
+        return new DiscordModulePipeline(context, ordered, report, log);
     }
 
     public async Task InitializeAsync(CancellationToken cancellationToken)
@@ -174,7 +183,11 @@ public sealed class DiscordModulePipeline
         }
     }
 
-    private static IReadOnlyList<IFeatureModule> DiscoverModules(IServiceProvider services, string modulesPath, Action<string> log)
+    private static IReadOnlyList<IFeatureModule> DiscoverModules(
+        IServiceProvider services,
+        string modulesPath,
+        ModuleDiscoveryReport report,
+        Action<string> log)
     {
         var modules = new List<IFeatureModule>();
         var assemblies = new List<Assembly> { typeof(DiscordModulePipeline).Assembly };
@@ -186,27 +199,33 @@ public sealed class DiscordModulePipeline
                 if (Directory.Exists(modulesPath))
                 {
                     var dlls = Directory.GetFiles(modulesPath, "*.dll", SearchOption.TopDirectoryOnly);
+                    report.FoundDlls.AddRange(dlls.Select(Path.GetFullPath));
                     foreach (var dll in dlls)
                     {
                         try
                         {
-                            var assembly = AssemblyLoadContext.Default.LoadFromAssemblyPath(Path.GetFullPath(dll));
+                            var fullPath = Path.GetFullPath(dll);
+                            var assembly = AssemblyLoadContext.Default.LoadFromAssemblyPath(fullPath);
                             assemblies.Add(assembly);
+                            report.LoadedAssemblies.Add(fullPath);
                         }
                         catch (Exception ex)
                         {
                             log($"Failed to load module assembly {dll}: {ex.GetType().Name} - {ex.Message}");
+                            report.LoadErrors.Add($"Failed to load module assembly {dll}: {ex.GetType().Name} - {ex.Message}");
                         }
                     }
                 }
                 else
                 {
                     log($"Module directory not found: {modulesPath}");
+                    report.LoadErrors.Add($"Module directory not found: {modulesPath}");
                 }
             }
             catch (Exception ex)
             {
                 log($"Failed to scan module directory {modulesPath}: {ex.GetType().Name} - {ex.Message}");
+                report.LoadErrors.Add($"Failed to scan module directory {modulesPath}: {ex.GetType().Name} - {ex.Message}");
             }
         }
 
@@ -219,16 +238,28 @@ public sealed class DiscordModulePipeline
                     if (ActivatorUtilities.CreateInstance(services, type) is IFeatureModule module)
                     {
                         modules.Add(module);
+                        report.CreatedModules.Add($"{module.Id} ({module.GetType().FullName ?? module.GetType().Name})");
                     }
                 }
                 catch (Exception ex)
                 {
                     log($"Failed to create module {type.FullName}: {ex.GetType().Name} - {ex.Message}");
+                    report.LoadErrors.Add($"Failed to create module {type.FullName}: {ex.GetType().Name} - {ex.Message}");
                 }
             }
         }
 
         return modules;
+    }
+
+    public sealed class ModuleDiscoveryReport
+    {
+        public string ModulesPath { get; set; }
+        public List<string> FoundDlls { get; set; } = new();
+        public List<string> LoadedAssemblies { get; set; } = new();
+        public List<string> CreatedModules { get; set; } = new();
+        public List<string> LoadedModuleIds { get; set; } = new();
+        public List<string> LoadErrors { get; set; } = new();
     }
 
     private static IEnumerable<Type> GetModuleTypes(Assembly assembly, Action<string> log)
