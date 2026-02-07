@@ -42,6 +42,20 @@ A working module example lives here:
 - Build: `modules/examples/CasinoModuleExample/build-module.sh` or `build-module.bat`
 - Output: `modules/CasinoModuleExample.dll`
 
+Another example:
+
+- Source: `modules/examples/DndModuleExample`
+- Build: `modules/examples/DndModuleExample/build-module.sh`
+- Output: `modules/DndModuleExample.dll`
+- Setup/control (slash): `/gptcli dnd status`, `/gptcli dnd mode`, `/gptcli dnd campaigncreate`,
+  `/gptcli dnd campaignrefine`, `/gptcli dnd campaignoverwrite`, `/gptcli dnd charactercreate`,
+  `/gptcli dnd charactershow`, `/gptcli dnd npccreate`, `/gptcli dnd npclist`, `/gptcli dnd npcshow`,
+  `/gptcli dnd npcremove`, `/gptcli dnd ledger`, `/gptcli dnd campaignhistory`
+- Live action tags: `!roll`, `!check`, `!save`, `!attack`, `!initiative`, `!endturn`
+- Persisted docs per campaign:
+  - `campaign.json` (campaign details + generation trigger + prompt tweak chain + revision chain)
+  - `ledger.json` (official actions/rolls/outcomes referencing campaign document revision)
+
 ## Docker
 
 If you use docker-compose, map a host directory to `/app/modules` so modules persist:

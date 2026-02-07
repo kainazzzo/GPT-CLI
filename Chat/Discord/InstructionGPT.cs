@@ -348,6 +348,12 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
             },
             new()
             {
+                Name = "modules",
+                Description = "List loaded feature modules",
+                Type = ApplicationCommandOptionType.SubCommand,
+            },
+            new()
+            {
                 Name = "instruction",
                 Description = "Instruction commands",
                 Type = ApplicationCommandOptionType.SubCommandGroup,
@@ -3247,6 +3253,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
                             "",
                             "**Core commands**",
                             "• `/gptcli help` — show this message",
+                            "• `/gptcli modules` — list loaded feature modules",
                             "• `/gptcli instruction add text:\"...\"`",
                             "• `/gptcli instruction list`",
                             "• `/gptcli instruction get index:<n>`",
@@ -3282,6 +3289,37 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
                             "• 🛑 disable infobot for this channel (on infobot reply)"
                         });
                         responses.Add(help);
+                        break;
+                    }
+                    case "modules":
+                    {
+                        if (_modulePipeline == null)
+                        {
+                            responses.Add("Module pipeline is not initialized.");
+                            break;
+                        }
+
+                        var modules = _modulePipeline.Modules;
+                        if (modules == null || modules.Count == 0)
+                        {
+                            responses.Add("No modules loaded.");
+                            break;
+                        }
+
+                        var lines = modules
+                            .OrderBy(m => m.Id, StringComparer.OrdinalIgnoreCase)
+                            .Select(module =>
+                            {
+                                var deps = module.DependsOn == null || module.DependsOn.Count == 0
+                                    ? "-"
+                                    : string.Join(", ", module.DependsOn.OrderBy(d => d, StringComparer.OrdinalIgnoreCase));
+
+                                var type = module.GetType().FullName ?? module.GetType().Name;
+                                return $"- {module.Id}: {module.Name} (deps: {deps}) ({type})";
+                            })
+                            .ToList();
+
+                        responses.Add($"Loaded modules ({modules.Count}):\n{string.Join("\n", lines)}");
                         break;
                     }
                     case "clear":
