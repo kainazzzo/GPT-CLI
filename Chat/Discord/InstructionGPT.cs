@@ -59,6 +59,12 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 
         [JsonPropertyName("welcome-state")]
         public WelcomeState Welcome { get; set; }
+
+        [JsonPropertyName("poll-state")]
+        public PollState Polls { get; set; }
+
+        [JsonPropertyName("pinboard-state")]
+        public PinboardState Pinboard { get; set; }
     }
 
     public record ChannelOptions
@@ -140,6 +146,69 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 
         [JsonPropertyName("last-nudge-utc")]
         public DateTime? LastNudgeUtc { get; set; }
+    }
+
+    public record PollState
+    {
+        [JsonPropertyName("next-id")]
+        public int NextId { get; set; } = 1;
+
+        [JsonPropertyName("polls")]
+        public List<PollEntry> Polls { get; set; } = new();
+    }
+
+    public record PollEntry
+    {
+        [JsonPropertyName("id")]
+        public int Id { get; set; }
+
+        [JsonPropertyName("question")]
+        public string Question { get; set; }
+
+        [JsonPropertyName("options")]
+        public List<string> Options { get; set; } = new();
+
+        [JsonPropertyName("votes")]
+        public Dictionary<ulong, int> Votes { get; set; } = new();
+
+        [JsonPropertyName("open")]
+        public bool Open { get; set; } = true;
+
+        [JsonPropertyName("created-by")]
+        public ulong CreatedBy { get; set; }
+
+        [JsonPropertyName("created-utc")]
+        public DateTime CreatedUtc { get; set; }
+    }
+
+    public record PinboardState
+    {
+        [JsonPropertyName("pins")]
+        public List<PinboardEntry> Pins { get; set; } = new();
+    }
+
+    public record PinboardEntry
+    {
+        [JsonPropertyName("id")]
+        public int Id { get; set; }
+
+        [JsonPropertyName("channel-id")]
+        public ulong ChannelId { get; set; }
+
+        [JsonPropertyName("message-id")]
+        public ulong MessageId { get; set; }
+
+        [JsonPropertyName("author-id")]
+        public ulong AuthorId { get; set; }
+
+        [JsonPropertyName("snippet")]
+        public string Snippet { get; set; }
+
+        [JsonPropertyName("note")]
+        public string Note { get; set; }
+
+        [JsonPropertyName("created-utc")]
+        public DateTime CreatedUtc { get; set; }
     }
 
 
@@ -1320,7 +1389,9 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
                 LearningPersonalityPrompt = DefaultParameters.LearningPersonalityPrompt
             },
             CasinoBalances = new(),
-            Welcome = new()
+            Welcome = new(),
+            Polls = new(),
+            Pinboard = new()
         };
     }
 
