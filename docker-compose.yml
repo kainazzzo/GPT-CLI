@@ -14,9 +14,17 @@ services:
     volumes:
       - ./:/src
       - /usr/local/discord/modules:/usr/local/discord/modules
+      # Persist NuGet caches across builder runs so module builds/publish don't re-download packages.
+      - nuget_packages:/root/.nuget/packages
+      - nuget_v3_cache:/root/.local/share/NuGet/v3-cache
     command: >-
-      bash -lc "dotnet publish gpt.csproj -c Release -r linux-x64
+      bash -lc "dotnet restore gpt.csproj -r linux-x64 &&
+      dotnet publish gpt.csproj -c Release -r linux-x64
       --self-contained true -p:PublishSingleFile=true
-      -o /tmp/gpt-publish"
+      --no-restore -o /tmp/gpt-publish"
     profiles:
       - manual
+
+volumes:
+  nuget_packages:
+  nuget_v3_cache:

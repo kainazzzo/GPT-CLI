@@ -23,9 +23,15 @@ if [[ ${#csproj_files[@]} -eq 0 ]]; then
   exit 1
 fi
 
+echo "Restoring module projects..."
+for csproj in "${csproj_files[@]}"; do
+  echo "-> dotnet restore ${csproj}"
+  dotnet restore "${csproj}"
+done
+
 for csproj in "${csproj_files[@]}"; do
   echo "-> dotnet build ${csproj}"
-  dotnet build "${csproj}" -c Release /p:GptSkipModuleDeploy=true /p:GenerateAssemblyInfo=false /p:GenerateTargetFrameworkAttribute=false
+  dotnet build "${csproj}" -c Release --no-restore /p:GptSkipModuleDeploy=true /p:GenerateAssemblyInfo=false /p:GenerateTargetFrameworkAttribute=false
 done
 
 echo "Deploying module DLLs to ${TARGET_DIR}..."
@@ -37,6 +43,9 @@ if [[ ! -w "${TARGET_DIR}" ]]; then
   echo "Warning: target dir not writable ${TARGET_DIR}. Skipping deploy." >&2
   exit 0
 fi
+
+target_uid="$(stat -c '%u' "${TARGET_DIR}" 2>/dev/null || echo '')"
+target_gid="$(stat -c '%g' "${TARGET_DIR}" 2>/dev/null || echo '')"
 
 for csproj in "${csproj_files[@]}"; do
   project_dir="$(cd "$(dirname "${csproj}")" && pwd)"
@@ -54,7 +63,17 @@ for csproj in "${csproj_files[@]}"; do
   fi
 
   echo "-> ${dll_path}"
-  cp "${dll_path}" "${TARGET_DIR}/"
+  dest_path="${TARGET_DIR}/$(basename "${dll_path}")"
+
+  # If a previous deploy ran as root inside a container, the existing file may be root-owned and not writable.
+  # Removing the destination first avoids cp failing with "Permission denied" on overwrite.
+  rm -f "${dest_path}" 2>/dev/null || true
+  cp "${dll_path}" "${dest_path}"
+
+  # Best-effort: align ownership with the target directory so future non-root deploys can overwrite.
+  if [[ -n "${target_uid}" && -n "${target_gid}" ]]; then
+    chown "${target_uid}:${target_gid}" "${dest_path}" 2>/dev/null || true
+  fi
 done
 
 echo "Done."
