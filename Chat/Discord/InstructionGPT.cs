@@ -247,8 +247,18 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
             ChannelFactoidMatchStats,
             ChannelGuildIds,
             this);
-        _modulePipeline = DiscordModulePipeline.Create(_services, _moduleContext, modulesPath, moduleLog);
-        await _modulePipeline.InitializeAsync(cancellationToken);
+	        _modulePipeline = DiscordModulePipeline.Create(_services, _moduleContext, modulesPath, moduleLog);
+	        try
+	        {
+	            var loaded = _modulePipeline?.DiscoveryReport?.LoadedModuleIds ?? new List<string>();
+	            await Console.Out.WriteLineAsync(
+	                $"Module pipeline: path={_modulePipeline?.DiscoveryReport?.ModulesPath ?? modulesPath}, loaded={loaded.Count} [{string.Join(", ", loaded)}]");
+	        }
+	        catch
+	        {
+	            // best-effort diagnostics only
+	        }
+	        await _modulePipeline.InitializeAsync(cancellationToken);
 
         // Use configuration settings
         string token = DefaultParameters.BotToken
@@ -343,10 +353,29 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
         };
     }
 
-	    private async Task CreateGlobalCommand()
-	    {
-	        var functions = GetAllGptCliFunctions();
-	        var options = BuildGptCliSlashOptions(functions);
+		    private async Task CreateGlobalCommand()
+		    {
+		        var functions = GetAllGptCliFunctions();
+		        try
+		        {
+		            var coreCount = functions.Count(f => f != null && string.IsNullOrWhiteSpace(f.ModuleId));
+		            var moduleCount = functions.Count - coreCount;
+		            var groups = functions
+		                .Where(f => f != null && !string.IsNullOrWhiteSpace(f.ModuleId))
+		                .GroupBy(f => f.ModuleId, StringComparer.OrdinalIgnoreCase)
+		                .OrderBy(g => g.Key, StringComparer.OrdinalIgnoreCase)
+		                .Select(g => $"{g.Key}:{g.Count()}")
+		                .ToList();
+
+		            var modulesSummary = groups.Count == 0 ? "(none)" : string.Join(", ", groups);
+		            await Console.Out.WriteLineAsync($"GptCliFunctions: total={functions.Count}, core={coreCount}, module={moduleCount} [{modulesSummary}]");
+		        }
+		        catch (Exception ex)
+		        {
+		            await Console.Out.WriteLineAsync($"GptCliFunctions summary failed: {ex.GetType().Name} {ex.Message}");
+		        }
+
+		        var options = BuildGptCliSlashOptions(functions);
 
 		        var command = new SlashCommandBuilder()
 		            .WithName("gptcli")
@@ -1413,6 +1442,17 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 
 	    private async Task<bool> TryHandleMentionedToolCallsAsync(SocketMessage message, ChannelState channelState, string strippedContent)
 	    {
+	        var requestId = Guid.NewGuid().ToString("n")[..8];
+	        try
+	        {
+	            await Console.Out.WriteLineAsync(
+	                $"[tools:{requestId}] mention-tool-router start channel={message.Channel.Id} user={message.Author.Id} model={channelState?.InstructionChat?.ChatBotState?.Parameters?.Model} text={NormalizeSingleLine(strippedContent)}");
+	        }
+	        catch
+	        {
+	            // ignore
+	        }
+
 	        // Real function-calling: we always offer tools when tagged/DM'd.
 	        // If the model chooses not to call any tool, we fall through to normal chat.
 	        var allFunctions = GetAllGptCliFunctions()
@@ -1431,10 +1471,23 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 
 	        if (availableFunctions.Count == 0)
 	        {
+	            try { await Console.Out.WriteLineAsync($"[tools:{requestId}] no available tools (all disabled?)"); } catch { }
 	            return false;
 	        }
 
 	        var tools = availableFunctions.Select(f => f.ToToolDefinition()).ToList();
+	        try
+	        {
+	            var moduleCounts = availableFunctions
+	                .GroupBy(f => string.IsNullOrWhiteSpace(f.ModuleId) ? "core" : f.ModuleId.Trim().ToLowerInvariant())
+	                .Select(g => $"{g.Key}={g.Count()}")
+	                .OrderBy(s => s, StringComparer.OrdinalIgnoreCase);
+	            await Console.Out.WriteLineAsync($"[tools:{requestId}] offering tools total={availableFunctions.Count} [{string.Join(", ", moduleCounts)}]");
+	        }
+	        catch
+	        {
+	            // ignore
+	        }
 
 	        var byName = new Dictionary<string, GptCliFunction>(StringComparer.OrdinalIgnoreCase);
 	        foreach (var f in allFunctions)
@@ -1475,12 +1528,14 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 	        if (!response.Successful)
 	        {
 	            await Console.Out.WriteLineAsync($"LLM tools failed: {response.Error?.Code} {response.Error?.Message}");
+	            try { await Console.Out.WriteLineAsync($"[tools:{requestId}] router failed code={response.Error?.Code} msg={response.Error?.Message}"); } catch { }
 	            return false;
 	        }
 
 	        var msg = response.Choices.FirstOrDefault()?.Message;
 	        if (msg == null)
 	        {
+	            try { await Console.Out.WriteLineAsync($"[tools:{requestId}] router returned empty message"); } catch { }
 	            return false;
 	        }
 
@@ -1490,6 +1545,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 	            // Back-compat: older function_call field.
 	            if (msg.FunctionCall == null)
 	            {
+	                try { await Console.Out.WriteLineAsync($"[tools:{requestId}] no tool calls; falling back to normal chat"); } catch { }
 	                return false;
 	            }
 
@@ -1502,6 +1558,19 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 	        var applied = new List<string>();
 	        var errors = new List<string>();
 
+	        try
+	        {
+	            var planned = toolCalls
+	                .Select(c => c?.FunctionCall?.Name)
+	                .Where(n => !string.IsNullOrWhiteSpace(n))
+	                .ToList();
+	            await Console.Out.WriteLineAsync($"[tools:{requestId}] tool calls count={planned.Count} [{string.Join(", ", planned)}]");
+	        }
+	        catch
+	        {
+	            // ignore
+	        }
+
 	        foreach (var call in toolCalls)
 	        {
 	            var toolFn = call?.FunctionCall;
@@ -1513,18 +1582,37 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 	            if (!byName.TryGetValue(toolFn.Name, out var match) || match == null)
 	            {
 	                errors.Add($"Unknown tool '{toolFn.Name}'.");
+	                try { await Console.Out.WriteLineAsync($"[tools:{requestId}] unknown tool name={toolFn.Name}"); } catch { }
 	                continue;
 	            }
 
 	            if (!IsFunctionAvailable(channelState, match))
 	            {
 	                errors.Add($"Tool '{toolFn.Name}' is unavailable because module '{match.ModuleId}' is disabled.");
+	                try { await Console.Out.WriteLineAsync($"[tools:{requestId}] tool unavailable name={toolFn.Name} module={match.ModuleId}"); } catch { }
 	                continue;
 	            }
 
-	            var argsJson = string.IsNullOrWhiteSpace(toolFn.Arguments) ? "{}" : toolFn.Arguments;
+		            var argsJson = string.IsNullOrWhiteSpace(toolFn.Arguments) ? "{}" : toolFn.Arguments;
+		            try
+		            {
+		                await Console.Out.WriteLineAsync($"[tools:{requestId}] executing tool={match.ToolName} slash={match.Slash?.TopLevelName}/{match.Slash?.SubCommandName ?? match.Slash?.SetOptionName ?? ""} module={match.ModuleId ?? "core"} args={NormalizeSingleLine(argsJson)}");
+		            }
+		            catch
+		            {
+		                // ignore
+		            }
 	            var ctx = new GptCliExecutionContext(_moduleContext, channelState, message.Channel, message.Author, null, message);
-	            var result = await match.ExecuteAsync(ctx, argsJson, _shutdownToken);
+	            GptCliExecutionResult result;
+	            try
+	            {
+	                result = await match.ExecuteAsync(ctx, argsJson, _shutdownToken);
+	            }
+	            catch (Exception ex)
+	            {
+	                result = new GptCliExecutionResult(true, $"Tool '{match.ToolName}' failed: {ex.GetType().Name} {ex.Message}", false);
+	                try { await Console.Out.WriteLineAsync($"[tools:{requestId}] tool threw tool={match.ToolName} ex={ex.GetType().Name} msg={ex.Message}"); } catch { }
+	            }
 	            if (result is { Handled: true } && !string.IsNullOrWhiteSpace(result.Response))
 	            {
 	                applied.Add(result.Response.Trim());
@@ -1553,6 +1641,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 	        }
 
 	        await message.Channel.SendMessageAsync(string.Join("\n", replyLines));
+	        try { await Console.Out.WriteLineAsync($"[tools:{requestId}] applied={applied.Count} errors={errors.Count}"); } catch { }
 	        return true;
 	    }
 
@@ -1991,7 +2080,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
         channelState.ChannelName = guildChannel.Name;
     }
 
-    internal static string GetChannelDirectory(ChannelState channelState)
+    public static string GetChannelDirectory(ChannelState channelState)
     {
         var guildFolder = $"{SanitizeName(channelState.GuildName ?? "guild")}_{channelState.GuildId}";
         var channelFolder = $"{SanitizeName(channelState.ChannelName ?? "channel")}_{channelState.ChannelId}";
@@ -3726,6 +3815,49 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 	        List<string> responses,
 	        CancellationToken cancellationToken)
 	    {
+        static string FormatOptions(IReadOnlyCollection<SocketSlashCommandDataOption> opts)
+        {
+            if (opts == null || opts.Count == 0)
+            {
+                return "(none)";
+            }
+
+            var parts = new List<string>();
+            foreach (var o in opts)
+            {
+                if (o == null)
+                {
+                    continue;
+                }
+
+                if (o.Options != null && o.Options.Count > 0)
+                {
+                    parts.Add($"{o.Name}:{o.Type}{{{FormatOptions(o.Options)}}}");
+                }
+                else if (o.Value != null)
+                {
+                    parts.Add($"{o.Name}:{o.Type}={NormalizeSingleLine(o.Value.ToString())}");
+                }
+                else
+                {
+                    parts.Add($"{o.Name}:{o.Type}");
+                }
+            }
+
+            return string.Join(", ", parts);
+        }
+
+        var requestId = Guid.NewGuid().ToString("n")[..8];
+        try
+        {
+            await Console.Out.WriteLineAsync(
+                $"[slash:{requestId}] start guild={(channelState?.GuildId ?? 0)} channel={(command?.Channel?.Id ?? 0)} user={(command?.User?.Id ?? 0)} name=/{command?.Data?.Name} opts={FormatOptions(command?.Data?.Options)}");
+        }
+        catch
+        {
+            // ignore
+        }
+
         if (command?.Data?.Options == null || command.Data.Options.Count == 0)
         {
             return;
@@ -3763,19 +3895,31 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 
 	                        if (!setOptions.TryGetValue(setOpt.Name, out var fn))
 	                        {
+                            try { await Console.Out.WriteLineAsync($"[slash:{requestId}] unknown set option name={setOpt.Name}"); } catch { }
 	                            continue;
 	                        }
 
 	                        if (!IsFunctionAvailable(channelState, fn))
 	                        {
 	                            responses.Add($"Module '{fn.ModuleId}' is disabled. Enable it via `/gptcli set {fn.ModuleId} true`.");
+                            try { await Console.Out.WriteLineAsync($"[slash:{requestId}] set blocked tool={fn.ToolName} module={fn.ModuleId}"); } catch { }
 	                            continue;
 	                        }
 
 	                        var paramName = fn.Parameters?.FirstOrDefault()?.Name ?? "value";
 	                        var argsJson = BuildJsonObject(new Dictionary<string, object> { [paramName] = setOpt.Value });
 	                        var ctx = new GptCliExecutionContext(moduleContext, channelState, command.Channel, command.User, command, null);
-	                        var result = await fn.ExecuteAsync(ctx, argsJson, cancellationToken);
+                            try { await Console.Out.WriteLineAsync($"[slash:{requestId}] executing tool={fn.ToolName} slash=set/{fn.Slash?.SetOptionName} module={fn.ModuleId ?? "core"} args={NormalizeSingleLine(argsJson)}"); } catch { }
+	                        GptCliExecutionResult result;
+                            try
+                            {
+                                result = await fn.ExecuteAsync(ctx, argsJson, cancellationToken);
+                            }
+                            catch (Exception ex)
+                            {
+                                result = new GptCliExecutionResult(true, $"Tool '{fn.ToolName}' failed: {ex.GetType().Name} {ex.Message}", false);
+                                try { await Console.Out.WriteLineAsync($"[slash:{requestId}] tool threw tool={fn.ToolName} ex={ex.GetType().Name} msg={ex.Message}"); } catch { }
+                            }
 	                        if (result is { Handled: true } && !string.IsNullOrWhiteSpace(result.Response))
 	                        {
 	                            responses.Add(result.Response.Trim());
@@ -3790,17 +3934,32 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 	                    if (!IsFunctionAvailable(channelState, subFn))
 	                    {
 	                        responses.Add($"Module '{subFn.ModuleId}' is disabled. Enable it via `/gptcli set {subFn.ModuleId} true`.");
+                            try { await Console.Out.WriteLineAsync($"[slash:{requestId}] subcommand blocked tool={subFn.ToolName} module={subFn.ModuleId}"); } catch { }
 	                        continue;
 	                    }
 
 	                    var argsJson = BuildJsonObject(BuildArgsFromSlashOptions(option.Options));
 	                    var ctx = new GptCliExecutionContext(moduleContext, channelState, command.Channel, command.User, command, null);
-	                    var result = await subFn.ExecuteAsync(ctx, argsJson, cancellationToken);
+                        try { await Console.Out.WriteLineAsync($"[slash:{requestId}] executing tool={subFn.ToolName} slash={subFn.Slash?.TopLevelName} module={subFn.ModuleId ?? "core"} args={NormalizeSingleLine(argsJson)}"); } catch { }
+	                    GptCliExecutionResult result;
+                        try
+                        {
+                            result = await subFn.ExecuteAsync(ctx, argsJson, cancellationToken);
+                        }
+                        catch (Exception ex)
+                        {
+                            result = new GptCliExecutionResult(true, $"Tool '{subFn.ToolName}' failed: {ex.GetType().Name} {ex.Message}", false);
+                            try { await Console.Out.WriteLineAsync($"[slash:{requestId}] tool threw tool={subFn.ToolName} ex={ex.GetType().Name} msg={ex.Message}"); } catch { }
+                        }
 	                    if (result is { Handled: true } && !string.IsNullOrWhiteSpace(result.Response))
 	                    {
 	                        responses.Add(result.Response.Trim());
 	                    }
 	                }
+                    else
+                    {
+                        try { await Console.Out.WriteLineAsync($"[slash:{requestId}] unknown subcommand name={option.Name}"); } catch { }
+                    }
 
                 continue;
             }
@@ -3816,18 +3975,30 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 	                var key = $"{option.Name}/{sub.Name}";
 	                if (!byGroup.TryGetValue(key, out var fn))
 	                {
+                        try { await Console.Out.WriteLineAsync($"[slash:{requestId}] unknown group-subcommand key={key}"); } catch { }
 	                    continue;
 	                }
 
 	                if (!IsFunctionAvailable(channelState, fn))
 	                {
 	                    responses.Add($"Module '{fn.ModuleId}' is disabled. Enable it via `/gptcli set {fn.ModuleId} true`.");
+                        try { await Console.Out.WriteLineAsync($"[slash:{requestId}] group-subcommand blocked tool={fn.ToolName} module={fn.ModuleId}"); } catch { }
 	                    continue;
 	                }
 
 	                var argsJson = BuildJsonObject(BuildArgsFromSlashOptions(sub.Options));
 	                var ctx = new GptCliExecutionContext(moduleContext, channelState, command.Channel, command.User, command, null);
-	                var result = await fn.ExecuteAsync(ctx, argsJson, cancellationToken);
+                    try { await Console.Out.WriteLineAsync($"[slash:{requestId}] executing tool={fn.ToolName} slash={fn.Slash?.TopLevelName}/{fn.Slash?.SubCommandName} module={fn.ModuleId ?? "core"} args={NormalizeSingleLine(argsJson)}"); } catch { }
+	                GptCliExecutionResult result;
+                    try
+                    {
+                        result = await fn.ExecuteAsync(ctx, argsJson, cancellationToken);
+                    }
+                    catch (Exception ex)
+                    {
+                        result = new GptCliExecutionResult(true, $"Tool '{fn.ToolName}' failed: {ex.GetType().Name} {ex.Message}", false);
+                        try { await Console.Out.WriteLineAsync($"[slash:{requestId}] tool threw tool={fn.ToolName} ex={ex.GetType().Name} msg={ex.Message}"); } catch { }
+                    }
 	                if (result is { Handled: true } && !string.IsNullOrWhiteSpace(result.Response))
 	                {
 	                    responses.Add(result.Response.Trim());

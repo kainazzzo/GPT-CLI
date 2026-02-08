@@ -238,6 +238,27 @@ public sealed class DiscordModulePipeline
     {
         var modules = new List<IFeatureModule>();
         var assemblies = new List<Assembly> { typeof(DiscordModulePipeline).Assembly };
+        var loadedByPath = new Dictionary<string, Assembly>(StringComparer.OrdinalIgnoreCase);
+        foreach (var assembly in AssemblyLoadContext.Default.Assemblies)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(assembly.Location))
+                {
+                    continue;
+                }
+
+                var full = Path.GetFullPath(assembly.Location);
+                if (!loadedByPath.ContainsKey(full))
+                {
+                    loadedByPath[full] = assembly;
+                }
+            }
+            catch
+            {
+                // ignore assemblies without stable locations
+            }
+        }
 
         if (!string.IsNullOrWhiteSpace(modulesPath))
         {
@@ -252,9 +273,18 @@ public sealed class DiscordModulePipeline
                         try
                         {
                             var fullPath = Path.GetFullPath(dll);
-                            var assembly = AssemblyLoadContext.Default.LoadFromAssemblyPath(fullPath);
-                            assemblies.Add(assembly);
-                            report.LoadedAssemblies.Add(fullPath);
+                            if (loadedByPath.TryGetValue(fullPath, out var alreadyLoaded))
+                            {
+                                assemblies.Add(alreadyLoaded);
+                                report.LoadedAssemblies.Add(fullPath + " (cached)");
+                            }
+                            else
+                            {
+                                var assembly = AssemblyLoadContext.Default.LoadFromAssemblyPath(fullPath);
+                                assemblies.Add(assembly);
+                                loadedByPath[fullPath] = assembly;
+                                report.LoadedAssemblies.Add(fullPath);
+                            }
                         }
                         catch (Exception ex)
                         {

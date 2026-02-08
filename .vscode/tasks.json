@@ -33,7 +33,90 @@
         "Build & Deploy Example Modules"
       ],
       "group": "build"
+    },
+    {
+      "label": "Deploy: Build Images",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "-lc",
+        "deploy/deploy.sh build"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      }
+    },
+    {
+      "label": "Deploy: Up (Detached)",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "-lc",
+        "deploy/deploy.sh up"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      }
+    },
+    {
+      "label": "Deploy: Restart",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "-lc",
+        "deploy/deploy.sh restart"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      }
+    },
+    {
+      "label": "Deploy: Watch (Restart + Logs)",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "-lc",
+        "deploy/deploy.sh watch"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      }
+    },
+    {
+      "label": "Deploy: Build & Deploy Modules (Docker Builder)",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "-lc",
+        "deploy/deploy.sh modules"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      }
+    },
+    {
+      "label": "Deploy: Logs (Follow)",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "-lc",
+        "deploy/deploy.sh logs"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      }
+    },
+    {
+      "label": "Deploy: Stop",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "-lc",
+        "deploy/deploy.sh stop"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      }
     }
   ]
 }
-
