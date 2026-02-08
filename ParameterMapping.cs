@@ -64,19 +64,9 @@ public static class ParameterMapping
             return;
         }
 
-        if (RequiresCompletionTokens(modelName))
-        {
+        // OpenAI has moved newer models to `max_completion_tokens` for chat completions.
+        // Use it universally to avoid model-specific 400s.
         request.MaxCompletionTokens = parameters.MaxTokens;
-        }
-        else
-        {
-            request.MaxTokens = parameters.MaxTokens;
-        }
-    }
-
-    private static bool RequiresCompletionTokens(string modelName)
-    {
-        return modelName?.StartsWith("gpt-5", StringComparison.OrdinalIgnoreCase) ?? false;
     }
 
     public static async Task<ChatCompletionCreateRequest> MapChatEdit(GptOptions parameters, OpenAILogic openAILogic, Stream inputStream)

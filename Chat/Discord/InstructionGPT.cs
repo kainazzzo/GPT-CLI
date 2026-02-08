@@ -8,6 +8,7 @@ using Discord;
 using Discord.Net;
 using Discord.Rest;
 using Discord.WebSocket;
+using GPT.CLI.Chat.Discord.Commands;
 using GPT.CLI.Embeddings;
 using GPT.CLI.Chat.Discord.Modules;
 using Mapster;
@@ -15,6 +16,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 using OpenAI.ObjectModels;
 using OpenAI.ObjectModels.RequestModels;
+using OpenAI.ObjectModels.SharedModels;
 
 namespace GPT.CLI.Chat.Discord;
 
@@ -68,10 +70,10 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
         public PinboardState Pinboard { get; set; }
     }
 
-    public record ChannelOptions
-    {
-        [JsonPropertyName("enabled")]
-        public bool Enabled { get; set; }
+	    public record ChannelOptions
+	    {
+	        [JsonPropertyName("enabled")]
+	        public bool Enabled { get; set; }
 
         [JsonPropertyName("muted")]
         public bool Muted { get; set; }
@@ -85,9 +87,13 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
         [JsonPropertyName("factoid-similarity-threshold")]
         public double FactoidSimilarityThreshold { get; set; } = 0.80;
 
-        [JsonPropertyName("casino-enabled")]
-        public bool CasinoEnabled { get; set; }
-    }
+	        [JsonPropertyName("casino-enabled")]
+	        public bool CasinoEnabled { get; set; }
+
+	        // Module-level enable flags keyed by module id (lowercase). Missing key => enabled.
+	        [JsonPropertyName("modules-enabled")]
+	        public Dictionary<string, bool> ModulesEnabled { get; set; } = new();
+	    }
 
     public record WelcomeState
     {
@@ -337,195 +343,107 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
         };
     }
 
-    private async Task CreateGlobalCommand()
-    {
-        var options = new List<SlashCommandOptionBuilder>
-        {
-            new()
-            {
-                Name = "help",
-                Description = "Show help",
-                Type = ApplicationCommandOptionType.SubCommand,
-            },
-            new()
-            {
-                Name = "modules",
-                Description = "List loaded feature modules",
-                Type = ApplicationCommandOptionType.SubCommand,
-            },
-            new()
-            {
-                Name = "instruction",
-                Description = "Instruction commands",
-                Type = ApplicationCommandOptionType.SubCommandGroup,
-                Options = new()
-                {
-                    new SlashCommandOptionBuilder().WithName("add")
-                        .WithDescription("Add a system instruction")
-                        .WithType(ApplicationCommandOptionType.SubCommand)
-                        .AddOption(new SlashCommandOptionBuilder().WithName("text")
-                            .WithDescription("Instruction text")
-                            .WithType(ApplicationCommandOptionType.String)
-                            .WithRequired(true)),
-                    new SlashCommandOptionBuilder().WithName("list")
-                        .WithDescription("List current instructions")
-                        .WithType(ApplicationCommandOptionType.SubCommand),
-                    new SlashCommandOptionBuilder().WithName("get")
-                        .WithDescription("Get an instruction by index")
-                        .WithType(ApplicationCommandOptionType.SubCommand)
-                        .AddOption(new SlashCommandOptionBuilder().WithName("index")
-                            .WithDescription("1-based instruction index")
-                            .WithType(ApplicationCommandOptionType.Integer)
-                            .WithRequired(true)
-                            .WithMinValue(1)),
-                    new SlashCommandOptionBuilder().WithName("delete")
-                        .WithDescription("Delete an instruction by index")
-                        .WithType(ApplicationCommandOptionType.SubCommand)
-                        .AddOption(new SlashCommandOptionBuilder().WithName("index")
-                            .WithDescription("1-based instruction index")
-                            .WithType(ApplicationCommandOptionType.Integer)
-                            .WithRequired(true)
-                            .WithMinValue(1)),
-                    new SlashCommandOptionBuilder().WithName("clear")
-                        .WithDescription("Clear all instructions")
-                        .WithType(ApplicationCommandOptionType.SubCommand)
-                }
-            },
-            new()
-            {
-                Name = "clear",
-                Description = "Clear the instructions or messages, or all",
-                Type = ApplicationCommandOptionType.SubCommand,
-                Options = new()
-                {
-                    new SlashCommandOptionBuilder().WithName("messages").WithDescription("Clear messages")
-                        .WithType(ApplicationCommandOptionType.String).AddChoice("messages", "messages"),
-                    new SlashCommandOptionBuilder().WithName("instructions").WithDescription("Clear instructions")
-                        .WithType(ApplicationCommandOptionType.String).AddChoice("instructions", "instructions"),
-                    new SlashCommandOptionBuilder().WithName("all").WithDescription("Clear all")
-                        .WithType(ApplicationCommandOptionType.String).AddChoice("all", "all"),
-                }
-            },
-            new()
-            {
-                Name = "set",
-                Description = "Settings",
-                Type = ApplicationCommandOptionType.SubCommand,
-                Options = new()
-                {
-                    new SlashCommandOptionBuilder().WithName("enabled").WithDescription("Enable or disable the chat bot")
-                        .WithType(ApplicationCommandOptionType.Boolean),
-                    new SlashCommandOptionBuilder().WithName("mute").WithDescription("Mute or unmute the chat bot")
-                        .WithType(ApplicationCommandOptionType.Boolean),
-                    new SlashCommandOptionBuilder().WithName("response-mode").WithDescription("Set the response mode")
-                        .WithType(ApplicationCommandOptionType.String).AddChoice("All", "All").AddChoice("Matches", "Matches"),
-                    new SlashCommandOptionBuilder().WithName("embed-mode").WithDescription("Set the embed mode")
-                        .WithType(ApplicationCommandOptionType.String).AddChoice("Explicit", "Explicit").AddChoice("All", "All"),
-                    new SlashCommandOptionBuilder().WithName("max-chat-history-length").WithDescription("Set the maximum chat history length")
-                        .WithType(ApplicationCommandOptionType.Integer).WithMinValue(100),
-                    new SlashCommandOptionBuilder().WithName("max-tokens").WithDescription("Set the maximum tokens")
-                        .WithType(ApplicationCommandOptionType.Integer).WithMinValue(50),
-                    new SlashCommandOptionBuilder().WithName("model").WithDescription("Set the model")
-                        .WithType(ApplicationCommandOptionType.String).AddChoice("gpt-5.2", "gpt-5.2"),
-                }
-            }
-        };
+	    private async Task CreateGlobalCommand()
+	    {
+	        var functions = GetAllGptCliFunctions();
+	        var options = BuildGptCliSlashOptions(functions);
 
-        if (_modulePipeline != null)
-        {
-            var contributions = _modulePipeline.GetSlashCommandContributions();
-            if (contributions.Count > 0)
-            {
-                var topLevel = options.ToDictionary(option => option.Name, StringComparer.OrdinalIgnoreCase);
-                foreach (var contribution in contributions)
-                {
-                    if (contribution?.Option == null || string.IsNullOrWhiteSpace(contribution.Option.Name))
-                    {
-                        continue;
-                    }
+	        var command = new SlashCommandBuilder()
+	            .WithName("gptcli")
+	            .WithDescription("GPT-CLI commands")
+	            .AddOptions(options.ToArray());
 
-                    if (string.IsNullOrWhiteSpace(contribution.TargetOption))
-                    {
-                        if (topLevel.ContainsKey(contribution.Option.Name))
-                        {
-                            await Console.Out.WriteLineAsync(
-                                $"Slash command option conflict: '{contribution.Option.Name}' already exists. Skipping module option.");
-                            continue;
-                        }
+	        DiscordRestClient restClient = Client.Rest;
 
-                        options.Add(contribution.Option);
-                        topLevel[contribution.Option.Name] = contribution.Option;
-                        continue;
-                    }
-
-                    if (!topLevel.TryGetValue(contribution.TargetOption, out var target))
-                    {
-                        await Console.Out.WriteLineAsync(
-                            $"Slash command option target '{contribution.TargetOption}' not found. Skipping module option '{contribution.Option.Name}'.");
-                        continue;
-                    }
-
-                    var existing = target.Options?.Any(opt => string.Equals(opt.Name, contribution.Option.Name, StringComparison.OrdinalIgnoreCase)) == true;
-                    if (existing)
-                    {
-                        await Console.Out.WriteLineAsync(
-                            $"Slash command option conflict: '{contribution.TargetOption} {contribution.Option.Name}' already exists. Skipping module option.");
-                        continue;
-                    }
-
-                    target.AddOption(contribution.Option);
-                }
-            }
-        }
-
-        var command = new SlashCommandBuilder()
-            .WithName("gptcli")
-            .WithDescription("GPT-CLI commands")
-            .AddOptions(options.ToArray());
-
-        DiscordRestClient restClient = Client.Rest;
-
-        var builtCommand = command.Build();
+	        var builtCommand = command.Build();
+	        try
+	        {
+	            var top = builtCommand.Options.IsSpecified ? builtCommand.Options.Value : new List<ApplicationCommandOptionProperties>();
+	            var setOpt = top.FirstOrDefault(o => string.Equals(o.Name, "set", StringComparison.OrdinalIgnoreCase));
+	            var setInner = setOpt?.Options ?? new List<ApplicationCommandOptionProperties>();
+	            var setNames = setInner.Select(o => o.Name).ToList();
+	            await Console.Out.WriteLineAsync($"gptcli build -> topLevel={top.Count}, setOptions={setNames.Count} ({string.Join(", ", setNames)})");
+	        }
+	        catch (Exception ex)
+	        {
+	            await Console.Out.WriteLineAsync($"gptcli build -> failed to dump options: {ex.GetType().Name} {ex.Message}");
+	        }
 
         var forceGlobalCommands = string.Equals(
             Configuration["GPT:ForceGlobalCommands"],
             "true",
             StringComparison.OrdinalIgnoreCase);
 
-        // Discord global slash command updates are not immediate. If the bot is only in a single guild
-        // and no explicit guild id is configured, prefer registering guild commands for fast iteration.
-        var effectiveGuildId = DefaultParameters.DiscordGuildId;
-        if (!forceGlobalCommands && !effectiveGuildId.HasValue)
-        {
-            var guilds = Client.Guilds;
-            if (guilds is { Count: 1 })
-            {
-                effectiveGuildId = guilds.First().Id;
-                await Console.Out.WriteLineAsync(
-                    $"No GPT:DiscordGuildId configured; registering guild commands for single guild {effectiveGuildId.Value} (set GPT:ForceGlobalCommands=true to force global).");
-            }
-        }
+	        // Discord global slash command updates are not immediate. If the bot is only in a single guild
+	        // and no explicit guild id is configured, prefer registering guild commands for fast iteration.
+	        var effectiveGuildId = DefaultParameters.DiscordGuildId;
+	        if (!forceGlobalCommands && !effectiveGuildId.HasValue)
+	        {
+	            var guilds = Client.Guilds;
+	            if (guilds is { Count: 1 })
+	            {
+	                effectiveGuildId = guilds.First().Id;
+	                await Console.Out.WriteLineAsync(
+	                    $"No GPT:DiscordGuildId configured; registering guild commands for single guild {effectiveGuildId.Value} (set GPT:ForceGlobalCommands=true to force global).");
+	            }
+	        }
 
-        if (effectiveGuildId.HasValue)
-        {
-            var guild = await restClient.GetGuildAsync(effectiveGuildId.Value);
-            if (guild == null)
-            {
-                throw new Exception($"Guild {effectiveGuildId.Value} not found.");
-            }
+	        if (effectiveGuildId.HasValue)
+	        {
+	            var guild = await restClient.GetGuildAsync(effectiveGuildId.Value);
+	            if (guild == null)
+	            {
+	                throw new Exception($"Guild {effectiveGuildId.Value} not found.");
+	            }
 
-            await Console.Out.WriteLineAsync($"Overwriting guild commands for {effectiveGuildId.Value}...");
-            // Ensure updates always replace existing guild commands.
-            await guild.BulkOverwriteApplicationCommandsAsync(new[] { builtCommand });
-            await DumpGuildCommands(guild);
-            return;
-        }
+	            await Console.Out.WriteLineAsync($"Overwriting guild commands for {effectiveGuildId.Value}...");
+	            // Ensure updates always replace existing guild commands.
+	            await guild.BulkOverwriteApplicationCommandsAsync(new[] { builtCommand });
+	            await DumpGuildCommands(guild);
+	            return;
+	        }
 
-        await Console.Out.WriteLineAsync("Overwriting global commands...");
-        // Ensure updates always replace existing global commands.
-        await ((IDiscordClient)restClient).BulkOverwriteGlobalApplicationCommand(new[] { builtCommand });
-        await DumpGlobalCommands((IDiscordClient)restClient);
-    }
+	        if (!forceGlobalCommands)
+	        {
+	            // If we don't have an explicit guild id, prefer overwriting guild commands for all joined guilds
+	            // to keep iteration fast. Global command propagation can take a long time.
+	            var guildIds = Client.Guilds.Select(g => g.Id).Distinct().ToList();
+	            var maxGuildOverwrites = 100;
+	            if (int.TryParse(Configuration["GPT:MaxGuildCommandOverwrites"], out var configuredMax) && configuredMax > 0)
+	            {
+	                maxGuildOverwrites = configuredMax;
+	            }
+	            if (guildIds.Count > 0 && guildIds.Count <= maxGuildOverwrites)
+	            {
+	                await Console.Out.WriteLineAsync($"No GPT:DiscordGuildId configured; overwriting guild commands for {guildIds.Count} guild(s) for fast iteration.");
+	                foreach (var guildId in guildIds)
+	                {
+	                    var guild = await restClient.GetGuildAsync(guildId);
+	                    if (guild == null)
+	                    {
+	                        continue;
+	                    }
+
+	                    await Console.Out.WriteLineAsync($"Overwriting guild commands for {guildId}...");
+	                    await guild.BulkOverwriteApplicationCommandsAsync(new[] { builtCommand });
+	                }
+
+	                return;
+	            }
+
+	            if (guildIds.Count > maxGuildOverwrites)
+	            {
+	                await Console.Out.WriteLineAsync(
+	                    $"Bot is in {guildIds.Count} guilds and GPT:DiscordGuildId is not configured; falling back to global slash command registration. " +
+	                    "Set GPT:DiscordGuildId to get immediate updates.");
+	            }
+	        }
+
+	        await Console.Out.WriteLineAsync("Overwriting global commands...");
+	        // Ensure updates always replace existing global commands.
+	        await ((IDiscordClient)restClient).BulkOverwriteGlobalApplicationCommand(new[] { builtCommand });
+	        await DumpGlobalCommands((IDiscordClient)restClient);
+	    }
 
     private static async Task DumpGuildCommands(IGuild guild)
     {
@@ -1051,18 +969,15 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
         var isDirectMessage = message.Channel is IPrivateChannel;
         var shouldRespond = isTagged || isDirectMessage;
 
-        // Mention-based settings tool (LLM) for /gptcli set ... parity.
+        // Mention-based /gptcli set tool routing (LLM function calling).
         if (shouldRespond && !string.IsNullOrWhiteSpace(message.Content))
         {
             var stripped = StripBotMentions(message.Content, Client.CurrentUser.Id).Trim();
-            if (LooksLikeSettingsRequest(stripped))
+            var handled = await TryHandleMentionedToolCallsAsync(message, channel, stripped);
+            if (handled)
             {
-                var handled = await TryHandleMentionedSetToolAsync(message, channel, stripped);
-                if (handled)
-                {
-                    await SaveCachedChannelState(message.Channel.Id);
-                    return;
-                }
+                await SaveCachedChannelState(message.Channel.Id);
+                return;
             }
         }
        
@@ -1280,324 +1195,249 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
         await SaveCachedChannelState(message.Channel.Id);
     }
 
-    private static bool LooksLikeSettingsRequest(string content)
-    {
-        if (string.IsNullOrWhiteSpace(content))
-        {
-            return false;
-        }
-
-        var text = content.Trim().ToLowerInvariant();
-        if (text.StartsWith("set ", StringComparison.Ordinal) || text.StartsWith("settings", StringComparison.Ordinal))
-        {
-            return true;
-        }
-
-        // Keep this conservative; we only want to intercept messages that are very likely "settings".
-        // Word-boundary-ish checks without regex.
-        return text.Contains("mute", StringComparison.Ordinal)
-               || text.Contains("unmute", StringComparison.Ordinal)
-               || text.Contains("enable", StringComparison.Ordinal)
-               || text.Contains("disable", StringComparison.Ordinal)
-               || text.Contains("max tokens", StringComparison.Ordinal)
-               || text.Contains("chat history", StringComparison.Ordinal)
-               || text.Contains("history length", StringComparison.Ordinal)
-               || text.Contains("response mode", StringComparison.Ordinal)
-               || text.Contains("embed mode", StringComparison.Ordinal)
-               || text.Contains("model", StringComparison.Ordinal)
-               || text.Contains("casino", StringComparison.Ordinal);
-    }
-
-    private static string StripBotMentions(string content, ulong botUserId)
-    {
-        if (string.IsNullOrWhiteSpace(content))
-        {
-            return string.Empty;
+	    private static string StripBotMentions(string content, ulong botUserId)
+	    {
+	        if (string.IsNullOrWhiteSpace(content))
+	        {
+	            return string.Empty;
         }
 
         // Discord user mentions appear as <@id> or <@!id>
         var id = botUserId.ToString(CultureInfo.InvariantCulture);
         return content
             .Replace($"<@{id}>", string.Empty, StringComparison.OrdinalIgnoreCase)
-            .Replace($"<@!{id}>", string.Empty, StringComparison.OrdinalIgnoreCase)
-            .Trim();
-    }
+	            .Replace($"<@!{id}>", string.Empty, StringComparison.OrdinalIgnoreCase)
+	            .Trim();
+	    }
 
-    private async Task<bool> TryHandleMentionedSetToolAsync(SocketMessage message, ChannelState channelState, string strippedContent)
-    {
-        // Only run for mentions/DMs (caller responsibility).
-        // Return false to allow the normal chat response path.
+	    private static string NormalizeModuleId(string moduleId)
+	    {
+	        return (moduleId ?? string.Empty).Trim().ToLowerInvariant();
+	    }
 
-        var allowedSetOptions = BuildAllowedSetOptionList();
+	    public static bool IsModuleEnabled(ChannelState channelState, string moduleId)
+	    {
+	        if (channelState?.Options == null)
+	        {
+	            return true;
+	        }
 
-        var system = string.Join("\n", new[]
-        {
-            "You translate a user's natural language request into GPT-CLI Discord /gptcli set changes.",
-            "Return STRICT JSON only, no markdown, no extra keys.",
-            "Schema: {\"actions\":[{\"name\":\"<option>\",\"value\":<bool|number|string>}]}.",
-            "Only output actions for options explicitly requested by the user.",
-            "If the user isn't requesting settings changes, return {\"actions\":[]}.",
-            "",
-            "Valid option names and types:",
-            "- enabled: boolean",
-            "- mute: boolean",
-            "- response-mode: string (All|Matches)",
-            "- embed-mode: string (Explicit|All)",
-            "- max-chat-history-length: integer (>=100)",
-            "- max-tokens: integer (>=50)",
-            "- model: string",
-            "- plus module toggles: boolean options (names listed below)",
-            "",
-            "Module toggle option names:",
-            string.IsNullOrWhiteSpace(allowedSetOptions) ? "(none)" : allowedSetOptions
-        });
+	        var key = NormalizeModuleId(moduleId);
+	        if (string.IsNullOrWhiteSpace(key))
+	        {
+	            return true;
+	        }
 
-        var request = new ChatCompletionCreateRequest
-        {
-            Model = channelState.InstructionChat.ChatBotState.Parameters.Model,
-            Temperature = 0,
-            MaxTokens = 400,
-            Messages = new List<ChatMessage>
-            {
-                new(StaticValues.ChatMessageRoles.System, system),
-                new(StaticValues.ChatMessageRoles.User, strippedContent)
-            }
-        };
+	        channelState.Options.ModulesEnabled ??= new Dictionary<string, bool>();
 
-        var response = await OpenAILogic.CreateChatCompletionAsync(request);
-        if (!response.Successful)
-        {
-            await Console.Out.WriteLineAsync($"LLM set-tool failed: {response.Error?.Code} {response.Error?.Message}");
-            return false;
-        }
+	        // Modules listed here are "loaded but off" until explicitly enabled.
+	        var defaultDisabled = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+	        {
+	            "dnd"
+	        };
 
-        var content = response.Choices.FirstOrDefault()?.Message?.Content;
-        if (!TryParseLlmSetToolResult(content, out var result) || result.Actions.Count == 0)
-        {
-            return false;
-        }
+	        // Back-compat: casino was historically stored as a dedicated flag.
+	        if (string.Equals(key, "casino", StringComparison.OrdinalIgnoreCase) &&
+	            !channelState.Options.ModulesEnabled.ContainsKey(key))
+	        {
+	            return channelState.Options.CasinoEnabled;
+	        }
 
-        var applied = ApplySetToolActions(channelState, result.Actions);
-        if (applied.Count == 0)
-        {
-            return false;
-        }
+	        if (!channelState.Options.ModulesEnabled.TryGetValue(key, out var enabled))
+	        {
+	            return !defaultDisabled.Contains(key);
+	        }
 
-        await message.Channel.SendMessageAsync($"<@{message.Author.Id}> Updated settings:\n{string.Join("\n", applied)}");
-        return true;
-    }
+	        return enabled;
+	    }
 
-    private string BuildAllowedSetOptionList()
-    {
-        // Only module-set options (base /gptcli set options are listed in the system prompt).
-        if (_modulePipeline == null)
-        {
-            return string.Empty;
-        }
+	    public static void SetModuleEnabled(ChannelState channelState, string moduleId, bool enabled)
+	    {
+	        if (channelState?.Options == null)
+	        {
+	            return;
+	        }
 
-        try
-        {
-            var contributions = _modulePipeline.GetSlashCommandContributions();
-            var names = contributions
-                .Where(c => c != null
-                            && string.Equals(c.TargetOption, "set", StringComparison.OrdinalIgnoreCase)
-                            && c.Option != null
-                            && !string.IsNullOrWhiteSpace(c.Option.Name))
-                .Select(c => c.Option.Name.Trim())
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
-                .ToList();
+	        var key = NormalizeModuleId(moduleId);
+	        if (string.IsNullOrWhiteSpace(key))
+	        {
+	            return;
+	        }
 
-            return names.Count == 0 ? string.Empty : string.Join(", ", names);
-        }
-        catch
-        {
-            return string.Empty;
-        }
-    }
+	        channelState.Options.ModulesEnabled ??= new Dictionary<string, bool>();
+	        channelState.Options.ModulesEnabled[key] = enabled;
 
-    private sealed class LlmSetToolResult
-    {
-        public List<LlmSetToolAction> Actions { get; set; } = new();
-    }
+	        if (string.Equals(key, "casino", StringComparison.OrdinalIgnoreCase))
+	        {
+	            channelState.Options.CasinoEnabled = enabled;
+	        }
+	    }
 
-    private sealed class LlmSetToolAction
-    {
-        public string Name { get; set; }
-        public JsonElement Value { get; set; }
-    }
+	    private static bool IsFunctionAvailable(ChannelState channelState, GptCliFunction fn)
+	    {
+	        if (fn == null)
+	        {
+	            return false;
+	        }
 
-    private static bool TryParseLlmSetToolResult(string raw, out LlmSetToolResult result)
-    {
-        result = null;
-        if (string.IsNullOrWhiteSpace(raw))
-        {
-            return false;
-        }
+	        if (string.IsNullOrWhiteSpace(fn.ModuleId))
+	        {
+	            return true;
+	        }
 
-        var content = raw.Trim();
-        if (content.StartsWith("```", StringComparison.Ordinal))
-        {
-            var firstNewline = content.IndexOf('\n');
-            if (firstNewline >= 0)
-            {
-                content = content[(firstNewline + 1)..];
-            }
+	        if (fn.ExposeWhenModuleDisabled)
+	        {
+	            return true;
+	        }
 
-            if (content.EndsWith("```", StringComparison.Ordinal))
-            {
-                content = content[..^3];
-            }
+	        return IsModuleEnabled(channelState, fn.ModuleId);
+	    }
 
-            content = content.Trim();
-        }
 
-        var start = content.IndexOf('{');
-        var end = content.LastIndexOf('}');
-        if (start < 0 || end <= start)
-        {
-            return false;
-        }
+	    private async Task<bool> TryHandleMentionedToolCallsAsync(SocketMessage message, ChannelState channelState, string strippedContent)
+	    {
+	        // Real function-calling: we always offer tools when tagged/DM'd.
+	        // If the model chooses not to call any tool, we fall through to normal chat.
+	        var allFunctions = GetAllGptCliFunctions()
+	            .Where(f => f?.ExecuteAsync != null && !string.IsNullOrWhiteSpace(f.ToolName))
+	            .ToList();
 
-        var json = content[start..(end + 1)];
-        try
-        {
-            result = JsonSerializer.Deserialize<LlmSetToolResult>(
-                json,
-                new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-            return result != null;
-        }
-        catch
-        {
-            return false;
-        }
-    }
+	        if (allFunctions.Count == 0)
+	        {
+	            return false;
+	        }
 
-    private List<string> ApplySetToolActions(ChannelState channelState, IReadOnlyList<LlmSetToolAction> actions)
-    {
-        var applied = new List<string>();
-        foreach (var action in actions)
-        {
-            var name = (action.Name ?? string.Empty).Trim().ToLowerInvariant();
-            if (string.IsNullOrWhiteSpace(name))
-            {
-                continue;
-            }
+	        // Hide disabled module tools from the model (except module enable/disable functions).
+	        var availableFunctions = allFunctions
+	            .Where(f => IsFunctionAvailable(channelState, f))
+	            .ToList();
 
-            switch (name)
-            {
-                case "enabled":
-                    if (action.Value.ValueKind == JsonValueKind.True || action.Value.ValueKind == JsonValueKind.False)
-                    {
-                        var enabled = action.Value.GetBoolean();
-                        channelState.Options.Enabled = enabled;
-                        applied.Add($"- enabled = {enabled.ToString().ToLowerInvariant()}");
-                    }
-                    break;
-                case "mute":
-                    if (action.Value.ValueKind == JsonValueKind.True || action.Value.ValueKind == JsonValueKind.False)
-                    {
-                        var muted = action.Value.GetBoolean();
-                        channelState.Options.Muted = muted;
-                        applied.Add($"- mute = {muted.ToString().ToLowerInvariant()}");
-                    }
-                    break;
-                case "max-tokens":
-                    if (action.Value.TryGetInt32(out var maxTokens) && maxTokens >= 50)
-                    {
-                        channelState.InstructionChat.ChatBotState.Parameters.MaxTokens = maxTokens;
-                        applied.Add($"- max-tokens = {maxTokens}");
-                    }
-                    break;
-                case "max-chat-history-length":
-                    if (action.Value.TryGetInt32(out var maxHistory) && maxHistory >= 100)
-                    {
-                        channelState.InstructionChat.ChatBotState.Parameters.MaxChatHistoryLength = (uint)maxHistory;
-                        applied.Add($"- max-chat-history-length = {maxHistory}");
-                    }
-                    break;
-                case "model":
-                    if (action.Value.ValueKind == JsonValueKind.String)
-                    {
-                        var model = action.Value.GetString();
-                        if (!string.IsNullOrWhiteSpace(model))
-                        {
-                            channelState.InstructionChat.ChatBotState.Parameters.Model = model.Trim();
-                            applied.Add($"- model = {model.Trim()}");
-                        }
-                    }
-                    break;
-                case "response-mode":
-                    if (action.Value.ValueKind == JsonValueKind.String
-                        && Enum.TryParse<InstructionChatBot.ResponseMode>(action.Value.GetString(), true, out var responseMode))
-                    {
-                        channelState.InstructionChat.ChatBotState.ResponseMode = responseMode;
-                        applied.Add($"- response-mode = {responseMode}");
-                    }
-                    break;
-                case "embed-mode":
-                    if (action.Value.ValueKind == JsonValueKind.String
-                        && Enum.TryParse<InstructionChatBot.EmbedMode>(action.Value.GetString(), true, out var embedMode))
-                    {
-                        channelState.InstructionChat.ChatBotState.EmbedMode = embedMode;
-                        applied.Add($"- embed-mode = {embedMode}");
-                    }
-                    break;
-                default:
-                {
-                    // Best-effort module toggle: map "casino" -> Options.CasinoEnabled, etc.
-                    if (action.Value.ValueKind is JsonValueKind.True or JsonValueKind.False)
-                    {
-                        var value = action.Value.GetBoolean();
-                        if (TryApplyBooleanOptionByName(channelState, name, value))
-                        {
-                            applied.Add($"- {name} = {value.ToString().ToLowerInvariant()}");
-                        }
-                    }
+	        if (availableFunctions.Count == 0)
+	        {
+	            return false;
+	        }
 
-                    break;
-                }
-            }
-        }
+	        var tools = availableFunctions.Select(f => f.ToToolDefinition()).ToList();
 
-        return applied;
-    }
+	        var byName = new Dictionary<string, GptCliFunction>(StringComparer.OrdinalIgnoreCase);
+	        foreach (var f in allFunctions)
+	        {
+	            if (f != null && !string.IsNullOrWhiteSpace(f.ToolName) && !byName.ContainsKey(f.ToolName))
+	            {
+	                byName[f.ToolName] = f;
+	            }
+	        }
 
-    private static bool TryApplyBooleanOptionByName(ChannelState channelState, string optionName, bool value)
-    {
-        if (channelState?.Options == null || string.IsNullOrWhiteSpace(optionName))
-        {
-            return false;
-        }
+	        var system = string.Join("\n", new[]
+	        {
+	            "You are a router for GPT-CLI Discord slash commands.",
+	            "If (and only if) the user is asking to perform a GPT-CLI slash command, call the appropriate tool(s).",
+	            "If the user is not asking to perform a slash command, do not call any tools and let the normal chat response happen.",
+	            "Never explain your reasoning."
+	        });
 
-        var options = channelState.Options;
-        var type = options.GetType();
+	        var request = new ChatCompletionCreateRequest
+	        {
+	            Model = channelState.InstructionChat.ChatBotState.Parameters.Model,
+	            Temperature = 0,
+	            MaxTokens = null,
+	            MaxCompletionTokens = null,
+	            ParallelToolCalls = false,
+	            Messages = new List<ChatMessage>
+	            {
+	                new(StaticValues.ChatMessageRoles.System, system),
+	                new(StaticValues.ChatMessageRoles.User, strippedContent)
+	            },
+	            Tools = tools,
+	            ToolChoice = new ToolChoice { Type = "auto" }
+	        };
 
-        static string ToPascal(string input)
-        {
-            var parts = input.Split(new[] { '-', '_', ' ' }, StringSplitOptions.RemoveEmptyEntries);
-            return string.Concat(parts.Select(p => char.ToUpperInvariant(p[0]) + p.Substring(1)));
-        }
+	        ApplyModelTokenLimit(request, request.Model, maxTokens: 200);
 
-        var baseName = ToPascal(optionName);
-        var candidates = new[]
-        {
-            baseName,
-            baseName + "Enabled"
-        };
+	        var response = await OpenAILogic.CreateChatCompletionAsync(request);
+	        if (!response.Successful)
+	        {
+	            await Console.Out.WriteLineAsync($"LLM tools failed: {response.Error?.Code} {response.Error?.Message}");
+	            return false;
+	        }
 
-        foreach (var candidate in candidates)
-        {
-            var prop = type.GetProperty(candidate);
-            if (prop?.PropertyType == typeof(bool) && prop.CanWrite)
-            {
-                prop.SetValue(options, value);
-                return true;
-            }
-        }
+	        var msg = response.Choices.FirstOrDefault()?.Message;
+	        if (msg == null)
+	        {
+	            return false;
+	        }
 
-        return false;
-    }
+	        var toolCalls = msg.ToolCalls;
+	        if (toolCalls == null || toolCalls.Count == 0)
+	        {
+	            // Back-compat: older function_call field.
+	            if (msg.FunctionCall == null)
+	            {
+	                return false;
+	            }
+
+	            toolCalls = new List<ToolCall>
+	            {
+	                new() { Type = "function", FunctionCall = msg.FunctionCall }
+	            };
+	        }
+
+	        var applied = new List<string>();
+	        var errors = new List<string>();
+
+	        foreach (var call in toolCalls)
+	        {
+	            var toolFn = call?.FunctionCall;
+	            if (toolFn == null || string.IsNullOrWhiteSpace(toolFn.Name))
+	            {
+	                continue;
+	            }
+
+	            if (!byName.TryGetValue(toolFn.Name, out var match) || match == null)
+	            {
+	                errors.Add($"Unknown tool '{toolFn.Name}'.");
+	                continue;
+	            }
+
+	            if (!IsFunctionAvailable(channelState, match))
+	            {
+	                errors.Add($"Tool '{toolFn.Name}' is unavailable because module '{match.ModuleId}' is disabled.");
+	                continue;
+	            }
+
+	            var argsJson = string.IsNullOrWhiteSpace(toolFn.Arguments) ? "{}" : toolFn.Arguments;
+	            var ctx = new GptCliExecutionContext(_moduleContext, channelState, message.Channel, message.Author, null, message);
+	            var result = await match.ExecuteAsync(ctx, argsJson, _shutdownToken);
+	            if (result is { Handled: true } && !string.IsNullOrWhiteSpace(result.Response))
+	            {
+	                applied.Add(result.Response.Trim());
+	            }
+	        }
+
+	        if (applied.Count == 0)
+	        {
+	            return false;
+	        }
+
+	        var replyLines = new List<string> { $"<@{message.Author.Id}> OK:" };
+	        if (applied.Count == 1)
+	        {
+	            replyLines.Add(applied[0]);
+	        }
+	        else
+	        {
+	            replyLines.AddRange(applied.Select(line => $"- {line}"));
+	        }
+
+	        if (errors.Count > 0)
+	        {
+	            replyLines.Add("Some requests were ignored:");
+	            replyLines.AddRange(errors.Take(10).Select(err => $"- {err}"));
+	        }
+
+	        await message.Channel.SendMessageAsync(string.Join("\n", replyLines));
+	        return true;
+	    }
 
     public static string BuildDiscordMessageLink(ChannelState channel, ulong messageId)
     {
@@ -2749,8 +2589,8 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
             normalized.Contains(term, StringComparison.OrdinalIgnoreCase));
     }
 
-    private async Task<string> GenerateImageDescriptionAsync(ChannelState channelState, IMessage message, string fileName,
-        byte[] bytes, string contentType)
+	    private async Task<string> GenerateImageDescriptionAsync(ChannelState channelState, IMessage message, string fileName,
+	        byte[] bytes, string contentType)
     {
         if (bytes == null || bytes.Length == 0)
         {
@@ -2779,22 +2619,27 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
             MessageContent.ImageBinaryContent(bytes, mediaType, "auto")
         };
 
-        var request = new ChatCompletionCreateRequest
-        {
-            Model = visionModel,
+	        var request = new ChatCompletionCreateRequest
+	        {
+	            Model = visionModel,
             Messages = new List<ChatMessage>
             {
                 new(StaticValues.ChatMessageRoles.System,
                     "You describe images for a Discord bot. Return only the description text. No markdown or code fences."),
                 new ChatMessage(StaticValues.ChatMessageRoles.User, contentItems)
             },
-            Stream = false,
-            Temperature = 0.2f,
-            TopP = 1.0f,
-            MaxTokens = ResolveVisionDescriptionMaxTokens(channelState.InstructionChat.ChatBotState.Parameters)
-        };
+	            Stream = false,
+	            Temperature = 0.2f,
+	            TopP = 1.0f,
+	            MaxTokens = null,
+	            MaxCompletionTokens = null
+	        };
+	        ApplyModelTokenLimit(
+	            request,
+	            visionModel,
+	            ResolveVisionDescriptionMaxTokens(channelState.InstructionChat.ChatBotState.Parameters));
 
-        var response = await OpenAILogic.CreateChatCompletionAsync(request);
+	        var response = await OpenAILogic.CreateChatCompletionAsync(request);
         if (!response.Successful)
         {
             await Console.Out.WriteLineAsync(
@@ -2978,8 +2823,8 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
         return DefaultParameters.VisionModel;
     }
 
-    private static void ApplyVisionParameters(ChatCompletionCreateRequest request, GptOptions parameters, string modelOverride)
-    {
+	    private static void ApplyVisionParameters(ChatCompletionCreateRequest request, GptOptions parameters, string modelOverride)
+	    {
         request.Model = modelOverride;
         request.N = parameters.N;
         request.Temperature = (float?)parameters.Temperature;
@@ -2993,9 +2838,22 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
             : JsonSerializer.Deserialize<Dictionary<string, double>>(parameters.LogitBias);
         request.User = parameters.User;
 
-        request.MaxTokens = ClampVisionMaxTokens(parameters.MaxTokens);
-        request.MaxCompletionTokens = null;
-    }
+	        request.MaxTokens = null;
+	        request.MaxCompletionTokens = null;
+	        ApplyModelTokenLimit(request, modelOverride, ClampVisionMaxTokens(parameters.MaxTokens));
+	    }
+
+	    private static void ApplyModelTokenLimit(ChatCompletionCreateRequest request, string modelName, int? maxTokens)
+	    {
+	        if (request == null || !maxTokens.HasValue)
+	        {
+	            return;
+	        }
+
+	        // Prefer `max_completion_tokens` for chat completions to avoid model-specific rejections of `max_tokens`.
+	        request.MaxTokens = null;
+	        request.MaxCompletionTokens = maxTokens.Value;
+	    }
 
     private static int? ClampVisionMaxTokens(int? requested)
     {
@@ -3559,8 +3417,8 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
         
     }
 
-    private async Task HandleGptCliCommand(SocketSlashCommand command)
-    {
+	    private async Task HandleGptCliCommand(SocketSlashCommand command)
+	    {
         if (!command.HasResponded)
         {
             await command.DeferAsync(ephemeral: true);
@@ -3586,324 +3444,787 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
             return;
         }
 
-        var responses = new List<string>();
-        var options = command.Data.Options;
-        if (options == null || options.Count == 0)
-        {
-            responses.Add("No options provided.");
-        }
-        else
-        {
-            foreach (var option in options)
-            {
-                var subOption = option.Options?.FirstOrDefault();
-                switch (option.Name)
-                {
-                    case "help":
-                    {
-                        var help = string.Join("\n", new[]
-                        {
-                            "**GPT-CLI help**",
-                            "_Quick guide to the slash commands and reactions_",
-                            "",
-                            "**Core commands**",
-                            "• `/gptcli help` — show this message",
-                            "• `/gptcli modules` — list loaded feature modules",
-                            "• `/gptcli instruction add text:\"...\"`",
-                            "• `/gptcli instruction list`",
-                            "• `/gptcli instruction get index:<n>`",
-                            "• `/gptcli instruction delete index:<n>`",
-                            "• `/gptcli instruction clear`",
-                            "• `/gptcli clear messages|instructions|all`",
-                            "",
-                            "**Bot settings**",
-                            "• `/gptcli set enabled true|false`",
-                            "• `/gptcli set mute true|false`",
-                            "• `/gptcli set model gpt-5.2`",
-                            "• `/gptcli set max-tokens <number>`",
-                            "• `/gptcli set max-chat-history-length <number>`",
-                            "• `/gptcli set response-mode All|Matches`",
-                            "• `/gptcli set embed-mode Explicit|All`",
-                            "• `/gptcli set infobot true|false`",
-                            "",
-                            "**Infobot**",
-                            "• `/gptcli infobot help` — how it learns & matches",
-                            "• `/gptcli infobot set term text`",
-                            "• `/gptcli infobot get term`",
-                            "• `/gptcli infobot delete term`",
-                            "• `/gptcli infobot list`",
-                            "• `/gptcli infobot leaderboard` — leaderboard",
-                            "• `/gptcli infobot personality prompt:\"...\"`",
-                            "",
-                            "**Reactions**",
-                            "• 📌 add message as instruction",
-                            "• 💾 save message as embed",
-                            "• 🧹 delete image embeds for that message",
-                            "• 🔄 replay a user message as a prompt",
-                            "• 🗑️ remove matched factoid term (on infobot reply)",
-                            "• 🛑 disable infobot for this channel (on infobot reply)"
-                        });
-                        responses.Add(help);
-                        break;
-                    }
-                    case "modules":
-                    {
-                        if (_modulePipeline == null)
-                        {
-                            responses.Add("Module pipeline is not initialized.");
-                            break;
-                        }
-
-                        var report = _modulePipeline.DiscoveryReport;
-                        responses.Add($"ModulesPath: `{report?.ModulesPath ?? "unknown"}`");
-
-                        if (report?.FoundDlls is { Count: > 0 })
-                        {
-                            responses.Add($"DLLs found ({report.FoundDlls.Count}):");
-                            responses.AddRange(report.FoundDlls
-                                .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
-                                .Select(path => $"- {Path.GetFileName(path)}"));
-                        }
-                        else
-                        {
-                            responses.Add("DLLs found: 0");
-                        }
-
-                        var modules = _modulePipeline.Modules;
-                        if (modules == null || modules.Count == 0)
-                        {
-                            responses.Add("No modules loaded.");
-                            if (report?.LoadErrors is { Count: > 0 })
-                            {
-                                responses.Add("Load errors:");
-                                responses.AddRange(report.LoadErrors.Take(20).Select(err => $"- {err}"));
-                            }
-                            break;
-                        }
-
-                        var lines = modules
-                            .OrderBy(m => m.Id, StringComparer.OrdinalIgnoreCase)
-                            .Select(module =>
-                            {
-                                var deps = module.DependsOn == null || module.DependsOn.Count == 0
-                                    ? "-"
-                                    : string.Join(", ", module.DependsOn.OrderBy(d => d, StringComparer.OrdinalIgnoreCase));
-
-                                var type = module.GetType().FullName ?? module.GetType().Name;
-                                return $"- {module.Id}: {module.Name} (deps: {deps}) ({type})";
-                            })
-                            .ToList();
-
-                        responses.Add($"Loaded modules ({modules.Count}):\n{string.Join("\n", lines)}");
-
-                        if (report?.LoadErrors is { Count: > 0 })
-                        {
-                            responses.Add("Load errors:");
-                            responses.AddRange(report.LoadErrors.Take(20).Select(err => $"- {err}"));
-                        }
-                        break;
-                    }
-                    case "clear":
-                        if (subOption == null)
-                        {
-                            responses.Add("Specify messages, instructions, or all.");
-                            break;
-                        }
-
-                        switch (subOption.Name)
-                        {
-                            case "messages":
-                                chatBot.InstructionChat.ClearMessages();
-                                break;
-                            case "instructions":
-                                chatBot.InstructionChat.ClearInstructions();
-                                break;
-                            case "all":
-                                chatBot.InstructionChat.ClearMessages();
-                                chatBot.InstructionChat.ClearInstructions();
-                                break;
-                            default:
-                                responses.Add($"Unknown clear option: {subOption.Name}");
-                                break;
-                        }
-
-                        var clearName = string.IsNullOrWhiteSpace(subOption.Name) ? "Option" : subOption.Name;
-                        responses.Add($"{char.ToUpper(clearName[0])}{clearName.Substring(1)} cleared.");
-                        break;
-                    case "instruction":
-                        if (subOption == null)
-                        {
-                            responses.Add("Specify an instruction command.");
-                            break;
-                        }
-
-                        switch (subOption.Name)
-                        {
-                            case "add":
-                            {
-                                var instruction = subOption.Options?.FirstOrDefault(o => o.Name == "text")?.Value?.ToString()
-                                                  ?? subOption.Value?.ToString()
-                                                  ?? option.Value?.ToString();
-                                if (!string.IsNullOrWhiteSpace(instruction))
-                                {
-                                    chatBot.InstructionChat.AddInstruction(new(StaticValues.ChatMessageRoles.System, instruction));
-                                    responses.Add("Instruction added.");
-                                }
-                                else
-                                {
-                                    responses.Add("Provide instruction text.");
-                                }
-                                break;
-                            }
-                            case "list":
-                            {
-                                var instructions = chatBot.InstructionChat.ChatBotState.Instructions;
-                                if (instructions == null || instructions.Count == 0)
-                                {
-                                    responses.Add("No instructions stored.");
-                                    break;
-                                }
-
-                                var lines = instructions
-                                    .Select((inst, index) => $"{index + 1}. {inst.Content}")
-                                    .ToList();
-                                responses.Add($"Instructions:\n{string.Join("\n", lines)}");
-                                break;
-                            }
-                            case "get":
-                            {
-                                var indexValue = subOption.Options?.FirstOrDefault(o => o.Name == "index")?.Value;
-                                if (indexValue is not long indexLong)
-                                {
-                                    responses.Add("Provide instruction index.");
-                                    break;
-                                }
-
-                                var instructions = chatBot.InstructionChat.ChatBotState.Instructions;
-                                var index = (int)indexLong - 1;
-                                if (instructions == null || index < 0 || index >= instructions.Count)
-                                {
-                                    responses.Add("Instruction index out of range.");
-                                    break;
-                                }
-
-                                responses.Add($"{index + 1}. {instructions[index].Content}");
-                                break;
-                            }
-                            case "delete":
-                            {
-                                var indexValue = subOption.Options?.FirstOrDefault(o => o.Name == "index")?.Value;
-                                if (indexValue is not long indexLong)
-                                {
-                                    responses.Add("Provide instruction index.");
-                                    break;
-                                }
-
-                                var instructions = chatBot.InstructionChat.ChatBotState.Instructions;
-                                var index = (int)indexLong - 1;
-                                if (instructions == null || index < 0 || index >= instructions.Count)
-                                {
-                                    responses.Add("Instruction index out of range.");
-                                    break;
-                                }
-
-                                chatBot.InstructionChat.RemoveInstruction(index);
-                                responses.Add($"Instruction {index + 1} deleted.");
-                                break;
-                            }
-                            case "clear":
-                                chatBot.InstructionChat.ClearInstructions();
-                                responses.Add("Instructions cleared.");
-                                break;
-                            default:
-                                responses.Add($"Unknown instruction command: {subOption.Name}");
-                                break;
-                        }
-                        break;
-                    case "instructions":
-                        responses.Add($"Instructions: {chatBot.InstructionChat.InstructionStr}");
-                        break;
-                    case "set":
-                        if (subOption == null)
-                        {
-                            responses.Add("Specify a setting to change.");
-                            break;
-                        }
-
-                        switch (subOption.Name)
-                        {
-                            case "enabled":
-                                if (subOption.Value is bool enabled)
-                                {
-                                    chatBot.Options.Enabled = enabled;
-                                    responses.Add($"InstructionChat bot {(enabled ? "enabled" : "disabled")}.");
-                                }
-                                break;
-                            case "mute":
-                                if (subOption.Value is bool muted)
-                                {
-                                    chatBot.Options.Muted = muted;
-                                    responses.Add($"InstructionChat bot {(muted ? "muted" : "un-muted")}.");
-                                }
-                                break;
-                            case "max-tokens":
-                                if (subOption.Value is long maxTokens)
-                                {
-                                    chatBot.InstructionChat.ChatBotState.Parameters.MaxTokens = (int?)maxTokens;
-                                    responses.Add($"Max tokens set to {maxTokens}.");
-                                }
-                                break;
-                            case "max-chat-history-length":
-                                if (subOption.Value is long maxChatHistoryLength)
-                                {
-                                    chatBot.InstructionChat.ChatBotState.Parameters.MaxChatHistoryLength = (uint)maxChatHistoryLength;
-                                    responses.Add($"Max chat history length set to {maxChatHistoryLength}.");
-                                }
-                                break;
-                            case "model":
-                                if (subOption.Value is string model)
-                                {
-                                    chatBot.InstructionChat.ChatBotState.Parameters.Model = model;
-                                    responses.Add($"Model set to {model}.");
-                                }
-                                break;
-                            case "embed-mode":
-                                if (subOption.Value is string embedMode &&
-                                    Enum.TryParse<InstructionChatBot.EmbedMode>(embedMode, true, out var parsedEmbedMode))
-                                {
-                                    chatBot.InstructionChat.ChatBotState.EmbedMode = parsedEmbedMode;
-                                    responses.Add($"Embed mode set to {embedMode}.");
-                                }
-                                break;
-                            case "response-mode":
-                                if (subOption.Value is string responseMode &&
-                                    Enum.TryParse<InstructionChatBot.ResponseMode>(responseMode, true, out var parsedResponseMode))
-                                {
-                                    chatBot.InstructionChat.ChatBotState.ResponseMode = parsedResponseMode;
-                                    responses.Add($"Response mode set to {responseMode}.");
-                                }
-                                break;
-                            default:
-                                responses.Add($"Unknown setting: {subOption.Name}");
-                                break;
-                        }
-                        break;
-                    default:
-                        responses.Add($"Unknown option: {option.Name}");
-                        break;
-                }
-            }
-        }
+	        var responses = new List<string>();
+	        var functions = GetAllGptCliFunctions();
+	        await ExecuteGptCliSlashAsync(command, _moduleContext, chatBot, functions, responses, _shutdownToken);
 
         if (responses.Count == 0)
         {
             responses.Add("No changes made.");
         }
 
-        var responseText = string.Join("\n", responses);
-        await SendEphemeralResponseAsync(command, responseText);
-
+        await SendEphemeralResponseAsync(command, string.Join("\n", responses));
         await SaveCachedChannelState(channel.Id);
+    }
+
+    private IReadOnlyList<GptCliFunction> GetAllGptCliFunctions()
+    {
+        var list = new List<GptCliFunction>();
+        list.AddRange(BuildCoreGptCliFunctions());
+        if (_modulePipeline != null)
+        {
+            list.AddRange(_modulePipeline.GetGptCliFunctions());
+        }
+
+        // Deduplicate by tool name; first wins.
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        return list.Where(fn => fn != null && !string.IsNullOrWhiteSpace(fn.ToolName) && seen.Add(fn.ToolName)).ToList();
+    }
+
+    private IReadOnlyList<GptCliFunction> BuildCoreGptCliFunctions()
+    {
+        // Keep tool names stable.
+	        return new List<GptCliFunction>
+	        {
+            new()
+            {
+                ToolName = "gptcli_help",
+                Description = "Show GPT-CLI help",
+                Slash = new GptCliSlashBinding(GptCliSlashBindingKind.SubCommand, "help", "Help"),
+                ExecuteAsync = async (ctx, argsJson, ct) =>
+                {
+                    await Task.Yield();
+                    return new GptCliExecutionResult(true, BuildCoreHelpText(), false);
+                }
+            },
+	            new()
+	            {
+	                ToolName = "gptcli_modules",
+	                Description = "List loaded feature modules and module loading diagnostics",
+	                Slash = new GptCliSlashBinding(GptCliSlashBindingKind.SubCommand, "modules", "Modules"),
+	                ExecuteAsync = async (ctx, argsJson, ct) =>
+	                {
+	                    await Task.Yield();
+	                    return new GptCliExecutionResult(true, BuildModulesText(ctx?.ChannelState), false);
+	                }
+	            },
+            new()
+            {
+                ToolName = "gptcli_clear",
+                Description = "Clear stored messages/instructions for this channel",
+                Slash = new GptCliSlashBinding(GptCliSlashBindingKind.SubCommand, "clear", "Clear"),
+                Parameters = new[]
+                {
+                    new GptCliParamSpec(
+                        "target",
+                        GptCliParamType.String,
+                        "messages, instructions, or all",
+                        Required: true,
+                        Choices: new[]
+                        {
+                            new GptCliParamChoice("messages", "messages"),
+                            new GptCliParamChoice("instructions", "instructions"),
+                            new GptCliParamChoice("all", "all")
+                        })
+                },
+                ExecuteAsync = ExecuteClearAsync
+            },
+            new()
+            {
+                ToolName = "gptcli_instruction_add",
+                Description = "Add a system instruction",
+                Slash = new GptCliSlashBinding(GptCliSlashBindingKind.GroupSubCommand, "instruction", "Instructions", "add"),
+                Parameters = new[]
+                {
+                    new GptCliParamSpec("text", GptCliParamType.String, "Instruction text", Required: true)
+                },
+                ExecuteAsync = ExecuteInstructionAddAsync
+            },
+            new()
+            {
+                ToolName = "gptcli_instruction_list",
+                Description = "List current instructions",
+                Slash = new GptCliSlashBinding(GptCliSlashBindingKind.GroupSubCommand, "instruction", "Instructions", "list"),
+                ExecuteAsync = ExecuteInstructionListAsync
+            },
+            new()
+            {
+                ToolName = "gptcli_instruction_get",
+                Description = "Get an instruction by index (1-based)",
+                Slash = new GptCliSlashBinding(GptCliSlashBindingKind.GroupSubCommand, "instruction", "Instructions", "get"),
+                Parameters = new[]
+                {
+                    new GptCliParamSpec("index", GptCliParamType.Integer, "1-based instruction index", Required: true, MinInt: 1)
+                },
+                ExecuteAsync = ExecuteInstructionGetAsync
+            },
+            new()
+            {
+                ToolName = "gptcli_instruction_delete",
+                Description = "Delete an instruction by index (1-based)",
+                Slash = new GptCliSlashBinding(GptCliSlashBindingKind.GroupSubCommand, "instruction", "Instructions", "delete"),
+                Parameters = new[]
+                {
+                    new GptCliParamSpec("index", GptCliParamType.Integer, "1-based instruction index", Required: true, MinInt: 1)
+                },
+                ExecuteAsync = ExecuteInstructionDeleteAsync
+            },
+            new()
+            {
+                ToolName = "gptcli_instruction_clear",
+                Description = "Clear all instructions",
+                Slash = new GptCliSlashBinding(GptCliSlashBindingKind.GroupSubCommand, "instruction", "Instructions", "clear"),
+                ExecuteAsync = ExecuteInstructionClearAsync
+            },
+
+            BuildCoreSetOption("enabled", GptCliParamType.Boolean, "Enable or disable the chat bot in this channel.", ExecuteSetEnabledAsync),
+            BuildCoreSetOption("mute", GptCliParamType.Boolean, "Mute or unmute the chat bot in this channel.", ExecuteSetMuteAsync),
+            BuildCoreSetOption("response-mode", GptCliParamType.String, "Set the response mode (All|Matches).", ExecuteSetResponseModeAsync,
+                choices: new[] { new GptCliParamChoice("All", "All"), new GptCliParamChoice("Matches", "Matches") }),
+            BuildCoreSetOption("embed-mode", GptCliParamType.String, "Set the embed mode (Explicit|All).", ExecuteSetEmbedModeAsync,
+                choices: new[] { new GptCliParamChoice("Explicit", "Explicit"), new GptCliParamChoice("All", "All") }),
+            BuildCoreSetOption("max-chat-history-length", GptCliParamType.Integer, "Set the maximum chat history length.", ExecuteSetMaxChatHistoryAsync, minInt: 100),
+            BuildCoreSetOption("max-tokens", GptCliParamType.Integer, "Set the maximum tokens.", ExecuteSetMaxTokensAsync, minInt: 50),
+            BuildCoreSetOption("model", GptCliParamType.String, "Set the model name.", ExecuteSetModelAsync)
+        };
+    }
+
+    private GptCliFunction BuildCoreSetOption(
+        string optionName,
+        GptCliParamType type,
+        string description,
+        Func<GptCliExecutionContext, string, CancellationToken, Task<GptCliExecutionResult>> executor,
+        int? minInt = null,
+        IReadOnlyList<GptCliParamChoice> choices = null)
+    {
+        return new GptCliFunction
+        {
+            ToolName = $"gptcli_set_{optionName.Replace("-", "_")}",
+            Description = description,
+            Slash = new GptCliSlashBinding(GptCliSlashBindingKind.SetOption, "set", "Settings", SetOptionName: optionName),
+            Parameters = new[]
+            {
+                new GptCliParamSpec("value", type, "Value", Required: true, MinInt: minInt, Choices: choices)
+            },
+            ExecuteAsync = executor
+        };
+    }
+
+	    private static async Task ExecuteGptCliSlashAsync(
+	        SocketSlashCommand command,
+	        DiscordModuleContext moduleContext,
+	        ChannelState channelState,
+	        IReadOnlyList<GptCliFunction> functions,
+	        List<string> responses,
+	        CancellationToken cancellationToken)
+	    {
+        if (command?.Data?.Options == null || command.Data.Options.Count == 0)
+        {
+            return;
+        }
+
+        var bySubCommand = functions
+            .Where(f => f?.Slash?.Kind == GptCliSlashBindingKind.SubCommand)
+            .ToDictionary(f => f.Slash.TopLevelName, StringComparer.OrdinalIgnoreCase);
+
+        var byGroup = functions
+            .Where(f => f?.Slash?.Kind == GptCliSlashBindingKind.GroupSubCommand)
+            .ToDictionary(f => $"{f.Slash.TopLevelName}/{f.Slash.SubCommandName}", StringComparer.OrdinalIgnoreCase);
+
+        var setOptions = functions
+            .Where(f => f?.Slash?.Kind == GptCliSlashBindingKind.SetOption)
+            .ToDictionary(f => f.Slash.SetOptionName, StringComparer.OrdinalIgnoreCase);
+
+        foreach (var option in command.Data.Options)
+        {
+            if (option == null)
+            {
+                continue;
+            }
+
+            if (option.Type == ApplicationCommandOptionType.SubCommand)
+            {
+	                if (string.Equals(option.Name, "set", StringComparison.OrdinalIgnoreCase))
+	                {
+	                    foreach (var setOpt in option.Options ?? Enumerable.Empty<SocketSlashCommandDataOption>())
+	                    {
+                        if (setOpt?.Value == null)
+                        {
+                            continue;
+                        }
+
+	                        if (!setOptions.TryGetValue(setOpt.Name, out var fn))
+	                        {
+	                            continue;
+	                        }
+
+	                        if (!IsFunctionAvailable(channelState, fn))
+	                        {
+	                            responses.Add($"Module '{fn.ModuleId}' is disabled. Enable it via `/gptcli set {fn.ModuleId} true`.");
+	                            continue;
+	                        }
+
+	                        var paramName = fn.Parameters?.FirstOrDefault()?.Name ?? "value";
+	                        var argsJson = BuildJsonObject(new Dictionary<string, object> { [paramName] = setOpt.Value });
+	                        var ctx = new GptCliExecutionContext(moduleContext, channelState, command.Channel, command.User, command, null);
+	                        var result = await fn.ExecuteAsync(ctx, argsJson, cancellationToken);
+	                        if (result is { Handled: true } && !string.IsNullOrWhiteSpace(result.Response))
+	                        {
+	                            responses.Add(result.Response.Trim());
+	                        }
+                    }
+
+                    continue;
+                }
+
+	                if (bySubCommand.TryGetValue(option.Name, out var subFn))
+	                {
+	                    if (!IsFunctionAvailable(channelState, subFn))
+	                    {
+	                        responses.Add($"Module '{subFn.ModuleId}' is disabled. Enable it via `/gptcli set {subFn.ModuleId} true`.");
+	                        continue;
+	                    }
+
+	                    var argsJson = BuildJsonObject(BuildArgsFromSlashOptions(option.Options));
+	                    var ctx = new GptCliExecutionContext(moduleContext, channelState, command.Channel, command.User, command, null);
+	                    var result = await subFn.ExecuteAsync(ctx, argsJson, cancellationToken);
+	                    if (result is { Handled: true } && !string.IsNullOrWhiteSpace(result.Response))
+	                    {
+	                        responses.Add(result.Response.Trim());
+	                    }
+	                }
+
+                continue;
+            }
+
+            if (option.Type == ApplicationCommandOptionType.SubCommandGroup)
+            {
+                var sub = option.Options?.FirstOrDefault();
+                if (sub == null)
+                {
+                    continue;
+                }
+
+	                var key = $"{option.Name}/{sub.Name}";
+	                if (!byGroup.TryGetValue(key, out var fn))
+	                {
+	                    continue;
+	                }
+
+	                if (!IsFunctionAvailable(channelState, fn))
+	                {
+	                    responses.Add($"Module '{fn.ModuleId}' is disabled. Enable it via `/gptcli set {fn.ModuleId} true`.");
+	                    continue;
+	                }
+
+	                var argsJson = BuildJsonObject(BuildArgsFromSlashOptions(sub.Options));
+	                var ctx = new GptCliExecutionContext(moduleContext, channelState, command.Channel, command.User, command, null);
+	                var result = await fn.ExecuteAsync(ctx, argsJson, cancellationToken);
+	                if (result is { Handled: true } && !string.IsNullOrWhiteSpace(result.Response))
+	                {
+	                    responses.Add(result.Response.Trim());
+	                }
+	            }
+	        }
+	    }
+
+    private static Dictionary<string, object> BuildArgsFromSlashOptions(IReadOnlyCollection<SocketSlashCommandDataOption> options)
+    {
+        var args = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+        if (options == null)
+        {
+            return args;
+        }
+
+        foreach (var opt in options)
+        {
+            if (opt?.Value == null || string.IsNullOrWhiteSpace(opt.Name))
+            {
+                continue;
+            }
+
+            args[opt.Name] = opt.Value;
+        }
+
+        return args;
+    }
+
+    private static string BuildJsonObject(Dictionary<string, object> values)
+    {
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream))
+        {
+            writer.WriteStartObject();
+            foreach (var kvp in values ?? new Dictionary<string, object>())
+            {
+                if (string.IsNullOrWhiteSpace(kvp.Key) || kvp.Value == null)
+                {
+                    continue;
+                }
+
+                writer.WritePropertyName(kvp.Key);
+                WriteJsonValue(writer, kvp.Value);
+            }
+            writer.WriteEndObject();
+        }
+
+        return Encoding.UTF8.GetString(stream.ToArray());
+    }
+
+	    private static void WriteJsonValue(Utf8JsonWriter writer, object value)
+	    {
+	        switch (value)
+	        {
+            case bool b:
+                writer.WriteBooleanValue(b);
+                return;
+            case int i:
+                writer.WriteNumberValue(i);
+                return;
+            case long l:
+                writer.WriteNumberValue(l);
+                return;
+            case double d:
+                writer.WriteNumberValue(d);
+                return;
+            case float f:
+                writer.WriteNumberValue(f);
+                return;
+            case decimal dec:
+                writer.WriteNumberValue(dec);
+                return;
+            case string s:
+                writer.WriteStringValue(s);
+                return;
+            case SocketUser user:
+                writer.WriteStringValue(user.Id.ToString(CultureInfo.InvariantCulture));
+                return;
+            case SocketGuildChannel channel:
+                writer.WriteStringValue(channel.Id.ToString(CultureInfo.InvariantCulture));
+                return;
+	            case SocketRole role:
+	                writer.WriteStringValue(role.Id.ToString(CultureInfo.InvariantCulture));
+	                return;
+	            case global::Discord.IAttachment attachment:
+	                writer.WriteStringValue(attachment.Url ?? attachment.Filename ?? attachment.Id.ToString(CultureInfo.InvariantCulture));
+	                return;
+	            default:
+	                writer.WriteStringValue(value.ToString());
+	                return;
+	        }
+	    }
+
+	    private List<SlashCommandOptionBuilder> BuildGptCliSlashOptions(IReadOnlyList<GptCliFunction> functions)
+	    {
+	        var topLevel = new Dictionary<string, SlashCommandOptionBuilder>(StringComparer.OrdinalIgnoreCase);
+	        var order = new List<string>();
+
+	        foreach (var fn in functions ?? Array.Empty<GptCliFunction>())
+	        {
+	            var slash = fn?.Slash;
+	            if (slash == null || string.IsNullOrWhiteSpace(slash.TopLevelName))
+	            {
+	                continue;
+	            }
+
+	            switch (slash.Kind)
+	            {
+	                case GptCliSlashBindingKind.SubCommand:
+	                {
+	                    var name = slash.TopLevelName.Trim();
+	                    if (!topLevel.TryGetValue(name, out var opt))
+	                    {
+	                        opt = new SlashCommandOptionBuilder()
+	                            .WithName(name)
+	                            .WithDescription(slash.TopLevelDescription ?? fn.Description ?? name)
+	                            .WithType(ApplicationCommandOptionType.SubCommand);
+	                        topLevel[name] = opt;
+	                        order.Add(name);
+	                    }
+
+	                    if (opt.Type != ApplicationCommandOptionType.SubCommand)
+	                    {
+	                        continue;
+	                    }
+
+	                    foreach (var p in fn.Parameters ?? Array.Empty<GptCliParamSpec>())
+	                    {
+	                        if (string.IsNullOrWhiteSpace(p.Name))
+	                        {
+	                            continue;
+	                        }
+
+	                        var exists = opt.Options?.Any(o => string.Equals(o.Name, p.Name, StringComparison.OrdinalIgnoreCase)) == true;
+	                        if (!exists)
+	                        {
+	                            opt.AddOption(fn.BuildSlashParamOption(p));
+	                        }
+	                    }
+
+	                    break;
+	                }
+	                case GptCliSlashBindingKind.GroupSubCommand:
+	                {
+	                    var groupName = slash.TopLevelName.Trim();
+	                    if (!topLevel.TryGetValue(groupName, out var group))
+	                    {
+	                        group = new SlashCommandOptionBuilder()
+	                            .WithName(groupName)
+	                            .WithDescription(slash.TopLevelDescription ?? groupName)
+	                            .WithType(ApplicationCommandOptionType.SubCommandGroup);
+	                        topLevel[groupName] = group;
+	                        order.Add(groupName);
+	                    }
+
+	                    if (group.Type != ApplicationCommandOptionType.SubCommandGroup || string.IsNullOrWhiteSpace(slash.SubCommandName))
+	                    {
+	                        continue;
+	                    }
+
+	                    var subName = slash.SubCommandName.Trim();
+	                    var subExists = group.Options?.Any(o => string.Equals(o.Name, subName, StringComparison.OrdinalIgnoreCase)) == true;
+	                    if (!subExists)
+	                    {
+	                        group.AddOption(fn.BuildSlashSubCommand());
+	                    }
+
+	                    break;
+	                }
+	                case GptCliSlashBindingKind.SetOption:
+	                {
+	                    var setCommandName = slash.TopLevelName.Trim();
+	                    if (!topLevel.TryGetValue(setCommandName, out var set))
+	                    {
+	                        set = new SlashCommandOptionBuilder()
+	                            .WithName(setCommandName)
+	                            .WithDescription(slash.TopLevelDescription ?? "Settings")
+	                            .WithType(ApplicationCommandOptionType.SubCommand);
+	                        topLevel[setCommandName] = set;
+	                        order.Add(setCommandName);
+	                    }
+
+	                    if (set.Type != ApplicationCommandOptionType.SubCommandGroup && set.Type != ApplicationCommandOptionType.SubCommand)
+	                    {
+	                        continue;
+	                    }
+
+	                    var opt = fn.BuildSlashSetOption();
+	                    var optExists = set.Options?.Any(o => string.Equals(o.Name, opt.Name, StringComparison.OrdinalIgnoreCase)) == true;
+	                    if (!optExists)
+	                    {
+	                        set.AddOption(opt);
+	                    }
+
+	                    break;
+	                }
+	            }
+	        }
+
+	        // Stable ordering: core currently relies on "help"/"modules"/"instruction"/"clear"/"set" being near the top.
+	        var result = new List<SlashCommandOptionBuilder>();
+	        foreach (var name in order)
+	        {
+	            if (topLevel.TryGetValue(name, out var opt))
+	            {
+	                result.Add(opt);
+	            }
+	        }
+
+	        return result;
+	    }
+
+	    private string BuildModulesText(ChannelState channelState)
+	    {
+	        if (_modulePipeline == null)
+	        {
+	            return "Modules are not enabled.";
+	        }
+
+	        var report = _modulePipeline.DiscoveryReport;
+
+	        var lines = new List<string>
+	        {
+	            "**Modules**",
+	            $"Modules path: `{report?.ModulesPath ?? "(unknown)"}`",
+	        };
+
+	        var loaded = _modulePipeline.Modules?.Where(m => !string.IsNullOrWhiteSpace(m?.Id)).ToList()
+	                     ?? new List<IFeatureModule>();
+
+	        lines.Add($"Loaded modules ({loaded.Count}):");
+	        foreach (var module in loaded.OrderBy(m => m.Id, StringComparer.OrdinalIgnoreCase))
+	        {
+	            var enabled = channelState == null ? true : IsModuleEnabled(channelState, module.Id);
+	            lines.Add($"- {module.Id} ({module.Name}) enabled={(enabled ? "true" : "false")}");
+	        }
+
+	        if (channelState?.Options?.ModulesEnabled is { Count: > 0 })
+	        {
+	            lines.Add("");
+	            lines.Add("Channel module overrides:");
+	            foreach (var kvp in channelState.Options.ModulesEnabled.OrderBy(k => k.Key, StringComparer.OrdinalIgnoreCase))
+	            {
+	                lines.Add($"- {kvp.Key}={(kvp.Value ? "true" : "false")}");
+	            }
+	        }
+
+	        if (report != null)
+	        {
+	            if (report.FoundDlls is { Count: > 0 })
+	            {
+	                lines.Add($"Module DLLs found: {report.FoundDlls.Count}");
+	            }
+
+	            if (report.LoadErrors is { Count: > 0 })
+	            {
+	                lines.Add("");
+	                lines.Add("**Module load errors**");
+	                foreach (var err in report.LoadErrors.Take(10))
+	                {
+	                    lines.Add($"- {err}");
+	                }
+	                if (report.LoadErrors.Count > 10)
+	                {
+	                    lines.Add($"- (and {report.LoadErrors.Count - 10} more)");
+	                }
+	            }
+	        }
+
+	        // Function registry debug to help diagnose missing slash options/tools.
+	        try
+	        {
+	            var all = GetAllGptCliFunctions();
+	            var moduleFns = all.Where(f => !string.IsNullOrWhiteSpace(f?.ModuleId)).ToList();
+	            lines.Add("");
+	            lines.Add($"GptCliFunctions: total={all.Count}, module={moduleFns.Count}");
+
+	            foreach (var group in moduleFns
+	                         .GroupBy(f => f.ModuleId, StringComparer.OrdinalIgnoreCase)
+	                         .OrderBy(g => g.Key, StringComparer.OrdinalIgnoreCase))
+	            {
+	                lines.Add($"- {group.Key}: {group.Count()} function(s)");
+	                foreach (var fn in group.OrderBy(f => f.ToolName, StringComparer.OrdinalIgnoreCase).Take(40))
+	                {
+	                    var slash = fn.Slash == null
+	                        ? "(no slash binding)"
+	                        : fn.Slash.Kind switch
+	                        {
+	                            GptCliSlashBindingKind.SetOption => $"set/{fn.Slash.SetOptionName}",
+	                            GptCliSlashBindingKind.SubCommand => fn.Slash.TopLevelName,
+	                            GptCliSlashBindingKind.GroupSubCommand => $"{fn.Slash.TopLevelName}/{fn.Slash.SubCommandName}",
+	                            _ => fn.Slash.TopLevelName
+	                        };
+	                    lines.Add($"  - {fn.ToolName} -> {slash}");
+	                }
+	            }
+	        }
+	        catch (Exception ex)
+	        {
+	            lines.Add($"(Function registry debug failed: {ex.GetType().Name} {ex.Message})");
+	        }
+
+	        return string.Join("\n", lines);
+	    }
+
+	    private static string BuildCoreHelpText()
+	    {
+	        return string.Join("\n", new[]
+	        {
+            "**GPT-CLI help**",
+            "",
+            "**Core**",
+            "• `/gptcli help`",
+            "• `/gptcli modules`",
+            "• `/gptcli instruction add|list|get|delete|clear`",
+            "• `/gptcli clear target:<messages|instructions|all>`",
+            "• `/gptcli set enabled|mute|response-mode|embed-mode|max-chat-history-length|max-tokens|model`",
+            "",
+            "**Natural language tool calling**",
+            "Tag the bot and ask for a slash command in plain English.",
+            "Example: `@bot set max tokens to 8000`"
+        });
+    }
+
+    private Task<GptCliExecutionResult> ExecuteClearAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)
+    {
+        if (!GptCliFunction.TryGetJsonProperty(argsJson, "target", out var targetEl) || targetEl.ValueKind != JsonValueKind.String)
+        {
+            return Task.FromResult(new GptCliExecutionResult(true, "Provide `target` as messages, instructions, or all.", false));
+        }
+
+        var target = targetEl.GetString()?.Trim().ToLowerInvariant();
+        switch (target)
+        {
+            case "messages":
+                ctx.ChannelState.InstructionChat.ClearMessages();
+                return Task.FromResult(new GptCliExecutionResult(true, "Messages cleared."));
+            case "instructions":
+                ctx.ChannelState.InstructionChat.ClearInstructions();
+                return Task.FromResult(new GptCliExecutionResult(true, "Instructions cleared."));
+            case "all":
+                ctx.ChannelState.InstructionChat.ClearMessages();
+                ctx.ChannelState.InstructionChat.ClearInstructions();
+                return Task.FromResult(new GptCliExecutionResult(true, "Messages and instructions cleared."));
+            default:
+                return Task.FromResult(new GptCliExecutionResult(true, "Unknown target. Use messages, instructions, or all.", false));
+        }
+    }
+
+    private Task<GptCliExecutionResult> ExecuteInstructionAddAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)
+    {
+        if (!GptCliFunction.TryGetJsonProperty(argsJson, "text", out var textEl) || textEl.ValueKind != JsonValueKind.String)
+        {
+            return Task.FromResult(new GptCliExecutionResult(true, "Provide instruction text.", false));
+        }
+
+        var text = textEl.GetString();
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return Task.FromResult(new GptCliExecutionResult(true, "Provide instruction text.", false));
+        }
+
+        ctx.ChannelState.InstructionChat.AddInstruction(new ChatMessage(StaticValues.ChatMessageRoles.System, text.Trim()));
+        return Task.FromResult(new GptCliExecutionResult(true, "Instruction added."));
+    }
+
+    private Task<GptCliExecutionResult> ExecuteInstructionListAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)
+    {
+        var instructions = ctx.ChannelState.InstructionChat.ChatBotState.Instructions;
+        if (instructions == null || instructions.Count == 0)
+        {
+            return Task.FromResult(new GptCliExecutionResult(true, "No instructions stored.", false));
+        }
+
+        var lines = instructions.Select((inst, index) => $"{index + 1}. {inst.Content}").ToList();
+        return Task.FromResult(new GptCliExecutionResult(true, $"Instructions:\n{string.Join("\n", lines)}", false));
+    }
+
+    private Task<GptCliExecutionResult> ExecuteInstructionGetAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)
+    {
+        if (!GptCliFunction.TryGetJsonProperty(argsJson, "index", out var indexEl) || !indexEl.TryGetInt32(out var index))
+        {
+            return Task.FromResult(new GptCliExecutionResult(true, "Provide instruction index.", false));
+        }
+
+        var instructions = ctx.ChannelState.InstructionChat.ChatBotState.Instructions;
+        var i = index - 1;
+        if (instructions == null || i < 0 || i >= instructions.Count)
+        {
+            return Task.FromResult(new GptCliExecutionResult(true, "Instruction index out of range.", false));
+        }
+
+        return Task.FromResult(new GptCliExecutionResult(true, $"{index}. {instructions[i].Content}", false));
+    }
+
+    private Task<GptCliExecutionResult> ExecuteInstructionDeleteAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)
+    {
+        if (!GptCliFunction.TryGetJsonProperty(argsJson, "index", out var indexEl) || !indexEl.TryGetInt32(out var index))
+        {
+            return Task.FromResult(new GptCliExecutionResult(true, "Provide instruction index.", false));
+        }
+
+        var instructions = ctx.ChannelState.InstructionChat.ChatBotState.Instructions;
+        var i = index - 1;
+        if (instructions == null || i < 0 || i >= instructions.Count)
+        {
+            return Task.FromResult(new GptCliExecutionResult(true, "Instruction index out of range.", false));
+        }
+
+        ctx.ChannelState.InstructionChat.RemoveInstruction(i);
+        return Task.FromResult(new GptCliExecutionResult(true, $"Instruction {index} deleted."));
+    }
+
+    private Task<GptCliExecutionResult> ExecuteInstructionClearAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)
+    {
+        ctx.ChannelState.InstructionChat.ClearInstructions();
+        return Task.FromResult(new GptCliExecutionResult(true, "Instructions cleared."));
+    }
+
+    private Task<GptCliExecutionResult> ExecuteSetEnabledAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)
+    {
+        if (!GptCliFunction.TryGetJsonProperty(argsJson, "value", out var valueEl) || valueEl.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+        {
+            return Task.FromResult(new GptCliExecutionResult(true, "enabled expects boolean.", false));
+        }
+
+        var enabled = valueEl.GetBoolean();
+        ctx.ChannelState.Options.Enabled = enabled;
+        return Task.FromResult(new GptCliExecutionResult(true, $"enabled = {enabled.ToString().ToLowerInvariant()}"));
+    }
+
+    private Task<GptCliExecutionResult> ExecuteSetMuteAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)
+    {
+        if (!GptCliFunction.TryGetJsonProperty(argsJson, "value", out var valueEl) || valueEl.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
+        {
+            return Task.FromResult(new GptCliExecutionResult(true, "mute expects boolean.", false));
+        }
+
+        var muted = valueEl.GetBoolean();
+        ctx.ChannelState.Options.Muted = muted;
+        return Task.FromResult(new GptCliExecutionResult(true, $"mute = {muted.ToString().ToLowerInvariant()}"));
+    }
+
+    private Task<GptCliExecutionResult> ExecuteSetResponseModeAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)
+    {
+        if (!GptCliFunction.TryGetJsonProperty(argsJson, "value", out var valueEl) || valueEl.ValueKind != JsonValueKind.String)
+        {
+            return Task.FromResult(new GptCliExecutionResult(true, "response-mode expects All or Matches.", false));
+        }
+
+        var value = valueEl.GetString();
+        if (!Enum.TryParse<InstructionChatBot.ResponseMode>(value, true, out var parsed))
+        {
+            return Task.FromResult(new GptCliExecutionResult(true, "response-mode expects All or Matches.", false));
+        }
+
+        ctx.ChannelState.InstructionChat.ChatBotState.ResponseMode = parsed;
+        return Task.FromResult(new GptCliExecutionResult(true, $"response-mode = {parsed}"));
+    }
+
+    private Task<GptCliExecutionResult> ExecuteSetEmbedModeAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)
+    {
+        if (!GptCliFunction.TryGetJsonProperty(argsJson, "value", out var valueEl) || valueEl.ValueKind != JsonValueKind.String)
+        {
+            return Task.FromResult(new GptCliExecutionResult(true, "embed-mode expects Explicit or All.", false));
+        }
+
+        var value = valueEl.GetString();
+        if (!Enum.TryParse<InstructionChatBot.EmbedMode>(value, true, out var parsed))
+        {
+            return Task.FromResult(new GptCliExecutionResult(true, "embed-mode expects Explicit or All.", false));
+        }
+
+        ctx.ChannelState.InstructionChat.ChatBotState.EmbedMode = parsed;
+        return Task.FromResult(new GptCliExecutionResult(true, $"embed-mode = {parsed}"));
+    }
+
+    private Task<GptCliExecutionResult> ExecuteSetMaxChatHistoryAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)
+    {
+        if (!GptCliFunction.TryGetJsonProperty(argsJson, "value", out var valueEl) || !valueEl.TryGetInt32(out var value) || value < 100)
+        {
+            return Task.FromResult(new GptCliExecutionResult(true, "max-chat-history-length expects integer >= 100.", false));
+        }
+
+        ctx.ChannelState.InstructionChat.ChatBotState.Parameters.MaxChatHistoryLength = (uint)value;
+        return Task.FromResult(new GptCliExecutionResult(true, $"max-chat-history-length = {value}"));
+    }
+
+    private Task<GptCliExecutionResult> ExecuteSetMaxTokensAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)
+    {
+        if (!GptCliFunction.TryGetJsonProperty(argsJson, "value", out var valueEl) || !valueEl.TryGetInt32(out var value) || value < 50)
+        {
+            return Task.FromResult(new GptCliExecutionResult(true, "max-tokens expects integer >= 50.", false));
+        }
+
+        ctx.ChannelState.InstructionChat.ChatBotState.Parameters.MaxTokens = value;
+        return Task.FromResult(new GptCliExecutionResult(true, $"max-tokens = {value}"));
+    }
+
+    private Task<GptCliExecutionResult> ExecuteSetModelAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)
+    {
+        if (!GptCliFunction.TryGetJsonProperty(argsJson, "value", out var valueEl) || valueEl.ValueKind != JsonValueKind.String)
+        {
+            return Task.FromResult(new GptCliExecutionResult(true, "model expects a string.", false));
+        }
+
+        var model = valueEl.GetString();
+        if (string.IsNullOrWhiteSpace(model))
+        {
+            return Task.FromResult(new GptCliExecutionResult(true, "model expects a non-empty string.", false));
+        }
+
+        ctx.ChannelState.InstructionChat.ChatBotState.Parameters.Model = model.Trim();
+        return Task.FromResult(new GptCliExecutionResult(true, $"model = {model.Trim()}"));
     }
 
     InstructionGPT.ChannelState IDiscordModuleHost.GetOrCreateChannelState(IChannel channel)

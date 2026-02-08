@@ -1,5 +1,6 @@
 using Discord;
 using Discord.WebSocket;
+using GPT.CLI.Chat.Discord.Commands;
 using OpenAI.ObjectModels.RequestModels;
 
 namespace GPT.CLI.Chat.Discord.Modules;
@@ -22,4 +23,7 @@ public abstract class FeatureModuleBase : IFeatureModule
         => Task.FromResult<IReadOnlyList<ChatMessage>>(Array.Empty<ChatMessage>());
     public virtual IReadOnlyList<SlashCommandContribution> GetSlashCommandContributions(DiscordModuleContext context)
         => Array.Empty<SlashCommandContribution>();
+
+    public virtual IReadOnlyList<GptCliFunction> GetGptCliFunctions(DiscordModuleContext context)
+        => Array.Empty<GptCliFunction>();
 }

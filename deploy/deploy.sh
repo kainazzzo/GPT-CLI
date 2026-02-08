@@ -23,9 +23,19 @@ case "${1:-}" in
     docker compose run --rm builder
     docker compose build
     ;;
+  modules)
+    # Build and deploy example modules to the host-mounted modules directory.
+    # This is intentionally not part of `up`/`restart` to keep deploy cycles fast.
+    docker compose run --rm builder bash -lc "bash modules/build-deploy-modules.sh"
+    ;;
   up|"")
     docker compose run --rm builder
     docker compose up -d
+    ;;
+  watch)
+    docker compose run --rm builder
+    docker compose build
+    docker compose up
     ;;
   restart)
     docker compose run --rm builder
@@ -42,7 +52,7 @@ case "${1:-}" in
     cat "${DEPLOY_DIR}/deploy-completion.bash"
     ;;
   *)
-    echo "Usage: $0 {build|up|restart|logs|stop|completion}"
+    echo "Usage: $0 {build|modules|up|watch|restart|logs|stop|completion}"
     exit 1
     ;;
 esac

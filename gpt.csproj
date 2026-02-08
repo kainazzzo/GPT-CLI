@@ -30,7 +30,6 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>
-  <Target Name="PostBuild_DeployModules" AfterTargets="Build" Condition="Exists('modules/build-deploy-modules.sh') and '$(GptSkipModuleDeploy)' != 'true'">
-    <Exec Command="bash -lc &quot;bash modules/build-deploy-modules.sh&quot;" />
-  </Target>
+  <!-- Module builds/deploy are intentionally not a post-build step.
+       Use the VS Code task "Build & Deploy Example Modules" (or run modules/build-deploy-modules.sh) instead. -->
 </Project>

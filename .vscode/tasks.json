@@ -1,0 +1,39 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build GPT-CLI (Release)",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "-lc",
+        "dotnet build gpt.csproj -c Release /p:GptSkipModuleDeploy=true"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": "$msCompile"
+    },
+    {
+      "label": "Build & Deploy Example Modules",
+      "type": "shell",
+      "command": "bash",
+      "args": [
+        "-lc",
+        "bash modules/build-deploy-modules.sh \"${DISCORD_MODULES_DIR:-/usr/local/discord/modules}\""
+      ],
+      "group": "build",
+      "problemMatcher": "$msCompile"
+    },
+    {
+      "label": "Build All (CLI + Modules)",
+      "dependsOn": [
+        "Build GPT-CLI (Release)",
+        "Build & Deploy Example Modules"
+      ],
+      "group": "build"
+    }
+  ]
+}
+

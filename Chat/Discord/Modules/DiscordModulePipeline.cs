@@ -2,6 +2,7 @@ using System.Reflection;
 using System.Runtime.Loader;
 using Discord;
 using Discord.WebSocket;
+using GPT.CLI.Chat.Discord.Commands;
 using Microsoft.Extensions.DependencyInjection;
 using OpenAI.ObjectModels.RequestModels;
 
@@ -145,6 +146,51 @@ public sealed class DiscordModulePipeline
         return contributions;
     }
 
+    public IReadOnlyList<GptCliFunction> GetGptCliFunctions()
+    {
+        if (_modules.Count == 0)
+        {
+            return Array.Empty<GptCliFunction>();
+        }
+
+        var combined = new List<GptCliFunction>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase); // tool name uniqueness
+        foreach (var module in _modules)
+        {
+            try
+            {
+                var defs = module.GetGptCliFunctions(_context);
+                if (defs == null || defs.Count == 0)
+                {
+                    continue;
+                }
+
+                foreach (var fn in defs)
+                {
+                    var name = fn?.ToolName;
+                    if (string.IsNullOrWhiteSpace(name))
+                    {
+                        continue;
+                    }
+
+                    if (!seen.Add(name))
+                    {
+                        _log($"GptCliFunction tool name conflict: '{name}' already exists. Skipping module function from {module.Id}.");
+                        continue;
+                    }
+
+                    combined.Add(fn);
+                }
+            }
+            catch (Exception ex)
+            {
+                _log($"Module {module.Id} failed to provide GptCliFunctions: {ex.GetType().Name} - {ex.Message}");
+            }
+        }
+
+        return combined;
+    }
+
     private async Task SafeInvokeAsync(IFeatureModule module, Func<Task> handler)
     {
         try
@@ -182,6 +228,7 @@ public sealed class DiscordModulePipeline
             return false;
         }
     }
+
 
     private static IReadOnlyList<IFeatureModule> DiscoverModules(
         IServiceProvider services,

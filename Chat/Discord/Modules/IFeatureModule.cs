@@ -1,5 +1,6 @@
 using Discord;
 using Discord.WebSocket;
+using GPT.CLI.Chat.Discord.Commands;
 using OpenAI.ObjectModels.RequestModels;
 
 namespace GPT.CLI.Chat.Discord.Modules;
@@ -19,4 +20,7 @@ public interface IFeatureModule
     Task OnMessageCommandExecutedAsync(DiscordModuleContext context, SocketMessageCommand command, CancellationToken cancellationToken);
     Task<IReadOnlyList<ChatMessage>> GetAdditionalMessageContextAsync(DiscordModuleContext context, SocketMessage message, InstructionGPT.ChannelState channel, CancellationToken cancellationToken);
     IReadOnlyList<SlashCommandContribution> GetSlashCommandContributions(DiscordModuleContext context);
+
+    // Unified command definitions used for both slash building and natural-language (tool) invocation.
+    IReadOnlyList<GptCliFunction> GetGptCliFunctions(DiscordModuleContext context);
 }

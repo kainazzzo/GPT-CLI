@@ -6,6 +6,7 @@ using System.Text.RegularExpressions;
 using Discord;
 using Discord.WebSocket;
 using GPT.CLI.Chat.Discord;
+using GPT.CLI.Chat.Discord.Commands;
 using GPT.CLI.Chat.Discord.Modules;
 using OpenAI.ObjectModels;
 using OpenAI.ObjectModels.RequestModels;
@@ -46,32 +47,193 @@ public sealed class DndGameMasterModule : FeatureModuleBase
         };
     }
 
-    public override async Task<bool> OnInteractionAsync(DiscordModuleContext context, SocketInteraction interaction, CancellationToken cancellationToken)
+    public override IReadOnlyList<GptCliFunction> GetGptCliFunctions(DiscordModuleContext context)
     {
-        if (interaction is not SocketSlashCommand { CommandName: "gptcli" } command)
-        {
-            return false;
-        }
+        const string dndGroupDescription = "D&D GM and campaign controls";
 
-        if (command.Data.Options == null || command.Data.Options.Count == 0)
+        return new List<GptCliFunction>
         {
-            return false;
-        }
-
-        var handled = false;
-        foreach (var option in command.Data.Options)
-        {
-            if (!string.Equals(option.Name, "dnd", StringComparison.OrdinalIgnoreCase))
+            // Module enable/disable toggle (must remain callable even when disabled).
+            new()
             {
-                continue;
+                ToolName = "gptcli_set_dnd",
+                ModuleId = Id,
+                ExposeWhenModuleDisabled = true,
+                Description = "Enable or disable the D&D module in this channel",
+                Slash = new GptCliSlashBinding(GptCliSlashBindingKind.SetOption, "set", "Settings", SetOptionName: "dnd"),
+                Parameters = new[]
+                {
+                    new GptCliParamSpec("value", GptCliParamType.Boolean, "true or false", Required: true)
+                },
+                ExecuteAsync = ExecuteSetEnabledAsync
+            },
+
+            new()
+            {
+                ToolName = "gptcli_dnd_status",
+                ModuleId = Id,
+                Description = "Show D&D mode and campaign status",
+                Slash = new GptCliSlashBinding(GptCliSlashBindingKind.GroupSubCommand, "dnd", dndGroupDescription, "status"),
+                ExecuteAsync = ExecuteStatusAsync
+            },
+            new()
+            {
+                ToolName = "gptcli_dnd_mode",
+                ModuleId = Id,
+                Description = "Set D&D mode",
+                Slash = new GptCliSlashBinding(GptCliSlashBindingKind.GroupSubCommand, "dnd", dndGroupDescription, "mode"),
+                Parameters = new[]
+                {
+                    new GptCliParamSpec("value", GptCliParamType.String, "off, prep, or live", Required: true,
+                        Choices: new[]
+                        {
+                            new GptCliParamChoice("off", ModeOff),
+                            new GptCliParamChoice("prep", ModePrep),
+                            new GptCliParamChoice("live", ModeLive)
+                        }),
+                    new GptCliParamSpec("campaign", GptCliParamType.String, "Campaign name (optional)")
+                },
+                ExecuteAsync = ExecuteModeAsync
+            },
+            new()
+            {
+                ToolName = "gptcli_dnd_campaigncreate",
+                ModuleId = Id,
+                Description = "Create a campaign from a prompt",
+                Slash = new GptCliSlashBinding(GptCliSlashBindingKind.GroupSubCommand, "dnd", dndGroupDescription, "campaigncreate"),
+                Parameters = new[]
+                {
+                    new GptCliParamSpec("name", GptCliParamType.String, "Campaign name", Required: true),
+                    new GptCliParamSpec("prompt", GptCliParamType.String, "Campaign creation prompt", Required: true)
+                },
+                ExecuteAsync = ExecuteCampaignCreateAsync
+            },
+            new()
+            {
+                ToolName = "gptcli_dnd_campaignrefine",
+                ModuleId = Id,
+                Description = "Refine an existing campaign",
+                Slash = new GptCliSlashBinding(GptCliSlashBindingKind.GroupSubCommand, "dnd", dndGroupDescription, "campaignrefine"),
+                Parameters = new[]
+                {
+                    new GptCliParamSpec("name", GptCliParamType.String, "Campaign name", Required: true),
+                    new GptCliParamSpec("prompt", GptCliParamType.String, "Refinement prompt", Required: true)
+                },
+                ExecuteAsync = ExecuteCampaignRefineAsync
+            },
+            new()
+            {
+                ToolName = "gptcli_dnd_campaignoverwrite",
+                ModuleId = Id,
+                Description = "Overwrite campaign content from text or file URL",
+                Slash = new GptCliSlashBinding(GptCliSlashBindingKind.GroupSubCommand, "dnd", dndGroupDescription, "campaignoverwrite"),
+                Parameters = new[]
+                {
+                    new GptCliParamSpec("name", GptCliParamType.String, "Campaign name", Required: true),
+                    new GptCliParamSpec("text", GptCliParamType.String, "Campaign content text"),
+                    new GptCliParamSpec("file", GptCliParamType.Attachment, "Upload .txt, .md, or .json")
+                },
+                ExecuteAsync = ExecuteCampaignOverwriteAsync
+            },
+            new()
+            {
+                ToolName = "gptcli_dnd_charactercreate",
+                ModuleId = Id,
+                Description = "Create your character sheet",
+                Slash = new GptCliSlashBinding(GptCliSlashBindingKind.GroupSubCommand, "dnd", dndGroupDescription, "charactercreate"),
+                Parameters = new[]
+                {
+                    new GptCliParamSpec("name", GptCliParamType.String, "Character name", Required: true),
+                    new GptCliParamSpec("concept", GptCliParamType.String, "Character concept", Required: true)
+                },
+                ExecuteAsync = ExecuteCharacterCreateAsync
+            },
+            new()
+            {
+                ToolName = "gptcli_dnd_charactershow",
+                ModuleId = Id,
+                Description = "Show a character sheet",
+                Slash = new GptCliSlashBinding(GptCliSlashBindingKind.GroupSubCommand, "dnd", dndGroupDescription, "charactershow"),
+                Parameters = new[]
+                {
+                    new GptCliParamSpec("user", GptCliParamType.User, "Optional user id")
+                },
+                ExecuteAsync = ExecuteCharacterShowAsync
+            },
+            new()
+            {
+                ToolName = "gptcli_dnd_npccreate",
+                ModuleId = Id,
+                Description = "Create an NPC party member",
+                Slash = new GptCliSlashBinding(GptCliSlashBindingKind.GroupSubCommand, "dnd", dndGroupDescription, "npccreate"),
+                Parameters = new[]
+                {
+                    new GptCliParamSpec("name", GptCliParamType.String, "NPC name", Required: true),
+                    new GptCliParamSpec("concept", GptCliParamType.String, "NPC concept", Required: true)
+                },
+                ExecuteAsync = ExecuteNpcCreateAsync
+            },
+            new()
+            {
+                ToolName = "gptcli_dnd_npclist",
+                ModuleId = Id,
+                Description = "List NPC party members",
+                Slash = new GptCliSlashBinding(GptCliSlashBindingKind.GroupSubCommand, "dnd", dndGroupDescription, "npclist"),
+                ExecuteAsync = ExecuteNpcListAsync
+            },
+            new()
+            {
+                ToolName = "gptcli_dnd_npcshow",
+                ModuleId = Id,
+                Description = "Show an NPC profile",
+                Slash = new GptCliSlashBinding(GptCliSlashBindingKind.GroupSubCommand, "dnd", dndGroupDescription, "npcshow"),
+                Parameters = new[]
+                {
+                    new GptCliParamSpec("name", GptCliParamType.String, "NPC name", Required: true)
+                },
+                ExecuteAsync = ExecuteNpcShowAsync
+            },
+            new()
+            {
+                ToolName = "gptcli_dnd_npcremove",
+                ModuleId = Id,
+                Description = "Remove an NPC party member",
+                Slash = new GptCliSlashBinding(GptCliSlashBindingKind.GroupSubCommand, "dnd", dndGroupDescription, "npcremove"),
+                Parameters = new[]
+                {
+                    new GptCliParamSpec("name", GptCliParamType.String, "NPC name", Required: true)
+                },
+                ExecuteAsync = ExecuteNpcRemoveAsync
+            },
+            new()
+            {
+                ToolName = "gptcli_dnd_ledger",
+                ModuleId = Id,
+                Description = "Show official campaign ledger entries",
+                Slash = new GptCliSlashBinding(GptCliSlashBindingKind.GroupSubCommand, "dnd", dndGroupDescription, "ledger"),
+                Parameters = new[]
+                {
+                    new GptCliParamSpec("count", GptCliParamType.Integer, "Number of entries (1-100)", MinInt: 1, MaxInt: 100)
+                },
+                ExecuteAsync = ExecuteLedgerAsync
+            },
+            new()
+            {
+                ToolName = "gptcli_dnd_campaignhistory",
+                ModuleId = Id,
+                Description = "Show campaign revision and tweak history",
+                Slash = new GptCliSlashBinding(GptCliSlashBindingKind.GroupSubCommand, "dnd", dndGroupDescription, "campaignhistory"),
+                Parameters = new[]
+                {
+                    new GptCliParamSpec("count", GptCliParamType.Integer, "Number of revisions (1-50)", MinInt: 1, MaxInt: 50)
+                },
+                ExecuteAsync = ExecuteCampaignHistoryAsync
             }
-
-            await HandleDndSlashCommandAsync(context, command, option, cancellationToken);
-            handled = true;
-        }
-
-        return handled;
+        };
     }
+
+    public override Task<bool> OnInteractionAsync(DiscordModuleContext context, SocketInteraction interaction, CancellationToken cancellationToken)
+        => Task.FromResult(false);
 
     private static SlashCommandOptionBuilder BuildDndCommands()
     {
@@ -194,6 +356,712 @@ public sealed class DndGameMasterModule : FeatureModuleBase
         };
     }
 
+    private Task<GptCliExecutionResult> ExecuteSetEnabledAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)
+    {
+        if (!TryGetBoolArg(argsJson, "value", out var enabled))
+        {
+            return Task.FromResult(new GptCliExecutionResult(true, "Provide `value` as true or false.", false));
+        }
+
+        InstructionGPT.SetModuleEnabled(ctx.ChannelState, Id, enabled);
+        return Task.FromResult(new GptCliExecutionResult(true, $"dnd enabled = {(enabled ? "true" : "false")}", true));
+    }
+
+    private async Task<GptCliExecutionResult> ExecuteStatusAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)
+    {
+        var lockHandle = _channelLocks.GetOrAdd(ctx.Channel.Id, _ => new SemaphoreSlim(1, 1));
+        await lockHandle.WaitAsync(ct);
+        try
+        {
+            var dndState = await GetOrLoadStateAsync(ctx.ChannelState, ct);
+            return new GptCliExecutionResult(true, BuildStatusText(dndState), false);
+        }
+        finally
+        {
+            lockHandle.Release();
+        }
+    }
+
+    private async Task<GptCliExecutionResult> ExecuteModeAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)
+    {
+        if (!TryGetStringArg(argsJson, "value", out var modeRaw) || string.IsNullOrWhiteSpace(modeRaw))
+        {
+            return new GptCliExecutionResult(true, "Provide `value` as off, prep, or live.", false);
+        }
+
+        var mode = modeRaw.Trim().ToLowerInvariant();
+        if (mode is not (ModeOff or ModePrep or ModeLive))
+        {
+            return new GptCliExecutionResult(true, "Mode must be one of: off, prep, live.", false);
+        }
+
+        TryGetStringArg(argsJson, "campaign", out var campaignName);
+
+        var lockHandle = _channelLocks.GetOrAdd(ctx.Channel.Id, _ => new SemaphoreSlim(1, 1));
+        await lockHandle.WaitAsync(ct);
+        try
+        {
+            var dndState = await GetOrLoadStateAsync(ctx.ChannelState, ct);
+            var dndStateChanged = false;
+            var channelStateChanged = false;
+
+            if (mode == ModeOff)
+            {
+                dndState.Mode = ModeOff;
+                dndState.PendingOverwrite = null;
+                if (dndState.ModuleMutedBot)
+                {
+                    ctx.ChannelState.Options.Muted = dndState.PreviousBotMuted;
+                    dndState.ModuleMutedBot = false;
+                    channelStateChanged = true;
+                }
+
+                dndStateChanged = true;
+                if (dndStateChanged)
+                {
+                    await SaveStateAsync(ctx.ChannelState, dndState, ct);
+                }
+
+                return new GptCliExecutionResult(true, "DND mode set to off.", channelStateChanged);
+            }
+
+            var targetCampaign = GetOrCreateCampaign(dndState,
+                string.IsNullOrWhiteSpace(campaignName) ? dndState.ActiveCampaignName : campaignName);
+            dndState.ActiveCampaignName = targetCampaign.Name;
+            dndState.Mode = mode;
+            dndStateChanged = true;
+
+            if (mode == ModeLive && !dndState.ModuleMutedBot)
+            {
+                dndState.PreviousBotMuted = ctx.ChannelState.Options.Muted;
+                dndState.ModuleMutedBot = true;
+                ctx.ChannelState.Options.Muted = true;
+                channelStateChanged = true;
+            }
+
+            await SaveStateAsync(ctx.ChannelState, dndState, ct);
+            return new GptCliExecutionResult(true, $"DND mode set to `{mode}` for campaign \"{targetCampaign.Name}\".", channelStateChanged);
+        }
+        finally
+        {
+            lockHandle.Release();
+        }
+    }
+
+    private async Task<GptCliExecutionResult> ExecuteCampaignCreateAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)
+    {
+        if (ctx.Context == null)
+        {
+            return new GptCliExecutionResult(true, "Module context not initialized.", false);
+        }
+
+        if (!TryGetStringArg(argsJson, "name", out var campaignName) || string.IsNullOrWhiteSpace(campaignName) ||
+            !TryGetStringArg(argsJson, "prompt", out var prompt) || string.IsNullOrWhiteSpace(prompt))
+        {
+            return new GptCliExecutionResult(true, "Provide both `name` and `prompt`.", false);
+        }
+
+        var lockHandle = _channelLocks.GetOrAdd(ctx.Channel.Id, _ => new SemaphoreSlim(1, 1));
+        await lockHandle.WaitAsync(ct);
+        try
+        {
+            var dndState = await GetOrLoadStateAsync(ctx.ChannelState, ct);
+            var generated = await GenerateCampaignAsync(ctx.Context, ctx.ChannelState, campaignName.Trim(), prompt.Trim(), null, ct);
+            if (string.IsNullOrWhiteSpace(generated))
+            {
+                return new GptCliExecutionResult(true, "Campaign generation failed.", false);
+            }
+
+            var campaign = GetOrCreateCampaign(dndState, campaignName);
+            campaign.Content = TrimToLimit(generated, MaxCampaignChars);
+            campaign.UpdatedUtc = DateTime.UtcNow;
+            dndState.ActiveCampaignName = campaign.Name;
+
+            await RecordCampaignRevisionAsync(
+                ctx.ChannelState,
+                campaign,
+                triggerKind: "create",
+                triggerInput: prompt.Trim(),
+                ctx.User.Id,
+                ctx.User.Username,
+                isPromptTweak: false,
+                ct);
+
+            await SaveStateAsync(ctx.ChannelState, dndState, ct);
+            return new GptCliExecutionResult(true, $"Campaign \"{campaign.Name}\" created.\n\n{TrimToLimit(campaign.Content, 2500)}", true);
+        }
+        finally
+        {
+            lockHandle.Release();
+        }
+    }
+
+    private async Task<GptCliExecutionResult> ExecuteCampaignRefineAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)
+    {
+        if (ctx.Context == null)
+        {
+            return new GptCliExecutionResult(true, "Module context not initialized.", false);
+        }
+
+        if (!TryGetStringArg(argsJson, "name", out var campaignName) || string.IsNullOrWhiteSpace(campaignName) ||
+            !TryGetStringArg(argsJson, "prompt", out var prompt) || string.IsNullOrWhiteSpace(prompt))
+        {
+            return new GptCliExecutionResult(true, "Provide both `name` and `prompt`.", false);
+        }
+
+        var lockHandle = _channelLocks.GetOrAdd(ctx.Channel.Id, _ => new SemaphoreSlim(1, 1));
+        await lockHandle.WaitAsync(ct);
+        try
+        {
+            var dndState = await GetOrLoadStateAsync(ctx.ChannelState, ct);
+            var campaign = GetOrCreateCampaign(dndState, campaignName);
+            var refined = await GenerateCampaignAsync(ctx.Context, ctx.ChannelState, campaign.Name, prompt.Trim(), campaign.Content, ct);
+            if (string.IsNullOrWhiteSpace(refined))
+            {
+                return new GptCliExecutionResult(true, "Campaign refinement failed.", false);
+            }
+
+            campaign.Content = TrimToLimit(refined, MaxCampaignChars);
+            campaign.UpdatedUtc = DateTime.UtcNow;
+            dndState.ActiveCampaignName = campaign.Name;
+
+            await RecordCampaignRevisionAsync(
+                ctx.ChannelState,
+                campaign,
+                triggerKind: "refine",
+                triggerInput: prompt.Trim(),
+                ctx.User.Id,
+                ctx.User.Username,
+                isPromptTweak: true,
+                ct);
+
+            await SaveStateAsync(ctx.ChannelState, dndState, ct);
+            return new GptCliExecutionResult(true, $"Campaign \"{campaign.Name}\" refined.\n\n{TrimToLimit(campaign.Content, 2500)}", true);
+        }
+        finally
+        {
+            lockHandle.Release();
+        }
+    }
+
+    private async Task<GptCliExecutionResult> ExecuteCampaignOverwriteAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)
+    {
+        if (!TryGetStringArg(argsJson, "name", out var campaignName) || string.IsNullOrWhiteSpace(campaignName))
+        {
+            return new GptCliExecutionResult(true, "Provide `name`.", false);
+        }
+
+        TryGetStringArg(argsJson, "text", out var inlineText);
+        TryGetStringArg(argsJson, "file", out var fileUrl);
+
+        var payload = !string.IsNullOrWhiteSpace(inlineText)
+            ? inlineText
+            : await ReadAttachmentPayloadAsync(fileUrl, ct);
+
+        if (string.IsNullOrWhiteSpace(payload))
+        {
+            return new GptCliExecutionResult(true, "Provide campaign `text` or upload `.txt`, `.md`, or `.json` via `file`.", false);
+        }
+
+        var lockHandle = _channelLocks.GetOrAdd(ctx.Channel.Id, _ => new SemaphoreSlim(1, 1));
+        await lockHandle.WaitAsync(ct);
+        try
+        {
+            var dndState = await GetOrLoadStateAsync(ctx.ChannelState, ct);
+            var campaign = GetOrCreateCampaign(dndState, campaignName);
+            campaign.Content = TrimToLimit(payload, MaxCampaignChars);
+            campaign.UpdatedUtc = DateTime.UtcNow;
+            dndState.ActiveCampaignName = campaign.Name;
+
+            await RecordCampaignRevisionAsync(
+                ctx.ChannelState,
+                campaign,
+                triggerKind: "overwrite",
+                triggerInput: string.IsNullOrWhiteSpace(inlineText) ? $"Attachment URL: {fileUrl}" : "Inline overwrite text",
+                ctx.User.Id,
+                ctx.User.Username,
+                isPromptTweak: true,
+                ct);
+
+            await SaveStateAsync(ctx.ChannelState, dndState, ct);
+            return new GptCliExecutionResult(true, $"Campaign \"{campaign.Name}\" overwritten.", true);
+        }
+        finally
+        {
+            lockHandle.Release();
+        }
+    }
+
+    private async Task<GptCliExecutionResult> ExecuteCharacterCreateAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)
+    {
+        if (ctx.Context == null)
+        {
+            return new GptCliExecutionResult(true, "Module context not initialized.", false);
+        }
+
+        if (!TryGetStringArg(argsJson, "name", out var characterName) || string.IsNullOrWhiteSpace(characterName) ||
+            !TryGetStringArg(argsJson, "concept", out var concept) || string.IsNullOrWhiteSpace(concept))
+        {
+            return new GptCliExecutionResult(true, "Provide both `name` and `concept`.", false);
+        }
+
+        var lockHandle = _channelLocks.GetOrAdd(ctx.Channel.Id, _ => new SemaphoreSlim(1, 1));
+        await lockHandle.WaitAsync(ct);
+        try
+        {
+            var dndState = await GetOrLoadStateAsync(ctx.ChannelState, ct);
+            var campaign = GetOrCreateCampaign(dndState, dndState.ActiveCampaignName);
+            dndState.ActiveCampaignName = campaign.Name;
+
+            var sheet = await GenerateCharacterAsync(ctx.Context, ctx.ChannelState, campaign, characterName.Trim(), concept.Trim(), ct);
+            if (string.IsNullOrWhiteSpace(sheet))
+            {
+                return new GptCliExecutionResult(true, "Character generation failed.", false);
+            }
+
+            var character = new DndCharacter
+            {
+                Name = characterName.Trim(),
+                Concept = concept.Trim(),
+                Sheet = TrimToLimit(sheet, 8000),
+                UpdatedUtc = DateTime.UtcNow
+            };
+
+            campaign.Characters[ctx.User.Id] = character;
+            campaign.UpdatedUtc = DateTime.UtcNow;
+            await SaveCharacterSheetJsonAsync(ctx.ChannelState, campaign.Name, ctx.User.Id, character, ct);
+
+            await SaveStateAsync(ctx.ChannelState, dndState, ct);
+            return new GptCliExecutionResult(true, $"Character saved for <@{ctx.User.Id}> in \"{campaign.Name}\".\n\n{TrimToLimit(character.Sheet, 2500)}", true);
+        }
+        finally
+        {
+            lockHandle.Release();
+        }
+    }
+
+    private async Task<GptCliExecutionResult> ExecuteCharacterShowAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)
+    {
+        ulong targetUserId = ctx.User.Id;
+        if (TryGetUlongArg(argsJson, "user", out var parsedUserId) && parsedUserId != 0)
+        {
+            targetUserId = parsedUserId;
+        }
+
+        var lockHandle = _channelLocks.GetOrAdd(ctx.Channel.Id, _ => new SemaphoreSlim(1, 1));
+        await lockHandle.WaitAsync(ct);
+        try
+        {
+            var dndState = await GetOrLoadStateAsync(ctx.ChannelState, ct);
+            var campaign = GetOrCreateCampaign(dndState, dndState.ActiveCampaignName);
+            if (!campaign.Characters.TryGetValue(targetUserId, out var character) || string.IsNullOrWhiteSpace(character.Sheet))
+            {
+                return new GptCliExecutionResult(true, $"No character found for <@{targetUserId}> in \"{campaign.Name}\".", false);
+            }
+
+            return new GptCliExecutionResult(true, $"Character for <@{targetUserId}> ({campaign.Name})\n\n{TrimToLimit(character.Sheet, 2500)}", false);
+        }
+        finally
+        {
+            lockHandle.Release();
+        }
+    }
+
+    private async Task<GptCliExecutionResult> ExecuteNpcCreateAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)
+    {
+        if (ctx.Context == null)
+        {
+            return new GptCliExecutionResult(true, "Module context not initialized.", false);
+        }
+
+        if (!TryGetStringArg(argsJson, "name", out var npcName) || string.IsNullOrWhiteSpace(npcName) ||
+            !TryGetStringArg(argsJson, "concept", out var concept) || string.IsNullOrWhiteSpace(concept))
+        {
+            return new GptCliExecutionResult(true, "Provide both `name` and `concept`.", false);
+        }
+
+        var lockHandle = _channelLocks.GetOrAdd(ctx.Channel.Id, _ => new SemaphoreSlim(1, 1));
+        await lockHandle.WaitAsync(ct);
+        try
+        {
+            var dndState = await GetOrLoadStateAsync(ctx.ChannelState, ct);
+            var campaign = GetOrCreateCampaign(dndState, dndState.ActiveCampaignName);
+            dndState.ActiveCampaignName = campaign.Name;
+
+            var profile = await GenerateNpcAsync(ctx.Context, ctx.ChannelState, campaign, npcName.Trim(), concept.Trim(), ct);
+            if (string.IsNullOrWhiteSpace(profile))
+            {
+                return new GptCliExecutionResult(true, "NPC generation failed.", false);
+            }
+
+            var npc = new DndNpcMember
+            {
+                Name = npcName.Trim(),
+                Concept = concept.Trim(),
+                Profile = TrimToLimit(profile, 5000),
+                UpdatedUtc = DateTime.UtcNow
+            };
+            campaign.Npcs[npc.Name] = npc;
+            campaign.UpdatedUtc = DateTime.UtcNow;
+            await SaveNpcSheetJsonAsync(ctx.ChannelState, campaign.Name, npc, ct);
+
+            await SaveStateAsync(ctx.ChannelState, dndState, ct);
+            return new GptCliExecutionResult(true, $"NPC \"{npc.Name}\" added to \"{campaign.Name}\".\n\n{TrimToLimit(npc.Profile, 1800)}", true);
+        }
+        finally
+        {
+            lockHandle.Release();
+        }
+    }
+
+    private async Task<GptCliExecutionResult> ExecuteNpcListAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)
+    {
+        var lockHandle = _channelLocks.GetOrAdd(ctx.Channel.Id, _ => new SemaphoreSlim(1, 1));
+        await lockHandle.WaitAsync(ct);
+        try
+        {
+            var dndState = await GetOrLoadStateAsync(ctx.ChannelState, ct);
+            var campaign = GetOrCreateCampaign(dndState, dndState.ActiveCampaignName);
+            if (campaign.Npcs.Count == 0)
+            {
+                return new GptCliExecutionResult(true, $"No NPC companions in \"{campaign.Name}\".", false);
+            }
+
+            var lines = campaign.Npcs
+                .OrderBy(entry => entry.Key, StringComparer.OrdinalIgnoreCase)
+                .Select(entry => $"- {entry.Value.Name}: {GetNpcSummary(entry.Value)}");
+            return new GptCliExecutionResult(true, $"NPC companions in \"{campaign.Name}\":\n{string.Join("\n", lines)}", false);
+        }
+        finally
+        {
+            lockHandle.Release();
+        }
+    }
+
+    private async Task<GptCliExecutionResult> ExecuteNpcShowAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)
+    {
+        if (!TryGetStringArg(argsJson, "name", out var npcName) || string.IsNullOrWhiteSpace(npcName))
+        {
+            return new GptCliExecutionResult(true, "Provide `name`.", false);
+        }
+
+        var lockHandle = _channelLocks.GetOrAdd(ctx.Channel.Id, _ => new SemaphoreSlim(1, 1));
+        await lockHandle.WaitAsync(ct);
+        try
+        {
+            var dndState = await GetOrLoadStateAsync(ctx.ChannelState, ct);
+            var campaign = GetOrCreateCampaign(dndState, dndState.ActiveCampaignName);
+            if (!campaign.Npcs.TryGetValue(npcName.Trim(), out var npc))
+            {
+                return new GptCliExecutionResult(true, $"NPC \"{npcName}\" not found in \"{campaign.Name}\".", false);
+            }
+
+            return new GptCliExecutionResult(true, $"NPC \"{npc.Name}\" ({campaign.Name})\nConcept: {npc.Concept}\n\n{TrimToLimit(npc.Profile, 2500)}", false);
+        }
+        finally
+        {
+            lockHandle.Release();
+        }
+    }
+
+    private async Task<GptCliExecutionResult> ExecuteNpcRemoveAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)
+    {
+        if (!TryGetStringArg(argsJson, "name", out var npcName) || string.IsNullOrWhiteSpace(npcName))
+        {
+            return new GptCliExecutionResult(true, "Provide `name`.", false);
+        }
+
+        var lockHandle = _channelLocks.GetOrAdd(ctx.Channel.Id, _ => new SemaphoreSlim(1, 1));
+        await lockHandle.WaitAsync(ct);
+        try
+        {
+            var dndState = await GetOrLoadStateAsync(ctx.ChannelState, ct);
+            var campaign = GetOrCreateCampaign(dndState, dndState.ActiveCampaignName);
+            if (!campaign.Npcs.Remove(npcName.Trim()))
+            {
+                return new GptCliExecutionResult(true, $"NPC \"{npcName}\" not found in \"{campaign.Name}\".", false);
+            }
+
+            await DeleteNpcSheetJsonAsync(ctx.ChannelState, campaign.Name, npcName.Trim(), ct);
+            campaign.UpdatedUtc = DateTime.UtcNow;
+            await SaveStateAsync(ctx.ChannelState, dndState, ct);
+            return new GptCliExecutionResult(true, $"NPC \"{npcName}\" removed from \"{campaign.Name}\".", true);
+        }
+        finally
+        {
+            lockHandle.Release();
+        }
+    }
+
+    private async Task<GptCliExecutionResult> ExecuteLedgerAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)
+    {
+        var count = 20;
+        if (TryGetIntArg(argsJson, "count", out var parsedCount))
+        {
+            count = Clamp(parsedCount, 1, 100);
+        }
+
+        var lockHandle = _channelLocks.GetOrAdd(ctx.Channel.Id, _ => new SemaphoreSlim(1, 1));
+        await lockHandle.WaitAsync(ct);
+        try
+        {
+            var dndState = await GetOrLoadStateAsync(ctx.ChannelState, ct);
+            var campaign = GetOrCreateCampaign(dndState, dndState.ActiveCampaignName);
+            var doc = await LoadCampaignDocumentAsync(ctx.ChannelState, campaign.Name, ct);
+            var ledger = await LoadCampaignLedgerAsync(ctx.ChannelState, campaign.Name, ct);
+            if (ledger == null || ledger.Entries.Count == 0)
+            {
+                return new GptCliExecutionResult(true, $"No ledger entries found for campaign \"{campaign.Name}\".", false);
+            }
+
+            var items = ledger.Entries
+                .OrderByDescending(e => e.OccurredUtc)
+                .Take(count)
+                .ToList();
+            var lines = new List<string>
+            {
+                $"Ledger for \"{campaign.Name}\"",
+                $"- campaign-doc-id: {ledger.CampaignDocumentId ?? doc?.DocumentId ?? "unknown"}",
+                $"- entries shown: {items.Count}/{ledger.Entries.Count}"
+            };
+
+            foreach (var entry in items)
+            {
+                lines.Add(
+                    $"[{entry.EntryId}] {entry.OccurredUtc:O} | {entry.ActionType} | {entry.ActorUsername}({entry.ActorUserId}) | rev:{entry.CampaignRevisionId}\n" +
+                    $"action: {TrimToLimit(entry.ActionText, 180)}\n" +
+                    $"outcome: {TrimToLimit(entry.Outcome, 220)}");
+            }
+
+            return new GptCliExecutionResult(true, string.Join("\n", lines), false);
+        }
+        finally
+        {
+            lockHandle.Release();
+        }
+    }
+
+    private async Task<GptCliExecutionResult> ExecuteCampaignHistoryAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)
+    {
+        var count = 10;
+        if (TryGetIntArg(argsJson, "count", out var parsedCount))
+        {
+            count = Clamp(parsedCount, 1, 50);
+        }
+
+        var lockHandle = _channelLocks.GetOrAdd(ctx.Channel.Id, _ => new SemaphoreSlim(1, 1));
+        await lockHandle.WaitAsync(ct);
+        try
+        {
+            var dndState = await GetOrLoadStateAsync(ctx.ChannelState, ct);
+            var campaign = GetOrCreateCampaign(dndState, dndState.ActiveCampaignName);
+            var document = await LoadCampaignDocumentAsync(ctx.ChannelState, campaign.Name, ct);
+            if (document == null)
+            {
+                return new GptCliExecutionResult(true, $"No campaign document found for \"{campaign.Name}\".", false);
+            }
+
+            var revisions = document.Revisions
+                .OrderByDescending(r => r.AppliedUtc)
+                .Take(count)
+                .ToList();
+            var lines = new List<string>
+            {
+                $"Campaign history for \"{campaign.Name}\"",
+                $"- document-id: {document.DocumentId}",
+                $"- current-revision: {document.CurrentRevisionId}",
+                $"- revisions shown: {revisions.Count}/{document.Revisions.Count}",
+                $"- prompt tweaks: {document.PromptTweaks.Count}"
+            };
+
+            foreach (var rev in revisions)
+            {
+                var previous = document.Revisions.FirstOrDefault(r => r.RevisionId == rev.PreviousRevisionId);
+                var delta = BuildRevisionDeltaSummary(previous?.CampaignContent, rev.CampaignContent);
+                lines.Add(
+                    $"[{rev.RevisionId}] {rev.AppliedUtc:O} | {rev.TriggerKind} by {rev.TriggeredByUsername}({rev.TriggeredByUserId}) | prev:{rev.PreviousRevisionId ?? "none"}\n" +
+                    $"trigger: {TrimToLimit(rev.TriggerInput, 180)}\n" +
+                    $"delta: {delta}");
+            }
+
+            if (document.PromptTweaks.Count > 0)
+            {
+                lines.Add("Recent prompt tweaks:");
+                foreach (var tweak in document.PromptTweaks
+                             .OrderByDescending(t => t.TriggeredUtc)
+                             .Take(Math.Min(5, document.PromptTweaks.Count)))
+                {
+                    lines.Add(
+                        $"- [{tweak.TweakId}] {tweak.TriggeredUtc:O} | {tweak.Kind} by {tweak.TriggeredByUsername}({tweak.TriggeredByUserId}) -> rev:{tweak.ResultingRevisionId}\n" +
+                        $"  {TrimToLimit(tweak.PromptOrInteraction, 180)}");
+                }
+            }
+
+            return new GptCliExecutionResult(true, string.Join("\n", lines), false);
+        }
+        finally
+        {
+            lockHandle.Release();
+        }
+    }
+
+    private static bool TryGetStringArg(string argsJson, string name, out string value)
+    {
+        value = null;
+        if (!GptCliFunction.TryGetJsonProperty(argsJson, name, out var element))
+        {
+            return false;
+        }
+
+        value = element.ValueKind switch
+        {
+            JsonValueKind.String => element.GetString(),
+            JsonValueKind.Number => element.ToString(),
+            JsonValueKind.True => "true",
+            JsonValueKind.False => "false",
+            _ => element.ToString()
+        };
+
+        return !string.IsNullOrWhiteSpace(value);
+    }
+
+    private static bool TryGetBoolArg(string argsJson, string name, out bool value)
+    {
+        value = default;
+        if (!GptCliFunction.TryGetJsonProperty(argsJson, name, out var element))
+        {
+            return false;
+        }
+
+        if (element.ValueKind is JsonValueKind.True or JsonValueKind.False)
+        {
+            value = element.GetBoolean();
+            return true;
+        }
+
+        if (element.ValueKind == JsonValueKind.String && bool.TryParse(element.GetString(), out var parsed))
+        {
+            value = parsed;
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryGetIntArg(string argsJson, string name, out int value)
+    {
+        value = default;
+        if (!GptCliFunction.TryGetJsonProperty(argsJson, name, out var element))
+        {
+            return false;
+        }
+
+        if (element.ValueKind == JsonValueKind.Number && element.TryGetInt32(out value))
+        {
+            return true;
+        }
+
+        if (element.ValueKind == JsonValueKind.String && int.TryParse(element.GetString(), out value))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryGetUlongArg(string argsJson, string name, out ulong value)
+    {
+        value = default;
+        if (!GptCliFunction.TryGetJsonProperty(argsJson, name, out var element))
+        {
+            return false;
+        }
+
+        if (element.ValueKind == JsonValueKind.Number && element.TryGetUInt64(out value))
+        {
+            return true;
+        }
+
+        if (element.ValueKind == JsonValueKind.String)
+        {
+            var s = element.GetString();
+            if (string.IsNullOrWhiteSpace(s))
+            {
+                return false;
+            }
+
+            s = new string(s.Where(char.IsDigit).ToArray());
+            return ulong.TryParse(s, out value);
+        }
+
+        return false;
+    }
+
+    private static bool IsSupportedCampaignFileName(string fileName)
+    {
+        if (string.IsNullOrWhiteSpace(fileName))
+        {
+            return false;
+        }
+
+        var ext = Path.GetExtension(fileName).ToLowerInvariant();
+        return ext is ".txt" or ".md" or ".json";
+    }
+
+    private async Task<string> ReadAttachmentPayloadAsync(string url, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(url))
+        {
+            return null;
+        }
+
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
+        {
+            return null;
+        }
+
+        var fileName = Path.GetFileName(uri.LocalPath);
+        if (!IsSupportedCampaignFileName(fileName))
+        {
+            return null;
+        }
+
+        using var response = await Http.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+        if (!response.IsSuccessStatusCode)
+        {
+            return null;
+        }
+
+        var length = response.Content.Headers.ContentLength;
+        if (length.HasValue && length.Value > MaxAttachmentBytes)
+        {
+            return null;
+        }
+
+        await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+        using var ms = new MemoryStream();
+        var buffer = new byte[8192];
+        var total = 0;
+        while (true)
+        {
+            var read = await stream.ReadAsync(buffer.AsMemory(0, buffer.Length), cancellationToken);
+            if (read <= 0)
+            {
+                break;
+            }
+
+            total += read;
+            if (total > MaxAttachmentBytes)
+            {
+                return null;
+            }
+
+            ms.Write(buffer, 0, read);
+        }
+
+        return Encoding.UTF8.GetString(ms.ToArray());
+    }
+
     public override async Task OnMessageReceivedAsync(DiscordModuleContext context, SocketMessage message, CancellationToken cancellationToken)
     {
         if (message == null || message.Author.IsBot || message.Author.Id == context.Client.CurrentUser.Id)
@@ -213,6 +1081,11 @@ public sealed class DndGameMasterModule : FeatureModuleBase
         }
 
         if (!context.Host.IsChannelGuildMatch(channelState, message.Channel, "dnd-message"))
+        {
+            return;
+        }
+
+        if (!InstructionGPT.IsModuleEnabled(channelState, Id))
         {
             return;
         }
