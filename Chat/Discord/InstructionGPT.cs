@@ -348,12 +348,14 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 	        var functions = GetAllGptCliFunctions();
 	        var options = BuildGptCliSlashOptions(functions);
 
-	        var command = new SlashCommandBuilder()
-	            .WithName("gptcli")
-	            .WithDescription("GPT-CLI commands")
-	            .AddOptions(options.ToArray());
+		        var command = new SlashCommandBuilder()
+		            .WithName("gptcli")
+		            .WithDescription("GPT-CLI commands")
+		            .AddOptions(options.ToArray());
 
-	        DiscordRestClient restClient = Client.Rest;
+		        await DumpBuiltCommandTree(command);
+
+		        DiscordRestClient restClient = Client.Rest;
 
 	        var builtCommand = command.Build();
 	        try
@@ -416,17 +418,18 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 	            if (guildIds.Count > 0 && guildIds.Count <= maxGuildOverwrites)
 	            {
 	                await Console.Out.WriteLineAsync($"No GPT:DiscordGuildId configured; overwriting guild commands for {guildIds.Count} guild(s) for fast iteration.");
-	                foreach (var guildId in guildIds)
-	                {
-	                    var guild = await restClient.GetGuildAsync(guildId);
-	                    if (guild == null)
-	                    {
-	                        continue;
-	                    }
+		                foreach (var guildId in guildIds)
+		                {
+		                    var guild = await restClient.GetGuildAsync(guildId);
+		                    if (guild == null)
+		                    {
+		                        continue;
+		                    }
 
-	                    await Console.Out.WriteLineAsync($"Overwriting guild commands for {guildId}...");
-	                    await guild.BulkOverwriteApplicationCommandsAsync(new[] { builtCommand });
-	                }
+		                    await Console.Out.WriteLineAsync($"Overwriting guild commands for {guildId}...");
+		                    await guild.BulkOverwriteApplicationCommandsAsync(new[] { builtCommand });
+		                    await DumpGuildCommands(guild);
+		                }
 
 	                return;
 	            }
@@ -445,17 +448,88 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 	        await DumpGlobalCommands((IDiscordClient)restClient);
 	    }
 
+    private static async Task DumpBuiltCommandTree(SlashCommandBuilder command)
+    {
+        if (command == null)
+        {
+            return;
+        }
+
+        try
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("Built slash command tree:");
+            sb.AppendLine($"/{command.Name} (slash) - {command.Description}");
+
+            if (command.Options is { Count: > 0 })
+            {
+                foreach (var opt in command.Options)
+                {
+                    AppendSlashOptionBuilderTree(sb, opt, 1);
+                }
+            }
+            else
+            {
+                sb.AppendLine("  (no options)");
+            }
+
+            await Console.Out.WriteLineAsync(sb.ToString().TrimEnd());
+        }
+        catch (Exception ex)
+        {
+            await Console.Out.WriteLineAsync($"Built slash command tree dump failed: {ex.GetType().Name} {ex.Message}");
+        }
+    }
+
+    private static void AppendSlashOptionBuilderTree(StringBuilder sb, SlashCommandOptionBuilder opt, int depth)
+    {
+        if (sb == null || opt == null)
+        {
+            return;
+        }
+
+        var indent = new string(' ', depth * 2);
+        var required = opt.IsRequired == true ? " required" : "";
+        sb.AppendLine($"{indent}- {opt.Name} ({opt.Type}){required} - {opt.Description}");
+
+        if (opt.Options is { Count: > 0 })
+        {
+            foreach (var child in opt.Options)
+            {
+                AppendSlashOptionBuilderTree(sb, child, depth + 1);
+            }
+        }
+    }
+
     private static async Task DumpGuildCommands(IGuild guild)
     {
         var commands = await guild.GetApplicationCommandsAsync();
-        await Console.Out.WriteLineAsync($"Guild commands: {string.Join(", ", commands.Select(c => c.Name))}");
+        await Console.Out.WriteLineAsync($"Guild commands ({guild.Id}): {string.Join(", ", commands.Select(c => c.Name))}");
+
         foreach (var command in commands)
         {
-            if (string.Equals(command.Name, "gptcli", StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(command.Name, "gptcli", StringComparison.OrdinalIgnoreCase))
             {
-                var optionNames = command.Options?.Select(o => o.Name) ?? Enumerable.Empty<string>();
-                await Console.Out.WriteLineAsync($"gptcli options: {string.Join(", ", optionNames)}");
+                continue;
             }
+
+            var sb = new StringBuilder();
+            sb.AppendLine($"Registered slash command tree for guild {guild.Id}:");
+            sb.AppendLine($"/{command.Name} (id={command.Id}, type={command.Type}) - {command.Description}");
+
+            if (command.Options is { Count: > 0 })
+            {
+                foreach (var opt in command.Options)
+                {
+                    AppendRegisteredOptionTree(sb, opt, 1);
+                }
+            }
+            else
+            {
+                sb.AppendLine("  (no options)");
+            }
+
+            await Console.Out.WriteLineAsync(sb.ToString().TrimEnd());
         }
     }
 
@@ -465,10 +539,53 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
         await Console.Out.WriteLineAsync($"Global commands: {string.Join(", ", commands.Select(c => c.Name))}");
         foreach (var command in commands)
         {
-            if (string.Equals(command.Name, "gptcli", StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(command.Name, "gptcli", StringComparison.OrdinalIgnoreCase))
             {
-                var optionNames = command.Options?.Select(o => o.Name) ?? Enumerable.Empty<string>();
-                await Console.Out.WriteLineAsync($"gptcli options: {string.Join(", ", optionNames)}");
+                continue;
+            }
+
+            var sb = new StringBuilder();
+            sb.AppendLine("Registered global slash command tree:");
+            sb.AppendLine($"/{command.Name} (id={command.Id}, type={command.Type}) - {command.Description}");
+
+            if (command.Options is { Count: > 0 })
+            {
+                foreach (var opt in command.Options)
+                {
+                    AppendRegisteredOptionTree(sb, opt, 1);
+                }
+            }
+            else
+            {
+                sb.AppendLine("  (no options)");
+            }
+
+            await Console.Out.WriteLineAsync(sb.ToString().TrimEnd());
+        }
+    }
+
+    private static void AppendRegisteredOptionTree(StringBuilder sb, IApplicationCommandOption opt, int depth)
+    {
+        if (sb == null || opt == null)
+        {
+            return;
+        }
+
+        var indent = new string(' ', depth * 2);
+        var required = opt.IsRequired == true ? " required" : "";
+        sb.AppendLine($"{indent}- {opt.Name} ({opt.Type}){required} - {opt.Description}");
+
+        if (opt.Choices is { Count: > 0 })
+        {
+            var choices = string.Join(", ", opt.Choices.Select(c => c.Name));
+            sb.AppendLine($"{indent}  choices: {choices}");
+        }
+
+        if (opt.Options is { Count: > 0 })
+        {
+            foreach (var child in opt.Options)
+            {
+                AppendRegisteredOptionTree(sb, child, depth + 1);
             }
         }
     }
@@ -3481,12 +3598,13 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
                 ToolName = "gptcli_help",
                 Description = "Show GPT-CLI help",
                 Slash = new GptCliSlashBinding(GptCliSlashBindingKind.SubCommand, "help", "Help"),
-                ExecuteAsync = async (ctx, argsJson, ct) =>
-                {
-                    await Task.Yield();
-                    return new GptCliExecutionResult(true, BuildCoreHelpText(), false);
-                }
-            },
+	                ExecuteAsync = async (ctx, argsJson, ct) =>
+	                {
+	                    await Task.Yield();
+	                    var functions = GetAllGptCliFunctions();
+	                    return new GptCliExecutionResult(true, BuildHelpText(ctx?.ChannelState, functions), false);
+	                }
+	            },
 	            new()
 	            {
 	                ToolName = "gptcli_modules",
@@ -4016,24 +4134,229 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 	        return string.Join("\n", lines);
 	    }
 
-	    private static string BuildCoreHelpText()
-	    {
-	        return string.Join("\n", new[]
-	        {
-            "**GPT-CLI help**",
-            "",
-            "**Core**",
-            "• `/gptcli help`",
-            "• `/gptcli modules`",
-            "• `/gptcli instruction add|list|get|delete|clear`",
-            "• `/gptcli clear target:<messages|instructions|all>`",
-            "• `/gptcli set enabled|mute|response-mode|embed-mode|max-chat-history-length|max-tokens|model`",
-            "",
-            "**Natural language tool calling**",
-            "Tag the bot and ask for a slash command in plain English.",
-            "Example: `@bot set max tokens to 8000`"
-        });
-    }
+		    private static string BuildHelpText(ChannelState channelState, IReadOnlyList<GptCliFunction> functions)
+		    {
+		        var lines = new List<string>
+		        {
+		            "**GPT-CLI help**",
+		            ""
+		        };
+
+		        functions ??= Array.Empty<GptCliFunction>();
+
+		        var setFunctions = functions
+		            .Where(f => f?.Slash?.Kind == GptCliSlashBindingKind.SetOption &&
+		                        string.Equals(f.Slash.TopLevelName, "set", StringComparison.OrdinalIgnoreCase) &&
+		                        !string.IsNullOrWhiteSpace(f.Slash.SetOptionName))
+		            .ToList();
+
+		        var coreFunctions = functions
+		            .Where(f => f?.Slash != null && string.IsNullOrWhiteSpace(f.ModuleId))
+		            .ToList();
+
+		        var moduleFunctions = functions
+		            .Where(f => f?.Slash != null && !string.IsNullOrWhiteSpace(f.ModuleId))
+		            .ToList();
+
+		        lines.Add("**Core**");
+		        lines.AddRange(BuildHelpLinesForFunctions(
+		            channelState,
+		            coreFunctions.Where(f => f.Slash.Kind != GptCliSlashBindingKind.SetOption).ToList(),
+		            "core"));
+
+		        lines.Add("");
+		        lines.Add("**Settings**");
+		        lines.Add("• `/gptcli set <option>:<value>` (provide exactly one option)");
+		        lines.AddRange(BuildHelpLinesForSetOptions(setFunctions));
+
+		        // Module commands (including their `set` toggles) live here.
+		        var moduleIds = moduleFunctions
+		            .Select(f => f.ModuleId)
+		            .Distinct(StringComparer.OrdinalIgnoreCase)
+		            .OrderBy(s => s, StringComparer.OrdinalIgnoreCase)
+		            .ToList();
+
+		        if (moduleIds.Count > 0)
+		        {
+		            lines.Add("");
+		            lines.Add("**Modules**");
+		            foreach (var moduleId in moduleIds)
+		            {
+		                var enabled = channelState != null ? IsModuleEnabled(channelState, moduleId) : (bool?)null;
+		                var enabledText = enabled.HasValue ? (enabled.Value ? "enabled" : "disabled") : "enabled=?";
+		                lines.Add($"**{moduleId}** ({enabledText})");
+
+		                // If a module has a set toggle, show it first.
+		                var setToggles = setFunctions
+		                    .Where(f => string.Equals(f.ModuleId, moduleId, StringComparison.OrdinalIgnoreCase))
+		                    .ToList();
+		                foreach (var toggle in setToggles)
+		                {
+		                    lines.Add($"• {FormatSetOptionLine(toggle)}");
+		                }
+
+		                var moduleCmds = moduleFunctions
+		                    .Where(f => string.Equals(f.ModuleId, moduleId, StringComparison.OrdinalIgnoreCase) &&
+		                                f.Slash.Kind != GptCliSlashBindingKind.SetOption)
+		                    .ToList();
+
+		                var moduleLines = BuildHelpLinesForFunctions(channelState, moduleCmds, moduleId);
+		                if (moduleLines.Count == 0)
+		                {
+		                    lines.Add("• (no commands)");
+		                }
+		                else
+		                {
+		                    lines.AddRange(moduleLines);
+		                }
+		            }
+		        }
+
+		        lines.Add("");
+		        lines.Add("**Natural language tool calling**");
+		        lines.Add("Tag the bot and ask for a slash command in plain English.");
+		        lines.Add("Example: `@bot set max tokens to 8000`");
+
+		        return string.Join("\n", lines);
+		    }
+
+		    private static List<string> BuildHelpLinesForSetOptions(IReadOnlyList<GptCliFunction> setFunctions)
+		    {
+		        var lines = new List<string>();
+		        if (setFunctions == null || setFunctions.Count == 0)
+		        {
+		            return lines;
+		        }
+
+		        foreach (var fn in setFunctions.OrderBy(f => f.Slash.SetOptionName, StringComparer.OrdinalIgnoreCase))
+		        {
+		            lines.Add($"• {FormatSetOptionLine(fn)}");
+		        }
+
+		        return lines;
+		    }
+
+		    private static string FormatSetOptionLine(GptCliFunction fn)
+		    {
+		        var name = fn?.Slash?.SetOptionName ?? "unknown";
+		        var valueSpec = fn?.Parameters?.FirstOrDefault();
+		        var valueText = valueSpec != null ? FormatParamValueHint(valueSpec) : "<value>";
+		        var desc = !string.IsNullOrWhiteSpace(fn?.Description) ? $" - {fn.Description}" : "";
+		        return $"`/gptcli set {name}:{valueText}`{desc}";
+		    }
+
+		    private static List<string> BuildHelpLinesForFunctions(ChannelState channelState, IReadOnlyList<GptCliFunction> functions, string label)
+		    {
+		        var lines = new List<string>();
+		        if (functions == null || functions.Count == 0)
+		        {
+		            return lines;
+		        }
+
+		        // Group subcommands by their top-level group.
+		        var subCommands = functions
+		            .Where(f => f?.Slash?.Kind == GptCliSlashBindingKind.SubCommand)
+		            .OrderBy(f => f.Slash.TopLevelName, StringComparer.OrdinalIgnoreCase)
+		            .ToList();
+
+		        foreach (var fn in subCommands)
+		        {
+		            lines.Add($"• `{FormatSlashUsage(fn)}`{FormatHelpSuffix(fn)}");
+		        }
+
+		        var groups = functions
+		            .Where(f => f?.Slash?.Kind == GptCliSlashBindingKind.GroupSubCommand && !string.IsNullOrWhiteSpace(f.Slash.TopLevelName))
+		            .GroupBy(f => f.Slash.TopLevelName, StringComparer.OrdinalIgnoreCase)
+		            .OrderBy(g => g.Key, StringComparer.OrdinalIgnoreCase)
+		            .ToList();
+
+		        foreach (var group in groups)
+		        {
+		            var groupName = group.Key;
+		            lines.Add($"• `/gptcli {groupName} ...`");
+
+		            foreach (var fn in group.OrderBy(f => f.Slash.SubCommandName, StringComparer.OrdinalIgnoreCase))
+		            {
+		                lines.Add($"• `{FormatSlashUsage(fn)}`{FormatHelpSuffix(fn)}");
+		            }
+		        }
+
+		        return lines;
+		    }
+
+		    private static string FormatHelpSuffix(GptCliFunction fn)
+		    {
+		        if (fn == null || string.IsNullOrWhiteSpace(fn.Description))
+		        {
+		            return "";
+		        }
+
+		        return $" - {fn.Description}";
+		    }
+
+		    private static string FormatSlashUsage(GptCliFunction fn)
+		    {
+		        if (fn?.Slash == null)
+		        {
+		            return "/gptcli";
+		        }
+
+		        var args = FormatParamHints(fn.Parameters);
+		        return fn.Slash.Kind switch
+		        {
+		            GptCliSlashBindingKind.SubCommand => $"/gptcli {fn.Slash.TopLevelName}{args}",
+		            GptCliSlashBindingKind.GroupSubCommand => $"/gptcli {fn.Slash.TopLevelName} {fn.Slash.SubCommandName}{args}",
+		            _ => $"/gptcli {fn.Slash.TopLevelName}{args}"
+		        };
+		    }
+
+		    private static string FormatParamHints(IReadOnlyList<GptCliParamSpec> parameters)
+		    {
+		        if (parameters == null || parameters.Count == 0)
+		        {
+		            return "";
+		        }
+
+		        var parts = new List<string>();
+		        foreach (var p in parameters)
+		        {
+		            if (p == null || string.IsNullOrWhiteSpace(p.Name))
+		            {
+		                continue;
+		            }
+
+		            var value = FormatParamValueHint(p);
+		            var part = $"{p.Name}:{value}";
+		            parts.Add(p.Required ? part : $"[{part}]");
+		        }
+
+		        return parts.Count == 0 ? "" : " " + string.Join(" ", parts);
+		    }
+
+		    private static string FormatParamValueHint(GptCliParamSpec p)
+		    {
+		        if (p == null)
+		        {
+		            return "<value>";
+		        }
+
+		        if (p.Choices is { Count: > 0 })
+		        {
+		            return $"<{string.Join("|", p.Choices.Select(c => c.Value))}>";
+		        }
+
+		        return p.Type switch
+		        {
+		            GptCliParamType.Boolean => "<true|false>",
+		            GptCliParamType.Integer => "<int>",
+		            GptCliParamType.Number => "<number>",
+		            GptCliParamType.User => "<user>",
+		            GptCliParamType.Channel => "<channel>",
+		            GptCliParamType.Role => "<role>",
+		            GptCliParamType.Attachment => "<file>",
+		            _ => "<text>"
+		        };
+		    }
 
     private Task<GptCliExecutionResult> ExecuteClearAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)
     {

@@ -26,6 +26,10 @@
     <PackageReference Include="Spectre.Console" Version="0.54.0" />
   </ItemGroup>
   <ItemGroup>
+    <!-- Do not compile example modules into the main CLI; they are built/deployed as separate module DLLs. -->
+    <Compile Remove="modules/**/*.cs" />
+  </ItemGroup>
+  <ItemGroup>
     <None Update="appsettings.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>

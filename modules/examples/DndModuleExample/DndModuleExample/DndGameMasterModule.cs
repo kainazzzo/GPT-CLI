@@ -1094,17 +1094,19 @@ public sealed class DndGameMasterModule : FeatureModuleBase
         await lockHandle.WaitAsync(cancellationToken);
         try
         {
-            var dndState = await GetOrLoadStateAsync(channelState, cancellationToken);
-            var content = (message.Content ?? string.Empty).Trim();
-            var isMentioned = message.MentionedUsers.Any(user => user.Id == context.Client.CurrentUser.Id);
+	            var dndState = await GetOrLoadStateAsync(channelState, cancellationToken);
+	            var content = (message.Content ?? string.Empty).Trim();
 
-            if (isMentioned || content.StartsWith("!dnd", StringComparison.OrdinalIgnoreCase) || content.StartsWith("!confirm", StringComparison.OrdinalIgnoreCase))
-            {
-                await message.Channel.SendMessageAsync(
-                    "Use `/gptcli dnd ...` for D&D GM setup commands. " +
-                    "Live gameplay chat remains natural in this channel when mode is `live`.");
-                return;
-            }
+	            // Setup/GM controls are handled via `/gptcli` (and mention-triggered LLM tool routing).
+	            // In-channel D&D module responses should only happen in live gameplay mode.
+	            if (content.StartsWith("!dnd", StringComparison.OrdinalIgnoreCase) ||
+	                content.StartsWith("!confirm", StringComparison.OrdinalIgnoreCase))
+	            {
+	                await message.Channel.SendMessageAsync(
+	                    "Use `/gptcli dnd ...` for D&D GM setup commands. " +
+	                    "Live gameplay chat remains natural in this channel when mode is `live`.");
+	                return;
+	            }
 
             if (!string.Equals(dndState.Mode, ModeLive, StringComparison.OrdinalIgnoreCase))
             {

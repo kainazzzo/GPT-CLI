@@ -76,15 +76,15 @@ public sealed class GptCliFunction
     // argumentsJson is always a JSON object; modules/core should parse only the keys they declared in Parameters.
     public Func<GptCliExecutionContext, string, CancellationToken, Task<GptCliExecutionResult>> ExecuteAsync { get; init; }
 
-    public ToolDefinition ToToolDefinition()
-    {
-        if (string.IsNullOrWhiteSpace(ToolName))
-        {
+	    public ToolDefinition ToToolDefinition()
+	    {
+	        if (string.IsNullOrWhiteSpace(ToolName))
+	        {
             throw new InvalidOperationException("ToolName is required.");
         }
 
-        var properties = new Dictionary<string, PropertyDefinition>(StringComparer.OrdinalIgnoreCase);
-        var required = new List<string>();
+	        var properties = new Dictionary<string, PropertyDefinition>(StringComparer.OrdinalIgnoreCase);
+	        var required = new List<string>();
 
         foreach (var p in Parameters ?? Array.Empty<GptCliParamSpec>())
         {
@@ -117,24 +117,27 @@ public sealed class GptCliFunction
             }
         }
 
-        return new ToolDefinition
-        {
-            Type = "function",
-            Function = new FunctionDefinition
-            {
-                Name = ToolName,
-                Description = string.IsNullOrWhiteSpace(Description) ? ToolName : Description,
-                Strict = true,
-                Parameters = new PropertyDefinition
-                {
-                    Type = "object",
-                    AdditionalProperties = false,
-                    Properties = properties,
-                    Required = required.Count == 0 ? null : required
-                }
-            }
-        };
-    }
+	        return new ToolDefinition
+	        {
+	            Type = "function",
+	            Function = new FunctionDefinition
+	            {
+	                Name = ToolName,
+	                Description = string.IsNullOrWhiteSpace(Description) ? ToolName : Description,
+	                // Keep tool schemas flexible: strict mode requires every property be listed in `required`,
+	                // which breaks optional parameters for natural-language routing.
+	                Strict = false,
+	                Parameters = new PropertyDefinition
+	                {
+	                    Type = "object",
+	                    AdditionalProperties = false,
+	                    Properties = properties,
+	                    // Always supply `required` (even empty) to avoid schema validation failures on some models/providers.
+	                    Required = required
+	                }
+	            }
+	        };
+	    }
 
     public ApplicationCommandOptionType GetSlashOptionType()
     {
@@ -227,13 +230,13 @@ public sealed class GptCliFunction
         return option;
     }
 
-    public static bool TryGetJsonProperty(string argumentsJson, string name, out JsonElement value)
-    {
-        value = default;
-        if (string.IsNullOrWhiteSpace(argumentsJson))
-        {
-            return false;
-        }
+	    public static bool TryGetJsonProperty(string argumentsJson, string name, out JsonElement value)
+	    {
+	        value = default;
+	        if (string.IsNullOrWhiteSpace(argumentsJson))
+	        {
+	            return false;
+	        }
 
         try
         {
@@ -243,17 +246,18 @@ public sealed class GptCliFunction
                 return false;
             }
 
-            if (!doc.RootElement.TryGetProperty(name, out var element))
-            {
-                return false;
-            }
+	            if (!doc.RootElement.TryGetProperty(name, out var element))
+	            {
+	                return false;
+	            }
 
-            value = element;
-            return true;
-        }
-        catch
-        {
-            return false;
-        }
+	            // JsonElement is backed by its JsonDocument; clone so callers can safely use it after disposing the document.
+	            value = element.Clone();
+	            return true;
+	        }
+	        catch
+	        {
+	            return false;
+	        }
     }
 }
