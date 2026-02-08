@@ -7,8 +7,11 @@
       "command": "bash",
       "args": [
         "-lc",
-        "dotnet build gpt.csproj -c Release /p:GptSkipModuleDeploy=true"
+        "dotnet build gpt.csproj -c Release /p:GptSkipModuleDeploy=true && bash modules/build-deploy-modules.sh \"${DISCORD_MODULES_DIR:-/usr/local/discord/modules}\""
       ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
       "group": {
         "kind": "build",
         "isDefault": true
