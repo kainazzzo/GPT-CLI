@@ -35,7 +35,8 @@ case "${1:-}" in
   watch)
     docker compose run --rm builder
     docker compose build
-    docker compose up
+    docker compose up -d
+    docker compose logs -f discord
     ;;
   restart)
     docker compose run --rm builder
