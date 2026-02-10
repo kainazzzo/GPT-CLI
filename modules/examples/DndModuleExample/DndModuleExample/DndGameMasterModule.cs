@@ -94,25 +94,26 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             return new[]
             {
                 BuildModulePreambleMessage(
-                    "Sub-Prime Directive (DRAFT):\n" +
-                    "- Treat user messages as campaign drafting and worldbuilding.\n" +
+                    "Sub-Prime Directive (DRAFT / GM Prep):\n" +
+                    "- Draft mode is the preparatory phase a GM would normally do before play: define premise/tone, write hooks, outline scenes, sketch key NPCs, pick encounters, and set up the party.\n" +
+                    "- Treat natural-language requests as instructions to build/update persistent draft state (campaign draft, party roster, character sheets, encounter templates).\n" +
+                    "- The user may mention any available DnD capability; your job is to call the relevant `gptcli_dnd_*` functions to create/update what they asked for.\n" +
                     "- Do not finalize/save the campaign into the catalog until game mode.\n" +
-                    "- Prefer concrete, actionable next steps (hooks, scenes, NPCs, encounter ideas).\n" +
-                    "- Do not discuss combat mechanics unless the user explicitly asks.\n" +
                     "When To Engage (triggers):\n" +
-                    "- campaign, setting, hook, premise, encounter ideas, NPCs, party setup, start a campaign\n")
+                    "- new campaign, rewrite/update draft, add/remove party members, create/show NPC/PC sheets, list encounters/campaigns, set pass timeout\n")
             };
         }
 
         return new[]
         {
             BuildModulePreambleMessage(
-                "Sub-Prime Directive (GAME):\n" +
-                "- Treat user messages as in-game gameplay and roleplay.\n" +
-                "- Keep responses short and drive toward the next playable decision.\n" +
-                "- Prefer tool-driven outcomes for mechanics (attacks/rolls/encounters).\n" +
+                "Sub-Prime Directive (GAME / Play):\n" +
+                "- Game mode is live play: narrate scenes, run encounters, track turns, and respond as GM.\n" +
+                "- The user may describe actions in natural language; your job is to call the relevant `gptcli_dnd_*` functions for mechanics/state (encounters, rolls, attacks/casts, status, timeouts).\n" +
+                "- Prefer Discord-friendly formatting for readability: bold beats, short paragraphs, bullet options, and occasional emojis.\n" +
+                "- Keep responses short, in-character, and always drive toward the next playable decision.\n" +
                 "When To Engage (triggers):\n" +
-                "- attack/cast/roll/initiative/encounter/turn/targets\n")
+                "- start/begin, encounter, attack/cast, roll/initiative, turn/pass, targets, status\n")
         };
     }
 
@@ -179,7 +180,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             {
                 ToolName = "gptcli_dnd_partyshow",
                 ModuleId = Id,
-                Description = "Show party roster for the active draft (draft mode)",
+                Description = "Show party roster for the active campaign (draft or game)",
                 Slash = new GptCliSlashBinding(GptCliSlashBindingKind.GroupSubCommand, "dnd", dndGroupDescription, "partyshow"),
                 ExecuteAsync = ExecutePartyShowAsync
             },
@@ -209,6 +210,15 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 Slash = new GptCliSlashBinding(GptCliSlashBindingKind.GroupSubCommand, "dnd", dndGroupDescription, "partyaddnpc"),
                 Parameters = new[] { new GptCliParamSpec("id", GptCliParamType.String, "NPC actor id (npc:...)", Required: true) },
                 ExecuteAsync = ExecutePartyAddNpcAsync
+            },
+            new()
+            {
+                ToolName = "gptcli_dnd_partyremovenpc",
+                ModuleId = Id,
+                Description = "Remove an NPC from the party roster (keeps the sheet file)",
+                Slash = new GptCliSlashBinding(GptCliSlashBindingKind.GroupSubCommand, "dnd", dndGroupDescription, "partyremovenpc"),
+                Parameters = new[] { new GptCliParamSpec("id", GptCliParamType.String, "NPC actor id (npc:...)", Required: true) },
+                ExecuteAsync = ExecutePartyRemoveNpcAsync
             },
             new()
             {
@@ -306,29 +316,42 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 ExecuteAsync = ExecuteNpcRemoveAsync
             },
 
-            new()
-            {
-                ToolName = "gptcli_dnd_liveconfig",
-                ModuleId = Id,
-                Description = "Configure game-mode encounter ticking/timeouts (module-side)",
-                Slash = new GptCliSlashBinding(GptCliSlashBindingKind.GroupSubCommand, "dnd", dndGroupDescription, "liveconfig"),
-                Parameters = new[]
-                {
-                    new GptCliParamSpec("tick_seconds", GptCliParamType.Integer, "Tick interval seconds (1-30)", MinInt: 1, MaxInt: 30),
-                    new GptCliParamSpec("player_turn_timeout_seconds", GptCliParamType.Integer, "Player turn timeout seconds (5-300)", MinInt: 5, MaxInt: 300),
-                    new GptCliParamSpec("encounter_timeout_seconds", GptCliParamType.Integer, "Encounter timeout seconds (30-3600)", MinInt: 30, MaxInt: 3600),
-                    new GptCliParamSpec("npc_autoplay", GptCliParamType.Boolean, "Autoplay NPC turns"),
-                    new GptCliParamSpec("autoroll_policy", GptCliParamType.String, "npc-only, all, or never",
-                        Choices: new[]
-                        {
+	            new()
+	            {
+	                ToolName = "gptcli_dnd_liveconfig",
+	                ModuleId = Id,
+	                Description = "Configure game-mode encounter ticking/timeouts (module-side)",
+	                Slash = new GptCliSlashBinding(GptCliSlashBindingKind.GroupSubCommand, "dnd", dndGroupDescription, "liveconfig"),
+	                Parameters = new[]
+	                {
+	                    new GptCliParamSpec("tick_seconds", GptCliParamType.Integer, "Tick interval seconds (1-30)", MinInt: 1, MaxInt: 30),
+	                    new GptCliParamSpec("player_turn_timeout_seconds", GptCliParamType.Integer, "Player turn timeout seconds (5-3600)", MinInt: 5, MaxInt: 3600),
+	                    new GptCliParamSpec("encounter_timeout_seconds", GptCliParamType.Integer, "Encounter timeout seconds (30-3600)", MinInt: 30, MaxInt: 3600),
+	                    new GptCliParamSpec("npc_autoplay", GptCliParamType.Boolean, "Autoplay NPC turns"),
+	                    new GptCliParamSpec("autoroll_policy", GptCliParamType.String, "npc-only, all, or never",
+	                        Choices: new[]
+	                        {
                             new GptCliParamChoice("npc-only", "npc-only"),
                             new GptCliParamChoice("all", "all"),
                             new GptCliParamChoice("never", "never")
                         }),
                     new GptCliParamSpec("npc_flavor", GptCliParamType.Boolean, "Generate 1-line NPC flavor via LLM")
-                },
-                ExecuteAsync = ExecuteLiveConfigAsync
-            },
+	                },
+	                ExecuteAsync = ExecuteLiveConfigAsync
+	            },
+	            new()
+	            {
+	                ToolName = "gptcli_dnd_passtimeout",
+	                ModuleId = Id,
+	                Description = "Set the auto-pass timeout (player turn timeout) for this campaign; defaults to 30 minutes",
+	                Slash = new GptCliSlashBinding(GptCliSlashBindingKind.GroupSubCommand, "dnd", dndGroupDescription, "passtimeout"),
+	                Parameters = new[]
+	                {
+	                    new GptCliParamSpec("minutes", GptCliParamType.Integer, "Minutes until a player's turn auto-passes (default 30)", MinInt: 1, MaxInt: 60),
+	                    new GptCliParamSpec("seconds", GptCliParamType.Integer, "Seconds until a player's turn auto-passes (overrides minutes; 5-3600)", MinInt: 5, MaxInt: 3600)
+	                },
+	                ExecuteAsync = ExecutePassTimeoutAsync
+	            },
 
             new()
             {
@@ -508,6 +531,13 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             // If the user tags the bot, core tool-routing may also run; prefer users NOT tag in draft mode.
             if (!isTagged)
             {
+                // If the core chat bot is disabled for this channel, we still want conversation continuity
+                // for DnD draft/game LLM calls. Record user messages ourselves in that case.
+                if (TryRecordUserMessageWhenCoreDisabled(channelState, message, content))
+                {
+                    try { await context.Host.SaveCachedChannelStateAsync(message.Channel.Id); } catch { }
+                }
+
                 // First: handle pending overwrite confirmations, if any.
                 if (await TryHandlePendingCampaignOverwriteAsync(context, channelState, message, dndState, cancellationToken))
                 {
@@ -576,6 +606,10 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                                 Console.WriteLine($"[dnd] draft-create[{reqId}]: responding handled=true respLen={(res.Response ?? string.Empty).Length} replyLen={reply.Length}");
                                 Console.WriteLine($"[dnd] draft-create[{reqId}]: reply={reply}");
                                 await SendChunkedAsync(message.Channel, reply);
+                                if (TryRecordAssistantReply(channelState, reply))
+                                {
+                                    try { await context.Host.SaveCachedChannelStateAsync(message.Channel.Id); } catch { }
+                                }
                             }
                             catch (Exception ex)
                             {
@@ -669,6 +703,15 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         {
             Console.WriteLine($"[dnd] processing: mode=game untagged (channel={message.Channel?.Id})");
             // Game mode: treat untagged messages as gameplay/roleplay and route to tools/chat.
+            if (TryRecordUserMessageWhenCoreDisabled(channelState, message, content))
+            {
+                try { await context.Host.SaveCachedChannelStateAsync(message.Channel.Id); } catch { }
+            }
+            if (await TryHandleDeterministicGameStartAsync(context, channelState, message, dndState, cancellationToken))
+            {
+                return;
+            }
+
             var handled = await TryHandleAutoRoutedMessageAsync(context, channelState, message, dndState, cancellationToken);
             Console.WriteLine($"[dnd] auto-route: handled={handled} mode=game (channel={message.Channel?.Id})");
             if (handled)
@@ -759,11 +802,14 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         // Offer only this module's DnD tools to avoid cross-module surprises,
         // and filter the toolset by mode (draft != game toolset).
         var mode = NormalizeMode(dndState?.Mode);
+        // In GAME mode, mode changes must be done via slash command to avoid accidental in-character triggers.
+        var allowModeTool = !string.Equals(mode, ModeGame, StringComparison.OrdinalIgnoreCase) && LooksLikeModeChangeIntent(text);
         var functions = GetGptCliFunctions(context)
             .Where(f => f?.ExecuteAsync != null &&
                         !string.IsNullOrWhiteSpace(f.ToolName) &&
                         f.ToolName.StartsWith("gptcli_dnd_", StringComparison.OrdinalIgnoreCase) &&
-                        IsDndToolAllowedForMode(f.ToolName, mode))
+                        IsDndToolAllowedForMode(f.ToolName, mode) &&
+                        (allowModeTool || !string.Equals(f.ToolName, "gptcli_dnd_mode", StringComparison.OrdinalIgnoreCase)))
             .ToList();
         if (functions.Count == 0)
         {
@@ -782,6 +828,17 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         userCtx.AppendLine($"DnD mode: {mode}");
         userCtx.AppendLine($"Active campaign: {activeCampaign}");
 
+        // Include party roster in-context so the model can reliably map "remove Kain" -> npc:... without
+        // needing a multi-turn tool loop (tool calls are single-pass).
+        try
+        {
+            await AppendPartyRosterContextAsync(userCtx, channelState, mode, activeCampaign, ct);
+        }
+        catch
+        {
+            // ignore
+        }
+
         if (string.Equals(mode, ModeGame, StringComparison.OrdinalIgnoreCase))
         {
             // Add just enough context for target selection.
@@ -791,6 +848,28 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 userCtx.AppendLine("Encounter:");
                 userCtx.AppendLine($"phase={enc.Phase} round={enc.RoundNumber} current={enc.CurrentActorId}");
                 userCtx.AppendLine(RenderTargets(enc));
+            }
+
+            // Also include encounter template ids so the model can pick one to start without extra tool loops.
+            // (Tool-calls are single-pass; the model does not see tool results before choosing the next call.)
+            try
+            {
+                var campaign = await LoadCampaignAsync(channelState, activeCampaign, ct);
+                if (campaign?.EncounterTemplates is { Count: > 0 })
+                {
+                    userCtx.AppendLine("Encounter templates (ids):");
+                    userCtx.AppendLine(string.Join(", ",
+                        campaign.EncounterTemplates
+                            .Where(t => t != null && !string.IsNullOrWhiteSpace(t.TemplateId))
+                            .Select(t => t.TemplateId.Trim())
+                            .Distinct(StringComparer.OrdinalIgnoreCase)
+                            .OrderBy(s => s, StringComparer.OrdinalIgnoreCase)
+                            .Take(20)));
+                }
+            }
+            catch
+            {
+                // ignore
             }
         }
         else if (string.Equals(mode, ModeDraft, StringComparison.OrdinalIgnoreCase))
@@ -824,41 +903,75 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             {
                 ModeDraft =>
                     "You are the D&D game master assistant operating in DRAFT mode.\n" +
-                    "Treat every user message as campaign drafting/worldbuilding.\n" +
+                    "Draft mode is GM prep: build the campaign premise/tone, hooks, scenes, NPCs, encounter templates, and party composition.\n" +
+                    "The user may mention any available DnD capability; your job is to call the appropriate `gptcli_dnd_*` functions to create/update the requested state.\n" +
                     "Do not call `gptcli_dnd_mode` unless the user explicitly asks to change modes.\n" +
                     "If the user is describing a new campaign (name + premise/party), you must call `gptcli_dnd_campaigncreate`.\n" +
                     "If the user asks to change/rewrite/update the existing draft story, you must call `gptcli_dnd_draftupdate`.\n" +
-                    "If the user asks to add/remove party members and includes @mentions or npc: ids, you must call the appropriate party tool(s).\n" +
+                    "Party roster is provided in context under \"Party roster (actors)\".\n" +
+                    "If the user asks to add/remove party members:\n" +
+                    "- PCs: use `gptcli_dnd_partyaddpc` / `gptcli_dnd_partyremovepc`.\n" +
+                    "- NPCs: use `gptcli_dnd_partyremovenpc` (or `gptcli_dnd_npcremove`).\n" +
+                    "If the user asks to change the auto-pass / player turn timeout / pass timeout, call `gptcli_dnd_passtimeout`.\n" +
                     "If the user specifies party members: create NPCs via tools; for PCs, only create a sheet for the author unless you have an explicit Discord user reference.\n" +
                     "In DRAFT mode, do not finalize/save campaigns to the catalog. Build drafts only; finalization happens when entering game mode or via campaignfinalize.\n" +
-                    "If the message should persist state (create/overwrite a draft, set active campaign, add NPCs/PCs, list campaigns/encounters), call the appropriate tool(s) even if the user did not say \"run a command\".\n" +
+                    "If the message should persist state (create/overwrite a draft, set active campaign, add/remove party members, list campaigns/encounters), call the appropriate tool(s) even if the user did not say \"run a command\".\n" +
                     "If the message is only discussion/brainstorming with no persistent change requested, respond as GM: concise, actionable, and incorporate the draft statement.\n",
                 ModeGame =>
                     "You are the D&D game master assistant operating in GAME mode.\n" +
-                    "Treat every user message as in-game gameplay or roleplay.\n" +
+                    "Game mode is live play. Treat every user message as in-game gameplay or roleplay.\n" +
+                    "The user may mention any available DnD capability; your job is to call the appropriate `gptcli_dnd_*` functions to carry out mechanics/state changes when needed.\n" +
+                    "Do not call `gptcli_dnd_mode` unless the user explicitly asks to change modes.\n" +
+                    "Important: if the user asks to change modes while in GAME mode, instruct them to use the slash command `/gptcli dnd mode value:draft` (or `off`). Do NOT call `gptcli_dnd_mode` from natural language.\n" +
+                    "Party roster is provided in context under \"Party roster (actors)\".\n" +
+                    "If there is no active encounter and the user wants to start/begin/play, call `gptcli_dnd_encounterstart` using a template id from context.\n" +
+                    "If the user asks to change the auto-pass / player turn timeout / pass timeout, call `gptcli_dnd_passtimeout`.\n" +
                     "If the user intends a mechanical action (attack/cast/pass/rolls/encounter control), call the appropriate tool(s).\n" +
-                "If it is roleplay/table talk, respond as GM but do not invent mechanical outcomes.\n" +
-                "Keep responses concise and always drive toward the next playable decision.\n",
-            _ =>
-                "You are the D&D game master assistant.\n" +
-                "If the user is asking to perform a DnD slash command, call the appropriate tool(s).\n" +
-                "Otherwise respond briefly.\n"
-        };
+                    "If it is roleplay/table talk, respond as GM but do not invent mechanical outcomes.\n" +
+                    "Style: short, in-character, vivid. No meta/explanations.\n" +
+                    "Formatting: use Discord markdown for readability: **bold** for scene beats, *italics* for tone, `code` for mechanical snippets.\n" +
+                    "Use emojis sparingly (1-3) to signal beats/roles (e.g. 🎲 ⚔️ 🧙 🛡️ 🧠 🧭).\n" +
+                    "When presenting choices, use bullet points and keep them actionable.\n" +
+                    "Always end with a playable prompt (a question or 2-4 bullet options).\n",
+                _ =>
+                    "You are the D&D game master assistant.\n" +
+                    "If the user is asking to perform a DnD slash command, call the appropriate tool(s).\n" +
+                    "Otherwise respond briefly.\n"
+            };
 
         var request = new ChatCompletionCreateRequest
         {
             Model = ResolveModel(context, channelState),
             Temperature = string.Equals(mode, ModeDraft, StringComparison.OrdinalIgnoreCase) ? 0.3f : 0.2f,
-            MaxCompletionTokens = 700,
+            MaxCompletionTokens = string.Equals(mode, ModeGame, StringComparison.OrdinalIgnoreCase) ? 350 : 700,
             ParallelToolCalls = false,
             Messages = new List<ChatMessage>
             {
-                new(StaticValues.ChatMessageRoles.System, system),
-                new(StaticValues.ChatMessageRoles.User, userCtx.ToString().Trim())
+                new(StaticValues.ChatMessageRoles.System, system)
             },
             Tools = tools,
             ToolChoice = new ToolChoice { Type = "auto" }
         };
+
+        // Add recent conversation history so followups like "no I meant X" can be resolved in context.
+        // Only include user/assistant roles to keep the prompt small and avoid unrelated system noise.
+        try
+        {
+            var history = SnapshotRecentUserAssistantHistory(channelState, maxMessages: 14, maxChars: 6000);
+            if (history.Count > 0)
+            {
+                foreach (var h in history)
+                {
+                    request.Messages.Add(h);
+                }
+            }
+        }
+        catch
+        {
+            // ignore
+        }
+
+        request.Messages.Add(new ChatMessage(StaticValues.ChatMessageRoles.User, userCtx.ToString().Trim()));
 
         ChatCompletionCreateResponse response;
         try
@@ -876,6 +989,22 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                     $"[dnd] auto-route: llm request mode={mode} model={request.Model} tools={tools.Count} campaign={activeCampaign} channel={message.Channel?.Id} toolNames=[{string.Join(", ", toolNames)}]");
                 Console.WriteLine($"[dnd] auto-route: system={system}");
                 Console.WriteLine($"[dnd] auto-route: userCtx={userCtx.ToString().Trim()}");
+                try
+                {
+                    Console.WriteLine($"[dnd] auto-route: request messages={request.Messages?.Count ?? 0}");
+                    var i = 0;
+                    foreach (var m in request.Messages ?? Array.Empty<ChatMessage>())
+                    {
+                        var c = m?.Content ?? string.Empty;
+                        Console.WriteLine($"[dnd] auto-route: msg[{i}] role={m?.Role} len={c.Length}");
+                        Console.WriteLine($"[dnd] auto-route: msg[{i}] content={c}");
+                        i++;
+                    }
+                }
+                catch
+                {
+                    // ignore
+                }
             }
             catch
             {
@@ -1008,6 +1137,10 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             Console.WriteLine($"[dnd] auto-route: toolReplyLen={reply.Length} toolReply={reply}");
             try { await SendChunkedAsync(message.Channel, reply); }
             catch (Exception ex) { Console.WriteLine($"[dnd] send failed (tool reply): {ex.GetType().Name} {ex.Message}"); }
+            if (TryRecordAssistantReply(channelState, reply))
+            {
+                try { await context.Host.SaveCachedChannelStateAsync(message.Channel.Id); } catch { }
+            }
             return true;
         }
 
@@ -1021,6 +1154,10 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         Console.WriteLine($"[dnd] auto-route: chatReplyLen={chatReply.Length} chatReply={chatReply}");
         try { await SendChunkedAsync(message.Channel, chatReply); }
         catch (Exception ex) { Console.WriteLine($"[dnd] send failed (chat reply): {ex.GetType().Name} {ex.Message}"); }
+        if (TryRecordAssistantReply(channelState, chatReply))
+        {
+            try { await context.Host.SaveCachedChannelStateAsync(message.Channel.Id); } catch { }
+        }
         return true;
     }
 
@@ -1052,46 +1189,51 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         }
 
         // Draft/off: draft campaign + party management only.
-        if (string.Equals(mode, ModeDraft, StringComparison.OrdinalIgnoreCase))
-        {
-            return toolName.Equals("gptcli_dnd_campaigncreate", StringComparison.OrdinalIgnoreCase) ||
-                   toolName.Equals("gptcli_dnd_draftupdate", StringComparison.OrdinalIgnoreCase) ||
-                   toolName.Equals("gptcli_dnd_campaignfinalize", StringComparison.OrdinalIgnoreCase) ||
-                   toolName.Equals("gptcli_dnd_campaignlist", StringComparison.OrdinalIgnoreCase) ||
-                   toolName.Equals("gptcli_dnd_campaignstart", StringComparison.OrdinalIgnoreCase) ||
-                   toolName.Equals("gptcli_dnd_partyshow", StringComparison.OrdinalIgnoreCase) ||
-                   toolName.Equals("gptcli_dnd_partyaddpc", StringComparison.OrdinalIgnoreCase) ||
-                   toolName.Equals("gptcli_dnd_partyremovepc", StringComparison.OrdinalIgnoreCase) ||
-                   toolName.Equals("gptcli_dnd_partyaddnpc", StringComparison.OrdinalIgnoreCase) ||
-                   toolName.Equals("gptcli_dnd_charactercreate", StringComparison.OrdinalIgnoreCase) ||
-                   toolName.Equals("gptcli_dnd_charactershow", StringComparison.OrdinalIgnoreCase) ||
-                   toolName.Equals("gptcli_dnd_npccreate", StringComparison.OrdinalIgnoreCase) ||
-                   toolName.Equals("gptcli_dnd_npclist", StringComparison.OrdinalIgnoreCase) ||
-                   toolName.Equals("gptcli_dnd_npcshow", StringComparison.OrdinalIgnoreCase) ||
-                   toolName.Equals("gptcli_dnd_npcremove", StringComparison.OrdinalIgnoreCase) ||
-                   toolName.Equals("gptcli_dnd_encounterlist", StringComparison.OrdinalIgnoreCase);
-        }
+	        if (string.Equals(mode, ModeDraft, StringComparison.OrdinalIgnoreCase))
+	        {
+	            return toolName.Equals("gptcli_dnd_campaigncreate", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_draftupdate", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_campaignfinalize", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_campaignlist", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_campaignstart", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_partyshow", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_partyaddpc", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_partyremovepc", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_partyaddnpc", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_partyremovenpc", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_charactercreate", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_charactershow", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_npccreate", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_npclist", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_npcshow", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_npcremove", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_passtimeout", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_encounterlist", StringComparison.OrdinalIgnoreCase);
+	        }
 
         // Game: gameplay + party management; exclude campaign creation/catalog.
-        if (string.Equals(mode, ModeGame, StringComparison.OrdinalIgnoreCase))
-        {
-            return toolName.Equals("gptcli_dnd_charactercreate", StringComparison.OrdinalIgnoreCase) ||
-                   toolName.Equals("gptcli_dnd_charactershow", StringComparison.OrdinalIgnoreCase) ||
-                   toolName.Equals("gptcli_dnd_npccreate", StringComparison.OrdinalIgnoreCase) ||
-                   toolName.Equals("gptcli_dnd_npclist", StringComparison.OrdinalIgnoreCase) ||
-                   toolName.Equals("gptcli_dnd_npcshow", StringComparison.OrdinalIgnoreCase) ||
-                   toolName.Equals("gptcli_dnd_npcremove", StringComparison.OrdinalIgnoreCase) ||
-                   toolName.Equals("gptcli_dnd_liveconfig", StringComparison.OrdinalIgnoreCase) ||
-                   toolName.Equals("gptcli_dnd_encounterlist", StringComparison.OrdinalIgnoreCase) ||
-                   toolName.Equals("gptcli_dnd_encounterstart", StringComparison.OrdinalIgnoreCase) ||
-                   toolName.Equals("gptcli_dnd_encounterstatus", StringComparison.OrdinalIgnoreCase) ||
-                   toolName.Equals("gptcli_dnd_encounterend", StringComparison.OrdinalIgnoreCase) ||
-                   toolName.Equals("gptcli_dnd_attack", StringComparison.OrdinalIgnoreCase) ||
-                   toolName.Equals("gptcli_dnd_cast", StringComparison.OrdinalIgnoreCase) ||
-                   toolName.Equals("gptcli_dnd_pass", StringComparison.OrdinalIgnoreCase) ||
-                   toolName.Equals("gptcli_dnd_rollall", StringComparison.OrdinalIgnoreCase) ||
-                   toolName.Equals("gptcli_dnd_ledger", StringComparison.OrdinalIgnoreCase);
-        }
+	        if (string.Equals(mode, ModeGame, StringComparison.OrdinalIgnoreCase))
+	        {
+	            return toolName.Equals("gptcli_dnd_charactercreate", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_charactershow", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_npccreate", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_npclist", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_npcshow", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_npcremove", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_partyshow", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_partyremovenpc", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_liveconfig", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_passtimeout", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_encounterlist", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_encounterstart", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_encounterstatus", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_encounterend", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_attack", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_cast", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_pass", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_rollall", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_ledger", StringComparison.OrdinalIgnoreCase);
+	        }
 
         return false;
     }
@@ -1256,6 +1398,91 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                l.Contains("exclude", StringComparison.OrdinalIgnoreCase);
     }
 
+    private static bool LooksLikeModeChangeIntent(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        var t = text.Trim();
+        var lower = t.ToLowerInvariant();
+
+        // Strong signals.
+        if (lower.Contains("/gptcli", StringComparison.OrdinalIgnoreCase) &&
+            lower.Contains("dnd", StringComparison.OrdinalIgnoreCase) &&
+            lower.Contains("mode", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        // Phrases explicitly about switching modes.
+        var mentionsMode =
+            lower.Contains("mode", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("switch to", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("go into", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("enter", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("turn off", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("disable dnd", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("enable dnd", StringComparison.OrdinalIgnoreCase);
+
+        if (!mentionsMode)
+        {
+            return false;
+        }
+
+        // Must reference one of the known modes.
+        return lower.Contains("draft", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("game", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("live", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("prep", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("build", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("off", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool LooksLikeGameStartIntent(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        var t = text.Trim();
+        var lower = t.ToLowerInvariant();
+
+        // Keep this conservative: only fire for "start/begin/play/go" style messages.
+        if (lower.Contains("encounter", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("combat", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("battle", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("fight", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (lower.Contains("start", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("begin", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("let's go", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("lets go", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("let's play", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("lets play", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("ok go", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("ok start", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        // Single-token nudges.
+        if (string.Equals(lower, "go", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(lower, "start", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(lower, "begin", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(lower, "play", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
     private async Task<bool> TryHandleDeterministicDraftPartyEditsAsync(
         DiscordModuleContext context,
         InstructionGPT.ChannelState channelState,
@@ -1368,8 +1595,22 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 }
             }
 
-            // No explicit tool for removing NPC by id in drafts; direct editing is supported via npcremove (draft-aware)
-            // if the NPC is currently in the draft roster, but we keep deterministic behavior minimal here.
+            foreach (var npc in npcIds)
+            {
+                var argsJson = JsonSerializer.Serialize(new { id = npc });
+                try
+                {
+                    var res = await ExecuteNpcRemoveAsync(execCtx, argsJson, ct);
+                    if (res is { Handled: true } && !string.IsNullOrWhiteSpace(res.Response))
+                    {
+                        applied.Add(res.Response.Trim());
+                    }
+                }
+                catch (Exception ex)
+                {
+                    errors.Add($"npcremove {npc}: {ex.GetType().Name} {ex.Message}");
+                }
+            }
         }
 
         if (applied.Count == 0 && errors.Count == 0)
@@ -1385,9 +1626,86 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             replyLines.AddRange(errors.Take(8).Select(e => $"- {e}"));
         }
 
-        try { await SendChunkedAsync(message.Channel, TrimToLimit(string.Join("\n", replyLines), 3500)); }
+        var reply = TrimToLimit(string.Join("\n", replyLines), 3500);
+        try { await SendChunkedAsync(message.Channel, reply); }
         catch (Exception ex) { Console.WriteLine($"[dnd] send failed (draft party deterministic): {ex.GetType().Name} {ex.Message}"); }
+        if (TryRecordAssistantReply(channelState, reply))
+        {
+            try { await context.Host.SaveCachedChannelStateAsync(message.Channel.Id); } catch { }
+        }
         return true;
+    }
+
+    private async Task<bool> TryHandleDeterministicGameStartAsync(
+        DiscordModuleContext context,
+        InstructionGPT.ChannelState channelState,
+        SocketMessage message,
+        DndLiteChannelState dndState,
+        CancellationToken ct)
+    {
+        if (context == null || channelState == null || message == null || dndState == null)
+        {
+            return false;
+        }
+
+        if (!string.Equals(NormalizeMode(dndState.Mode), ModeGame, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var raw = (message.Content ?? string.Empty).Trim();
+        if (!LooksLikeGameStartIntent(raw))
+        {
+            return false;
+        }
+
+        var active = dndState.ActiveCampaignName ?? "default";
+
+        // If an encounter is already in progress (or waiting on rolls/actions), do not auto-start another.
+        var enc = await GetActiveEncounterSnapshotAsync(channelState, active, ct);
+        if (enc != null && enc.Phase != DndEncounterPhase.NotStarted && !enc.IsCompleted)
+        {
+            return false;
+        }
+
+        // Choose a deterministic first encounter template.
+        var campaign = await LoadCampaignAsync(channelState, active, ct);
+        var templateId = campaign?.EncounterTemplates?
+            .Where(t => t != null && !string.IsNullOrWhiteSpace(t.TemplateId))
+            .Select(t => t.TemplateId.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(s => s, StringComparer.OrdinalIgnoreCase)
+            .FirstOrDefault();
+
+        if (string.IsNullOrWhiteSpace(templateId))
+        {
+            return false;
+        }
+
+        Console.WriteLine($"[dnd] deterministic gamestart: starting encounter templateId={templateId} campaign={active} channel={message.Channel?.Id}");
+
+        var execCtx = new GptCliExecutionContext(context, channelState, message.Channel, message.Author, null, message);
+        var argsJson = JsonSerializer.Serialize(new { id = templateId });
+        try
+        {
+            var res = await ExecuteEncounterStartAsync(execCtx, argsJson, ct);
+            if (res is { Handled: true } && !string.IsNullOrWhiteSpace(res.Response))
+            {
+                var reply = $"<@{message.Author.Id}>\n{res.Response.Trim()}";
+                await SendChunkedAsync(message.Channel, reply);
+                if (TryRecordAssistantReply(channelState, reply))
+                {
+                    try { await context.Host.SaveCachedChannelStateAsync(message.Channel.Id); } catch { }
+                }
+                return true;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[dnd] deterministic gamestart failed: {ex.GetType().Name} {ex.Message}");
+        }
+
+        return false;
     }
 
     private async Task<bool> TryHandleDeterministicDraftUpdateAsync(
@@ -1430,7 +1748,12 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 	            var res = await ExecuteDraftUpdateAsync(execCtx, argsJson, ct);
 	            if (res is { Handled: true } && !string.IsNullOrWhiteSpace(res.Response))
 	            {
-	                await SendChunkedAsync(message.Channel, $"<@{message.Author.Id}>\n{res.Response.Trim()}");
+	                var reply = $"<@{message.Author.Id}>\n{res.Response.Trim()}";
+	                await SendChunkedAsync(message.Channel, reply);
+	                if (TryRecordAssistantReply(channelState, reply))
+	                {
+	                    try { await context.Host.SaveCachedChannelStateAsync(message.Channel.Id); } catch { }
+	                }
 	                return true;
 	            }
         }
@@ -1802,6 +2125,19 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         {
             var st = await GetOrLoadStateAsync(ctx.ChannelState, ct);
             var channelStateChanged = false;
+
+            // Safety: while in GAME mode, require slash command to switch back to DRAFT/OFF.
+            // This avoids in-character lines accidentally being interpreted as mode switches.
+            var currentMode = NormalizeMode(st.Mode);
+            if (string.Equals(currentMode, ModeGame, StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(mode, ModeGame, StringComparison.OrdinalIgnoreCase) &&
+                ctx.SlashCommand == null)
+            {
+                return new GptCliExecutionResult(
+                    true,
+                    "You're currently in `game` mode. To switch modes, use the slash command: `/gptcli dnd mode value:draft` (or `off`).",
+                    false);
+            }
 
             if (!string.IsNullOrWhiteSpace(campaignName))
             {
@@ -2313,17 +2649,24 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 
             var st = await GetOrLoadStateAsync(ctx.ChannelState, ct);
             var mode = NormalizeMode(st.Mode);
-            if (!string.Equals(mode, ModeDraft, StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(mode, ModeDraft, StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(mode, ModeGame, StringComparison.OrdinalIgnoreCase))
             {
-                return new GptCliExecutionResult(true, "This tool is for draft mode. Use `/gptcli dnd mode value:draft`.", false);
+                return new GptCliExecutionResult(true, "Not in draft/game mode. Use `/gptcli dnd mode value:draft` or `/gptcli dnd mode value:game`.", false);
             }
 
             var campaignName = st.ActiveCampaignName ?? "default";
-            var party = await LoadDraftPartyAsync(ctx.ChannelState, campaignName, ct) ?? new DndLitePartyDocument();
+            var party = string.Equals(mode, ModeDraft, StringComparison.OrdinalIgnoreCase)
+                ? (await LoadDraftPartyAsync(ctx.ChannelState, campaignName, ct) ?? new DndLitePartyDocument())
+                : (await LoadPartyAsync(ctx.ChannelState, campaignName, ct) ?? new DndLitePartyDocument());
             party.PlayerUserIds ??= new List<ulong>();
             party.NpcActorIds ??= new List<string>();
 
             var lines = new List<string> { $"Draft party for \"{campaignName}\":" };
+            if (string.Equals(mode, ModeGame, StringComparison.OrdinalIgnoreCase))
+            {
+                lines[0] = $"Party for \"{campaignName}\":";
+            }
 
             if (party.PlayerUserIds.Count > 0)
             {
@@ -2366,6 +2709,12 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         {
             lockHandle.Release();
         }
+    }
+
+    private async Task<GptCliExecutionResult> ExecutePartyRemoveNpcAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)
+    {
+        // Alias for `npcremove` so "party remove npc" is more discoverable (and reads better for natural language).
+        return await ExecuteNpcRemoveAsync(ctx, argsJson, ct);
     }
 
     private async Task<GptCliExecutionResult> ExecutePartyAddPcAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)
@@ -3500,12 +3849,12 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         }
     }
 
-    private async Task<GptCliExecutionResult> ExecuteLiveConfigAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)
-    {
-        var lockHandle = _channelLocks.GetOrAdd(ctx.Channel.Id, _ => new SemaphoreSlim(1, 1));
-        await lockHandle.WaitAsync(ct);
-        try
-        {
+	    private async Task<GptCliExecutionResult> ExecuteLiveConfigAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)
+	    {
+	        var lockHandle = _channelLocks.GetOrAdd(ctx.Channel.Id, _ => new SemaphoreSlim(1, 1));
+	        await lockHandle.WaitAsync(ct);
+	        try
+	        {
             var off = await RejectWhenOffAsync(ctx, ct);
             if (off != null)
             {
@@ -3519,10 +3868,10 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             {
                 st.Live.TickSeconds = Math.Clamp(tickSeconds, 1, 30);
             }
-            if (TryGetIntArg(argsJson, "player_turn_timeout_seconds", out var playerTimeout))
-            {
-                st.Live.PlayerTurnTimeoutSeconds = Math.Clamp(playerTimeout, 5, 300);
-            }
+	            if (TryGetIntArg(argsJson, "player_turn_timeout_seconds", out var playerTimeout))
+	            {
+	                st.Live.PlayerTurnTimeoutSeconds = Math.Clamp(playerTimeout, 5, 3600);
+	            }
             if (TryGetIntArg(argsJson, "encounter_timeout_seconds", out var encTimeout))
             {
                 st.Live.EncounterTimeoutSeconds = Math.Clamp(encTimeout, 30, 3600);
@@ -3547,13 +3896,67 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 EnsureTickLoopRunning(ctx.Channel.Id);
             }
 
-            return new GptCliExecutionResult(true, RenderLiveConfig(st.Live), true);
-        }
-        finally
-        {
-            lockHandle.Release();
-        }
-    }
+	            return new GptCliExecutionResult(true, RenderLiveConfig(st.Live), true);
+	        }
+	        finally
+	        {
+	            lockHandle.Release();
+	        }
+	    }
+
+	    private async Task<GptCliExecutionResult> ExecutePassTimeoutAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)
+	    {
+	        var lockHandle = _channelLocks.GetOrAdd(ctx.Channel.Id, _ => new SemaphoreSlim(1, 1));
+	        await lockHandle.WaitAsync(ct);
+	        try
+	        {
+	            var off = await RejectWhenOffAsync(ctx, ct);
+	            if (off != null)
+	            {
+	                return off;
+	            }
+
+	            var st = await GetOrLoadStateAsync(ctx.ChannelState, ct);
+	            var mode = NormalizeMode(st.Mode);
+	            if (!string.Equals(mode, ModeDraft, StringComparison.OrdinalIgnoreCase) &&
+	                !string.Equals(mode, ModeGame, StringComparison.OrdinalIgnoreCase))
+	            {
+	                return new GptCliExecutionResult(true, "Not in draft/game mode. Use `/gptcli dnd mode value:draft` or `/gptcli dnd mode value:game`.", false);
+	            }
+
+	            st.Live ??= new DndLiteLiveConfig();
+
+	            // Default to 30 minutes if no args provided.
+	            var seconds = 30 * 60;
+
+	            if (TryGetIntArg(argsJson, "minutes", out var minutes) && minutes > 0)
+	            {
+	                seconds = minutes * 60;
+	            }
+
+	            if (TryGetIntArg(argsJson, "seconds", out var rawSeconds) && rawSeconds > 0)
+	            {
+	                seconds = rawSeconds;
+	            }
+
+	            seconds = Math.Clamp(seconds, 5, 3600);
+	            st.Live.PlayerTurnTimeoutSeconds = seconds;
+
+	            await SaveStateAsync(ctx.ChannelState, st, ct);
+
+	            if (string.Equals(st.Mode, ModeGame, StringComparison.OrdinalIgnoreCase))
+	            {
+	                EnsureTickLoopRunning(ctx.Channel.Id);
+	            }
+
+	            var mins = seconds / 60.0;
+	            return new GptCliExecutionResult(true, $"Auto-pass timeout set to {seconds}s ({mins:0.#} minutes).", true);
+	        }
+	        finally
+	        {
+	            lockHandle.Release();
+	        }
+	    }
 
     private async Task<GptCliExecutionResult> ExecuteEncounterListAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)
     {
@@ -5781,8 +6184,9 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         var request = new ChatCompletionCreateRequest
         {
             Model = model,
-            Temperature = 0.2f,
-            MaxCompletionTokens = 2500,
+            // Keep this tight: large generations tend to hit token limits and produce invalid/empty JSON.
+            Temperature = 0.1f,
+            MaxCompletionTokens = 1200,
             Messages = new List<ChatMessage>
             {
                 new(StaticValues.ChatMessageRoles.System,
@@ -5902,7 +6306,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                     {
                         Model = model,
                         Temperature = 0,
-                        MaxCompletionTokens = 2500,
+                        MaxCompletionTokens = 1200,
                         Messages = new List<ChatMessage>
                         {
                             new(StaticValues.ChatMessageRoles.System,
@@ -6147,15 +6551,17 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
     {
         var sb = new StringBuilder();
         sb.AppendLine("Return a single JSON object with keys exactly: campaignMarkdown, encounters, functionCalls, unassignedPcs.");
-        sb.AppendLine("campaignMarkdown: markdown string describing the campaign premise, tone, and 3-6 bullet hooks.");
-        sb.AppendLine("encounters: array of 3-8 encounter templates.");
+        sb.AppendLine("campaignMarkdown: short markdown (max ~1200 chars) describing the campaign premise, tone, and 3-5 bullet hooks.");
+        sb.AppendLine("encounters: array of 3-5 encounter templates (keep scenes short).");
         sb.AppendLine("functionCalls: array of objects: {\"name\":\"...\",\"arguments\":{...}}.");
         sb.AppendLine("unassignedPcs: array of PCs mentioned in the prompt that cannot be mapped to the provided PC roster; each: {\"name\":\"...\",\"concept\":\"...\"}.");
+        sb.AppendLine("Hard limit: keep the entire JSON response under ~6000 characters.");
         sb.AppendLine();
         sb.AppendLine("You are generating a NEW version of the campaign. Treat any existing campaign content as disposable and overwrite it.");
         sb.AppendLine("This tool catalogs replayable campaigns (campaign.json is party-free).");
         sb.AppendLine("If the prompt names party members or important NPCs, include functionCalls to create NPC sheets so the host can populate the active run's party roster.");
         sb.AppendLine("If the prompt contains Discord user actorIds from the provided roster context, you may include dnd_create_pc_sheet calls for those users.");
+        sb.AppendLine("Keep functionCalls minimal (only for party/NPCs that matter).");
         sb.AppendLine();
         sb.AppendLine("Function definitions:");
         sb.AppendLine("1) dnd_create_npc_sheet(arguments)");
@@ -6887,7 +7293,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         }
         st.Live ??= new DndLiteLiveConfig();
         st.Live.TickSeconds = Math.Clamp(st.Live.TickSeconds, 1, 30);
-        st.Live.PlayerTurnTimeoutSeconds = Math.Clamp(st.Live.PlayerTurnTimeoutSeconds, 5, 300);
+        st.Live.PlayerTurnTimeoutSeconds = Math.Clamp(st.Live.PlayerTurnTimeoutSeconds, 5, 3600);
         st.Live.EncounterTimeoutSeconds = Math.Clamp(st.Live.EncounterTimeoutSeconds, 30, 3600);
         st.Live.AutoRollPolicy = NormalizeAutoRollPolicy(st.Live.AutoRollPolicy);
         st.Live.MaxAutoStepsPerTick = Math.Clamp(st.Live.MaxAutoStepsPerTick, 1, 64);
@@ -7084,6 +7490,217 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         return value[..maxChars];
     }
 
+    private async Task AppendPartyRosterContextAsync(
+        StringBuilder userCtx,
+        InstructionGPT.ChannelState channelState,
+        string mode,
+        string campaignName,
+        CancellationToken ct)
+    {
+        if (userCtx == null || channelState == null)
+        {
+            return;
+        }
+
+        mode = NormalizeMode(mode);
+        campaignName = string.IsNullOrWhiteSpace(campaignName) ? "default" : campaignName.Trim();
+
+        DndLitePartyDocument party = null;
+        if (string.Equals(mode, ModeDraft, StringComparison.OrdinalIgnoreCase))
+        {
+            party = await LoadDraftPartyAsync(channelState, campaignName, ct);
+        }
+        else if (string.Equals(mode, ModeGame, StringComparison.OrdinalIgnoreCase))
+        {
+            party = await LoadPartyAsync(channelState, campaignName, ct);
+
+            // Fallback: if party.json is missing/empty, try the runner state party list.
+            if (party == null || ((party.PlayerUserIds?.Count ?? 0) == 0 && (party.NpcActorIds?.Count ?? 0) == 0))
+            {
+                try
+                {
+                    var campaign = await LoadCampaignAsync(channelState, campaignName, ct);
+                    var actorIds = campaign?.RunnerState?.Party?
+                        .Where(m => m != null && !string.IsNullOrWhiteSpace(m.ActorId))
+                        .Select(m => m.ActorId.Trim())
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToList() ?? new List<string>();
+
+                    party ??= new DndLitePartyDocument();
+                    party.PlayerUserIds ??= new List<ulong>();
+                    party.NpcActorIds ??= new List<string>();
+
+                    foreach (var actorId in actorIds)
+                    {
+                        if (IsNpcActorId(actorId))
+                        {
+                            if (!party.NpcActorIds.Any(x => string.Equals(x, actorId, StringComparison.OrdinalIgnoreCase)))
+                            {
+                                party.NpcActorIds.Add(actorId);
+                            }
+                        }
+                        else if (TryParsePcActorId(actorId, out var userId) && userId != 0)
+                        {
+                            if (!party.PlayerUserIds.Contains(userId))
+                            {
+                                party.PlayerUserIds.Add(userId);
+                            }
+                        }
+                    }
+                }
+                catch
+                {
+                    // ignore
+                }
+            }
+        }
+
+        if (party == null)
+        {
+            return;
+        }
+
+        party.PlayerUserIds ??= new List<ulong>();
+        party.NpcActorIds ??= new List<string>();
+
+        if (party.PlayerUserIds.Count == 0 && party.NpcActorIds.Count == 0)
+        {
+            return;
+        }
+
+        userCtx.AppendLine("Party roster (actors):");
+
+        foreach (var uid in party.PlayerUserIds.Distinct().OrderBy(x => x).Take(12))
+        {
+            var pc = await LoadPcProfileAsync(channelState, uid, ct);
+            var name = pc?.Name;
+            userCtx.AppendLine($"- {ToActorId(uid)} | <@{uid}> | {(string.IsNullOrWhiteSpace(name) ? "(no sheet)" : name.Trim())}");
+        }
+
+        foreach (var id in party.NpcActorIds
+                     .Where(s => !string.IsNullOrWhiteSpace(s))
+                     .Distinct(StringComparer.OrdinalIgnoreCase)
+                     .OrderBy(s => s, StringComparer.OrdinalIgnoreCase)
+                     .Take(16))
+        {
+            var npc = await LoadNpcProfileAsync(channelState, id.Trim(), ct);
+            var name = npc?.Name;
+            userCtx.AppendLine($"- {id.Trim()} | {(string.IsNullOrWhiteSpace(name) ? "(no sheet)" : name.Trim())}");
+        }
+    }
+
+    private static bool TryRecordUserMessageWhenCoreDisabled(
+        InstructionGPT.ChannelState channelState,
+        SocketMessage message,
+        string content)
+    {
+        try
+        {
+            if (channelState?.Options?.Enabled == true)
+            {
+                // Core bot already records user messages for context even when not responding.
+                return false;
+            }
+
+            if (channelState?.InstructionChat == null || message?.Author == null)
+            {
+                return false;
+            }
+
+            var mentionToken = $"<@{message.Author.Id}>";
+            var text = $"{message.Author.Username} (mention: {mentionToken}): {content}";
+            channelState.InstructionChat.AddMessage(new ChatMessage(StaticValues.ChatMessageRoles.User, text));
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool TryRecordAssistantReply(InstructionGPT.ChannelState channelState, string reply)
+    {
+        try
+        {
+            if (channelState?.InstructionChat == null || string.IsNullOrWhiteSpace(reply))
+            {
+                return false;
+            }
+
+            // Avoid polluting history with raw mention prefixes.
+            var cleaned = Regex.Replace(reply.Trim(), @"^\s*<@!?\d+>\s*", string.Empty);
+            if (string.IsNullOrWhiteSpace(cleaned))
+            {
+                return false;
+            }
+
+            channelState.InstructionChat.AddMessage(new ChatMessage(StaticValues.ChatMessageRoles.Assistant, cleaned));
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static List<ChatMessage> SnapshotRecentUserAssistantHistory(
+        InstructionGPT.ChannelState channelState,
+        int maxMessages,
+        int maxChars)
+    {
+        var result = new List<ChatMessage>();
+        if (channelState?.InstructionChat?.ChatBotState?.Messages == null ||
+            maxMessages <= 0 ||
+            maxChars <= 0)
+        {
+            return result;
+        }
+
+        var total = 0;
+        var node = channelState.InstructionChat.ChatBotState.Messages.Last;
+        while (node != null && result.Count < maxMessages)
+        {
+            var msg = node.Value;
+            node = node.Previous;
+
+            if (msg == null || string.IsNullOrWhiteSpace(msg.Content) || string.IsNullOrWhiteSpace(msg.Role))
+            {
+                continue;
+            }
+
+            // Keep only user/assistant turns for follow-up corrections.
+            if (!string.Equals(msg.Role, StaticValues.ChatMessageRoles.User, StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(msg.Role, StaticValues.ChatMessageRoles.Assistant, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var content = msg.Content.Trim();
+            if (content.Length == 0)
+            {
+                continue;
+            }
+
+            if (total >= maxChars)
+            {
+                break;
+            }
+
+            // We want most recent messages; if we're near the limit, trim the oldest we include.
+            var remaining = Math.Max(1, maxChars - total);
+            if (content.Length > remaining)
+            {
+                content = content[^remaining..];
+            }
+
+            result.Add(new ChatMessage(msg.Role, content));
+            total += content.Length;
+        }
+
+        result.Reverse();
+        return result;
+    }
+
     private static string ExtractJsonObject(string content)
     {
         if (string.IsNullOrWhiteSpace(content))
@@ -7162,7 +7779,8 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
     private sealed class DndLiteLiveConfig
     {
         public int TickSeconds { get; set; } = 5;
-        public int PlayerTurnTimeoutSeconds { get; set; } = 30;
+        // Default: 30 minutes. (Older versions were 30s and felt unusably short.)
+        public int PlayerTurnTimeoutSeconds { get; set; } = 1800;
         public int EncounterTimeoutSeconds { get; set; } = 600;
         public bool NpcAutoplayEnabled { get; set; } = true;
 

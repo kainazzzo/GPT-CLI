@@ -1535,12 +1535,14 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 	            return true;
 	        }
 
+	        mode = NormalizeDndMode(mode);
+
+	        // In GAME mode, require a slash command for mode changes to avoid accidental in-character triggers.
+	        // (Slash calls don't go through the mention-tool router.)
 	        if (string.Equals(toolName, "gptcli_dnd_mode", StringComparison.OrdinalIgnoreCase))
 	        {
-	            return true;
+	            return mode != "game";
 	        }
-
-	        mode = NormalizeDndMode(mode);
 
 	        // Off: only allow turning it back on.
 	        if (mode == "off")
@@ -1549,19 +1551,21 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 	        }
 
 	        // Draft: draft campaign + party management only.
-	        if (mode == "draft")
-	        {
-	            return toolName.Equals("gptcli_dnd_campaigncreate", StringComparison.OrdinalIgnoreCase) ||
-	                   toolName.Equals("gptcli_dnd_draftupdate", StringComparison.OrdinalIgnoreCase) ||
-	                   toolName.Equals("gptcli_dnd_partyshow", StringComparison.OrdinalIgnoreCase) ||
-	                   toolName.Equals("gptcli_dnd_partyaddpc", StringComparison.OrdinalIgnoreCase) ||
-	                   toolName.Equals("gptcli_dnd_partyremovepc", StringComparison.OrdinalIgnoreCase) ||
-	                   toolName.Equals("gptcli_dnd_partyaddnpc", StringComparison.OrdinalIgnoreCase) ||
-	                   toolName.Equals("gptcli_dnd_campaignfinalize", StringComparison.OrdinalIgnoreCase) ||
-	                   toolName.Equals("gptcli_dnd_campaignlist", StringComparison.OrdinalIgnoreCase) ||
-	                   toolName.Equals("gptcli_dnd_campaignstart", StringComparison.OrdinalIgnoreCase) ||
-	                   toolName.Equals("gptcli_dnd_charactercreate", StringComparison.OrdinalIgnoreCase) ||
-	                   toolName.Equals("gptcli_dnd_charactershow", StringComparison.OrdinalIgnoreCase) ||
+		        if (mode == "draft")
+		        {
+		            return toolName.Equals("gptcli_dnd_campaigncreate", StringComparison.OrdinalIgnoreCase) ||
+		                   toolName.Equals("gptcli_dnd_draftupdate", StringComparison.OrdinalIgnoreCase) ||
+		                   toolName.Equals("gptcli_dnd_partyshow", StringComparison.OrdinalIgnoreCase) ||
+		                   toolName.Equals("gptcli_dnd_partyaddpc", StringComparison.OrdinalIgnoreCase) ||
+		                   toolName.Equals("gptcli_dnd_partyremovepc", StringComparison.OrdinalIgnoreCase) ||
+		                   toolName.Equals("gptcli_dnd_partyaddnpc", StringComparison.OrdinalIgnoreCase) ||
+		                   toolName.Equals("gptcli_dnd_partyremovenpc", StringComparison.OrdinalIgnoreCase) ||
+		                   toolName.Equals("gptcli_dnd_passtimeout", StringComparison.OrdinalIgnoreCase) ||
+		                   toolName.Equals("gptcli_dnd_campaignfinalize", StringComparison.OrdinalIgnoreCase) ||
+		                   toolName.Equals("gptcli_dnd_campaignlist", StringComparison.OrdinalIgnoreCase) ||
+		                   toolName.Equals("gptcli_dnd_campaignstart", StringComparison.OrdinalIgnoreCase) ||
+		                   toolName.Equals("gptcli_dnd_charactercreate", StringComparison.OrdinalIgnoreCase) ||
+		                   toolName.Equals("gptcli_dnd_charactershow", StringComparison.OrdinalIgnoreCase) ||
 	                   toolName.Equals("gptcli_dnd_npccreate", StringComparison.OrdinalIgnoreCase) ||
 	                   toolName.Equals("gptcli_dnd_npclist", StringComparison.OrdinalIgnoreCase) ||
 	                   toolName.Equals("gptcli_dnd_npcshow", StringComparison.OrdinalIgnoreCase) ||
@@ -1571,19 +1575,22 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 	        }
 
 	        // Game: gameplay + party management; exclude campaign creation/catalog.
-	        if (mode == "game")
-	        {
-	            return toolName.Equals("gptcli_dnd_charactercreate", StringComparison.OrdinalIgnoreCase) ||
-	                   toolName.Equals("gptcli_dnd_charactershow", StringComparison.OrdinalIgnoreCase) ||
-	                   toolName.Equals("gptcli_dnd_npccreate", StringComparison.OrdinalIgnoreCase) ||
-	                   toolName.Equals("gptcli_dnd_npclist", StringComparison.OrdinalIgnoreCase) ||
-	                   toolName.Equals("gptcli_dnd_npcshow", StringComparison.OrdinalIgnoreCase) ||
-	                   toolName.Equals("gptcli_dnd_npcremove", StringComparison.OrdinalIgnoreCase) ||
-	                   toolName.Equals("gptcli_dnd_liveconfig", StringComparison.OrdinalIgnoreCase) ||
-	                   toolName.Equals("gptcli_dnd_status", StringComparison.OrdinalIgnoreCase) ||
-	                   toolName.Equals("gptcli_dnd_encounterlist", StringComparison.OrdinalIgnoreCase) ||
-	                   toolName.Equals("gptcli_dnd_encounterstart", StringComparison.OrdinalIgnoreCase) ||
-	                   toolName.Equals("gptcli_dnd_encounterstatus", StringComparison.OrdinalIgnoreCase) ||
+		        if (mode == "game")
+		        {
+		            return toolName.Equals("gptcli_dnd_charactercreate", StringComparison.OrdinalIgnoreCase) ||
+		                   toolName.Equals("gptcli_dnd_charactershow", StringComparison.OrdinalIgnoreCase) ||
+		                   toolName.Equals("gptcli_dnd_npccreate", StringComparison.OrdinalIgnoreCase) ||
+		                   toolName.Equals("gptcli_dnd_npclist", StringComparison.OrdinalIgnoreCase) ||
+		                   toolName.Equals("gptcli_dnd_npcshow", StringComparison.OrdinalIgnoreCase) ||
+		                   toolName.Equals("gptcli_dnd_npcremove", StringComparison.OrdinalIgnoreCase) ||
+		                   toolName.Equals("gptcli_dnd_partyshow", StringComparison.OrdinalIgnoreCase) ||
+		                   toolName.Equals("gptcli_dnd_partyremovenpc", StringComparison.OrdinalIgnoreCase) ||
+		                   toolName.Equals("gptcli_dnd_liveconfig", StringComparison.OrdinalIgnoreCase) ||
+		                   toolName.Equals("gptcli_dnd_passtimeout", StringComparison.OrdinalIgnoreCase) ||
+		                   toolName.Equals("gptcli_dnd_status", StringComparison.OrdinalIgnoreCase) ||
+		                   toolName.Equals("gptcli_dnd_encounterlist", StringComparison.OrdinalIgnoreCase) ||
+		                   toolName.Equals("gptcli_dnd_encounterstart", StringComparison.OrdinalIgnoreCase) ||
+		                   toolName.Equals("gptcli_dnd_encounterstatus", StringComparison.OrdinalIgnoreCase) ||
 	                   toolName.Equals("gptcli_dnd_encounterend", StringComparison.OrdinalIgnoreCase) ||
 	                   toolName.Equals("gptcli_dnd_attack", StringComparison.OrdinalIgnoreCase) ||
 	                   toolName.Equals("gptcli_dnd_cast", StringComparison.OrdinalIgnoreCase) ||

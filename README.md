@@ -2,6 +2,10 @@
 
 Welcome to GPT-CLI, a command line interface for harnessing the power of OpenAI's GPT, the world's most advanced language model. This project aims to make the incredible capabilities of GPT more accessible and easily integrated into your workflow, right from the command line.
 
+## Changelog
+
+See `CHANGELOG.md`.
+
 ## Prerequisites
 
 You will need an OpenAI API key. [Sign up](https://platform.openai.com) if you haven't already and create an API key.
@@ -107,7 +111,19 @@ Example modules in this repo:
   - Source: `modules/examples/DndModuleExample`
   - Build: `modules/examples/DndModuleExample/build-module.sh`
   - Output DLL is copied to `modules/` so it loads on next bot restart.
-  - Key idea: enable the module in your channel, switch to `/gptcli dnd mode value:draft`, and describe your campaign in plain English; iterate on story/party in draft; switch to `/gptcli dnd mode value:game` to finalize and play.
+  - Key idea: enable the module in your channel, then use natural language in `draft` to build a campaign + party, and `game` to play it.
+  - Modes:
+    - `/gptcli dnd mode value:off` (module enabled, but does not process messages)
+    - `/gptcli dnd mode value:draft` (worldbuilding + party setup; no catalog save)
+    - `/gptcli dnd mode value:game` (finalize the current draft into the catalog and play encounters)
+    - Note: while in `game` mode, switching back to `draft/off` is slash-only (to avoid accidental in-character triggers).
+  - Draft workflow:
+    - Just talk in-channel (untagged) to create/update the draft: "new campaign called ...", "rewrite the hook so ...", "add an NPC companion ..."
+    - Party management: "remove npc:..." or "remove Kain from the party" (the bot is given party context so it can map names to `npc:...` ids)
+    - Inspect party: `/gptcli dnd partyshow`
+  - Game workflow:
+    - Start: "start the game" (auto-starts the first encounter template) or `/gptcli dnd encounterstart id:<template>`
+    - Adjust auto-pass timeout (default 30 minutes): `/gptcli dnd passtimeout minutes:30` (also works via natural language: "set pass timeout to 45 minutes")
 
 Minimal module skeleton:
 
