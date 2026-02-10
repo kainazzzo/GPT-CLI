@@ -3,7 +3,7 @@ _gptcli_deploy_complete() {
   local cur opts
   COMPREPLY=()
   cur="${COMP_WORDS[COMP_CWORD]}"
-  opts="build modules up watch restart logs stop completion"
+  opts="build modules watch-modules watch-modules-daemon watch-modules-fg watch-modules-stop watch-modules-status up watch restart logs stop completion"
   if [[ ${COMP_CWORD} -eq 1 ]]; then
     COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
   fi

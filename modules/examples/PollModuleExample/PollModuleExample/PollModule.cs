@@ -11,7 +11,7 @@ namespace PollModuleExample;
 
 public sealed class PollModule : FeatureModuleBase
 {
-    public override string Id => "polls";
+    public override string Id => "poll";
     public override string Name => "Polls & Voting";
 
     private static readonly string PollSystemPrompt =
@@ -29,6 +29,17 @@ public sealed class PollModule : FeatureModuleBase
     public override async Task<bool> OnInteractionAsync(DiscordModuleContext context, SocketInteraction interaction, CancellationToken cancellationToken)
     {
         if (interaction is not SocketSlashCommand { CommandName: "gptcli" } command)
+        {
+            return false;
+        }
+
+        var channelState = context.Host.GetOrCreateChannelState(command.Channel);
+        if (command.Channel is IGuildChannel guildChannel)
+        {
+            context.Host.EnsureChannelStateMetadata(channelState, guildChannel);
+        }
+
+        if (!InstructionGPT.IsModuleEnabled(channelState, Id))
         {
             return false;
         }
@@ -75,6 +86,11 @@ public sealed class PollModule : FeatureModuleBase
         }
 
         if (!context.Host.IsChannelGuildMatch(channelState, message.Channel, "poll-message"))
+        {
+            return;
+        }
+
+        if (!InstructionGPT.IsModuleEnabled(channelState, Id))
         {
             return;
         }

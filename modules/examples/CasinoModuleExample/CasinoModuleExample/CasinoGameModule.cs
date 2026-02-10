@@ -47,6 +47,17 @@ public sealed class CasinoGameModule : FeatureModuleBase
             return false;
         }
 
+        var channelState = context.Host.GetOrCreateChannelState(command.Channel);
+        if (command.Channel is IGuildChannel guildChannel)
+        {
+            context.Host.EnsureChannelStateMetadata(channelState, guildChannel);
+        }
+
+        if (!InstructionGPT.IsModuleEnabled(channelState, Id))
+        {
+            return false;
+        }
+
         if (command.Data.Options == null || command.Data.Options.Count == 0)
         {
             return false;
@@ -87,6 +98,16 @@ public sealed class CasinoGameModule : FeatureModuleBase
         }
 
         var channel = context.Host.GetOrCreateChannelState(message.Channel);
+        if (message.Channel is IGuildChannel guildChannel)
+        {
+            context.Host.EnsureChannelStateMetadata(channel, guildChannel);
+        }
+
+        if (!InstructionGPT.IsModuleEnabled(channel, Id))
+        {
+            return;
+        }
+
         if (!channel.Options.CasinoEnabled)
         {
             return;

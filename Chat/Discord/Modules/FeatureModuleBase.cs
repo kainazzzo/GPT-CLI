@@ -1,6 +1,7 @@
 using Discord;
 using Discord.WebSocket;
 using GPT.CLI.Chat.Discord.Commands;
+using OpenAI.ObjectModels;
 using OpenAI.ObjectModels.RequestModels;
 
 namespace GPT.CLI.Chat.Discord.Modules;
@@ -10,6 +11,14 @@ public abstract class FeatureModuleBase : IFeatureModule
     public abstract string Id { get; }
     public virtual string Name => Id;
     public virtual IReadOnlyCollection<string> DependsOn => Array.Empty<string>();
+
+    protected ChatMessage BuildModulePreambleMessage(string body)
+    {
+        body ??= string.Empty;
+        var header = $"Module: {Name} (id={Id})";
+        var content = string.IsNullOrWhiteSpace(body) ? header : $"{header}\n{body.Trim()}";
+        return new ChatMessage(StaticValues.ChatMessageRoles.System, content.Trim());
+    }
 
     public virtual Task InitializeAsync(DiscordModuleContext context, CancellationToken cancellationToken) => Task.CompletedTask;
     public virtual Task OnReadyAsync(DiscordModuleContext context, CancellationToken cancellationToken) => Task.CompletedTask;

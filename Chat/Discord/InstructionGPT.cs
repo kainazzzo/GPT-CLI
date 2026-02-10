@@ -24,11 +24,11 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 {
     private readonly IServiceProvider _services;
     private readonly ConcurrentDictionary<ulong, HashSet<string>> _imageResponseMap = new();
-    private DiscordModulePipeline _modulePipeline;
-    private DiscordModuleContext _moduleContext;
-    private CancellationToken _shutdownToken;
+	private DiscordModulePipeline _modulePipeline;
+	private DiscordModuleContext _moduleContext;
+	private CancellationToken _shutdownToken;
 
-    public InstructionGPT(
+	public InstructionGPT(
         DiscordSocketClient client,
         IConfiguration configuration,
         OpenAILogic openAILogic,
@@ -980,6 +980,10 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
             channelState.InstructionChat ??= new(OpenAILogic, DefaultParameters);
             channelState.InstructionChat.ChatBotState ??= new() { PrimeDirectives = PrimeDirective.ToList() };
             channelState.InstructionChat.OpenAILogic = OpenAILogic;
+            channelState.InstructionChat.ChatBotState.Parameters ??= DefaultParameters.Adapt<GptOptions>();
+            // Secrets are global app settings; never keep them in per-channel state.
+            channelState.InstructionChat.ChatBotState.Parameters.ApiKey = null;
+            channelState.InstructionChat.ChatBotState.Parameters.BotToken = null;
             channelState.Options ??= new ChannelOptions();
             channelState.Options.LearningPersonalityPrompt ??= DefaultParameters.LearningPersonalityPrompt;
 
@@ -1252,17 +1256,18 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
             imageContextMessages.AddRange(BuildImageContextMessages(selectedImageDocs));
         }
 
-        if (ShouldAttachSelectedImages(message, explicitImageDocs, replyImageDocs))
-        {
-            imageAttachments.AddRange(BuildImageAttachments(selectedImageDocs));
-        }
+	        if (ShouldAttachSelectedImages(message, explicitImageDocs, replyImageDocs))
+	        {
+	            imageAttachments.AddRange(BuildImageAttachments(selectedImageDocs));
+	        }
 
-        var additionalMessages = new List<ChatMessage>();
-        if (_modulePipeline != null)
-        {
-            var moduleMessages = await _modulePipeline.GetAdditionalMessageContextAsync(message, channel, _shutdownToken);
-            if (moduleMessages.Count > 0)
-            {
+	        var additionalMessages = new List<ChatMessage>();
+	        additionalMessages.Add(new ChatMessage(StaticValues.ChatMessageRoles.System, BuildModuleArchitectureSystemMessage(channel)));
+	        if (_modulePipeline != null)
+	        {
+	            var moduleMessages = await _modulePipeline.GetAdditionalMessageContextAsync(message, channel, _shutdownToken);
+	            if (moduleMessages.Count > 0)
+	            {
                 additionalMessages.AddRange(moduleMessages);
             }
         }
@@ -1358,29 +1363,29 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 
 	    private static string NormalizeModuleId(string moduleId)
 	    {
-	        return (moduleId ?? string.Empty).Trim().ToLowerInvariant();
+	        var key = (moduleId ?? string.Empty).Trim().ToLowerInvariant();
+	        // Back-compat aliases.
+	        return key switch
+	        {
+	            "polls" => "poll",
+	            _ => key
+	        };
 	    }
 
 	    public static bool IsModuleEnabled(ChannelState channelState, string moduleId)
 	    {
 	        if (channelState?.Options == null)
 	        {
-	            return true;
+	            return false;
 	        }
 
 	        var key = NormalizeModuleId(moduleId);
 	        if (string.IsNullOrWhiteSpace(key))
 	        {
-	            return true;
+	            return false;
 	        }
 
 	        channelState.Options.ModulesEnabled ??= new Dictionary<string, bool>();
-
-	        // Modules listed here are "loaded but off" until explicitly enabled.
-	        var defaultDisabled = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-	        {
-	            "dnd"
-	        };
 
 	        // Back-compat: casino was historically stored as a dedicated flag.
 	        if (string.Equals(key, "casino", StringComparison.OrdinalIgnoreCase) &&
@@ -1391,18 +1396,19 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 
 	        if (!channelState.Options.ModulesEnabled.TryGetValue(key, out var enabled))
 	        {
-	            return !defaultDisabled.Contains(key);
+	            // Default: disabled until explicitly enabled.
+	            return false;
 	        }
 
 	        return enabled;
 	    }
 
-	    public static void SetModuleEnabled(ChannelState channelState, string moduleId, bool enabled)
-	    {
-	        if (channelState?.Options == null)
-	        {
-	            return;
-	        }
+		    public static void SetModuleEnabled(ChannelState channelState, string moduleId, bool enabled)
+		    {
+		        if (channelState?.Options == null)
+		        {
+		            return;
+		        }
 
 	        var key = NormalizeModuleId(moduleId);
 	        if (string.IsNullOrWhiteSpace(key))
@@ -1410,14 +1416,21 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 	            return;
 	        }
 
-	        channelState.Options.ModulesEnabled ??= new Dictionary<string, bool>();
-	        channelState.Options.ModulesEnabled[key] = enabled;
+		        channelState.Options.ModulesEnabled ??= new Dictionary<string, bool>();
+		        channelState.Options.ModulesEnabled[key] = enabled;
 
-	        if (string.Equals(key, "casino", StringComparison.OrdinalIgnoreCase))
-	        {
-	            channelState.Options.CasinoEnabled = enabled;
-	        }
-	    }
+		        // Some legacy/example modules store their enabled flags outside of ModulesEnabled.
+		        // Keep them in sync so "/gptcli modules enable|disable" is the single source of truth.
+		        if (string.Equals(key, "infobot", StringComparison.OrdinalIgnoreCase))
+		        {
+		            channelState.Options.LearningEnabled = enabled;
+		        }
+
+		        if (string.Equals(key, "casino", StringComparison.OrdinalIgnoreCase))
+		        {
+		            channelState.Options.CasinoEnabled = enabled;
+		        }
+		    }
 
 	    private static bool IsFunctionAvailable(ChannelState channelState, GptCliFunction fn)
 	    {
@@ -1437,6 +1450,149 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 	        }
 
 	        return IsModuleEnabled(channelState, fn.ModuleId);
+	    }
+
+	    private static string TryReadDndMode(ChannelState channelState)
+	    {
+	        try
+	        {
+	            if (channelState == null)
+	            {
+	                return null;
+	            }
+
+	            var dir = GetChannelDirectory(channelState);
+	            if (string.IsNullOrWhiteSpace(dir))
+	            {
+	                return null;
+	            }
+
+	            var path = Path.Combine(dir, "dnd-lite", "state.json");
+	            if (!File.Exists(path))
+	            {
+	                return null;
+	            }
+
+	            var json = File.ReadAllText(path);
+	            if (string.IsNullOrWhiteSpace(json))
+	            {
+	                return null;
+	            }
+
+	            using var doc = JsonDocument.Parse(json);
+	            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+	            {
+	                return null;
+	            }
+
+	            foreach (var prop in doc.RootElement.EnumerateObject())
+	            {
+	                if (!string.Equals(prop.Name, "Mode", StringComparison.OrdinalIgnoreCase))
+	                {
+	                    continue;
+	                }
+
+	                if (prop.Value.ValueKind == JsonValueKind.String)
+	                {
+	                    return prop.Value.GetString();
+	                }
+	            }
+
+	            return null;
+	        }
+	        catch
+	        {
+	            return null;
+	        }
+	    }
+
+	    private static string NormalizeDndMode(string mode)
+	    {
+	        if (string.Equals(mode, "game", StringComparison.OrdinalIgnoreCase) ||
+	            string.Equals(mode, "live", StringComparison.OrdinalIgnoreCase))
+	        {
+	            return "game";
+	        }
+	        if (string.Equals(mode, "draft", StringComparison.OrdinalIgnoreCase) ||
+	            string.Equals(mode, "build", StringComparison.OrdinalIgnoreCase) ||
+	            string.Equals(mode, "prep", StringComparison.OrdinalIgnoreCase))
+	        {
+	            return "draft";
+	        }
+	        return "off";
+	    }
+
+	    private static bool IsDndToolAllowedForMode(string toolName, string mode)
+	    {
+	        if (string.IsNullOrWhiteSpace(toolName))
+	        {
+	            return false;
+	        }
+
+	        // Module toggle must be callable in any mode (including off/disabled).
+	        if (string.Equals(toolName, "gptcli_set_dnd", StringComparison.OrdinalIgnoreCase))
+	        {
+	            return true;
+	        }
+
+	        if (string.Equals(toolName, "gptcli_dnd_mode", StringComparison.OrdinalIgnoreCase))
+	        {
+	            return true;
+	        }
+
+	        mode = NormalizeDndMode(mode);
+
+	        // Off: only allow turning it back on.
+	        if (mode == "off")
+	        {
+	            return false;
+	        }
+
+	        // Draft: draft campaign + party management only.
+	        if (mode == "draft")
+	        {
+	            return toolName.Equals("gptcli_dnd_campaigncreate", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_draftupdate", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_partyshow", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_partyaddpc", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_partyremovepc", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_partyaddnpc", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_campaignfinalize", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_campaignlist", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_campaignstart", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_charactercreate", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_charactershow", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_npccreate", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_npclist", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_npcshow", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_npcremove", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_status", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_encounterlist", StringComparison.OrdinalIgnoreCase);
+	        }
+
+	        // Game: gameplay + party management; exclude campaign creation/catalog.
+	        if (mode == "game")
+	        {
+	            return toolName.Equals("gptcli_dnd_charactercreate", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_charactershow", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_npccreate", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_npclist", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_npcshow", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_npcremove", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_liveconfig", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_status", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_encounterlist", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_encounterstart", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_encounterstatus", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_encounterend", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_attack", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_cast", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_pass", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_rollall", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_ledger", StringComparison.OrdinalIgnoreCase);
+	        }
+
+	        return false;
 	    }
 
 
@@ -1464,10 +1620,28 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 	            return false;
 	        }
 
-	        // Hide disabled module tools from the model (except module enable/disable functions).
-	        var availableFunctions = allFunctions
-	            .Where(f => IsFunctionAvailable(channelState, f))
-	            .ToList();
+		        // Hide disabled module tools from the model (except module enable/disable functions).
+		        // Also: mode-gate the DnD toolset so the router doesn't see irrelevant commands.
+		        var dndMode = TryReadDndMode(channelState);
+		        var normalizedDndMode = NormalizeDndMode(dndMode);
+
+		        var availableFunctions = allFunctions
+		            .Where(f => IsFunctionAvailable(channelState, f))
+		            .Where(f =>
+		            {
+		                if (f == null || string.IsNullOrWhiteSpace(f.ToolName))
+		                {
+		                    return false;
+		                }
+
+		                if (!string.Equals(NormalizeModuleId(f.ModuleId), "dnd", StringComparison.OrdinalIgnoreCase))
+		                {
+		                    return true;
+		                }
+
+		                return IsDndToolAllowedForMode(f.ToolName, normalizedDndMode);
+		            })
+		            .ToList();
 
 	        if (availableFunctions.Count == 0)
 	        {
@@ -1694,13 +1868,22 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
     {
         new
         (StaticValues.ChatMessageRoles.System,
-            "This is the Prime Directive: This is a chat bot running in [GPT-CLI](https://github.com/kainazzzo/GPT-CLI). Answer questions and" +
-            " provide responses in Discord message formatting. Encourage users to add instructions with /gptcli or by using the :up_arrow: " +
-            "emoji reaction on any message. Instructions are like 'sticky' chat messages that provide upfront context to the bot. The the 📌 emoji reaction is for pinning a message to instructions. The 🔄 emoji reaction is for replaying a message as a new prompt. " +
-            "Never wrap replies in triple backtick code fences (including ```discord) unless the user explicitly asks for a code block. Discord already renders markdown. " +
-            "If prior conversation shows code fences, actively override that style and respond without code fences. " +
-            "If you are attaching image files in your response, never claim you cannot show, attach, or resend the image. " +
-            "If the user explicitly asks for a file (for example, a code snippet as a file), respond with a <gptcli_file name=\"filename.ext\">...</gptcli_file> block containing the file contents, and put any human-readable reply outside the block.")
+            "This is the Prime Directive: You are a chat bot running in [GPT-CLI](https://github.com/kainazzzo/GPT-CLI) on Discord.\n" +
+            "\n" +
+            "Architecture:\n" +
+            "- This bot is modular: it loads multiple feature modules.\n" +
+            "- Each module may add its own system preamble (sub-prime directive) and may expose tools (slash commands) for the LLM to call.\n" +
+            "- When tools are offered, prefer calling tools to take actions rather than describing what you would do.\n" +
+            "\n" +
+            "Operating rules:\n" +
+            "- Answer in Discord message formatting.\n" +
+            "- Encourage users to add instructions with /gptcli or by using the :up_arrow: emoji reaction on any message.\n" +
+            "- Instructions are like \"sticky\" chat messages that provide upfront context to the bot.\n" +
+            "- The 📌 reaction pins a message to instructions; the 🔄 reaction replays a message as a new prompt.\n" +
+            "- Never wrap replies in triple backtick code fences (including ```discord) unless the user explicitly asks for a code block.\n" +
+            "- If prior conversation shows code fences, actively override that style and respond without code fences.\n" +
+            "- If you are attaching image files in your response, never claim you cannot show, attach, or resend the image.\n" +
+            "- If the user explicitly asks for a file (for example, a code snippet as a file), respond with a <gptcli_file name=\"filename.ext\">...</gptcli_file> block containing the file contents, and put any human-readable reply outside the block.")
     };
 
     private IEnumerable<ChatMessage> PrimeDirective => _defaultPrimeDirective;
@@ -1780,15 +1963,26 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 
     private ChannelState CreateBaseChannelState(ulong channelId)
     {
+        GptOptions CreateChannelParameters()
+        {
+            var p = DefaultParameters.Adapt<GptOptions>();
+            // Secrets are global and should never be stored per-channel (even in memory),
+            // and are not persisted due to [JsonIgnore] in GptOptions.
+            p.ApiKey = null;
+            p.BotToken = null;
+            return p;
+        }
+
+        var channelParameters = CreateChannelParameters();
         return new ChannelState
         {
             ChannelId = channelId,
-            InstructionChat = new(OpenAILogic, DefaultParameters.Adapt<GptOptions>())
+            InstructionChat = new(OpenAILogic, channelParameters)
             {
                 ChatBotState = new()
                 {
                     PrimeDirectives = PrimeDirective.ToList(),
-                    Parameters = DefaultParameters.Adapt<GptOptions>()
+                    Parameters = channelParameters
                 }
             },
             Options = new()
@@ -3623,23 +3817,20 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
         
     }
 
-	    private async Task HandleGptCliCommand(SocketSlashCommand command)
-	    {
-        if (!command.HasResponded)
-        {
-            await command.DeferAsync(ephemeral: true);
-        }
+		    private async Task HandleGptCliCommand(SocketSlashCommand command)
+		    {
+	        if (!command.HasResponded)
+	        {
+	            await command.DeferAsync(ephemeral: true);
+	        }
 
-        var channel = command.Channel;
-        if (!ChannelBots.TryGetValue(channel.Id, out var chatBot))
-        {
-            chatBot = InitializeChannel(channel);
-        }
+	        var channel = command.Channel;
+	        var chatBot = ChannelBots.GetOrAdd(channel.Id, _ => InitializeChannel(channel));
 
-        if (!IsChannelGuildMatch(chatBot, command.Channel, "slash-command"))
-        {
-            var warning = "Guild mismatch detected for cached channel data. Refusing to apply command.";
-            if (command.HasResponded)
+	        if (!IsChannelGuildMatch(chatBot, command.Channel, "slash-command"))
+	        {
+	            var warning = "Guild mismatch detected for cached channel data. Refusing to apply command.";
+	            if (command.HasResponded)
             {
                 await command.FollowupAsync(warning, ephemeral: true);
             }
@@ -3694,17 +3885,39 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 	                    return new GptCliExecutionResult(true, BuildHelpText(ctx?.ChannelState, functions), false);
 	                }
 	            },
-	            new()
-	            {
-	                ToolName = "gptcli_modules",
-	                Description = "List loaded feature modules and module loading diagnostics",
-	                Slash = new GptCliSlashBinding(GptCliSlashBindingKind.SubCommand, "modules", "Modules"),
-	                ExecuteAsync = async (ctx, argsJson, ct) =>
-	                {
-	                    await Task.Yield();
-	                    return new GptCliExecutionResult(true, BuildModulesText(ctx?.ChannelState), false);
-	                }
-	            },
+		            new()
+		            {
+		                ToolName = "gptcli_modules",
+		                Description = "List loaded feature modules and module loading diagnostics",
+		                Slash = new GptCliSlashBinding(GptCliSlashBindingKind.GroupSubCommand, "modules", "Modules", "list"),
+		                ExecuteAsync = async (ctx, argsJson, ct) =>
+		                {
+		                    await Task.Yield();
+		                    return new GptCliExecutionResult(true, BuildModulesText(ctx?.ChannelState), false);
+		                }
+		            },
+		            new()
+		            {
+		                ToolName = "gptcli_modules_enable",
+		                Description = "Enable a module for this channel",
+		                Slash = new GptCliSlashBinding(GptCliSlashBindingKind.GroupSubCommand, "modules", "Modules", "enable"),
+		                Parameters = new[]
+		                {
+		                    new GptCliParamSpec("module", GptCliParamType.String, "Module id", Required: true, Choices: BuildModuleIdChoices())
+		                },
+		                ExecuteAsync = (ctx, argsJson, ct) => ExecuteModuleSetEnabledAsync(ctx, argsJson, enabled: true, ct)
+		            },
+		            new()
+		            {
+		                ToolName = "gptcli_modules_disable",
+		                Description = "Disable a module for this channel",
+		                Slash = new GptCliSlashBinding(GptCliSlashBindingKind.GroupSubCommand, "modules", "Modules", "disable"),
+		                Parameters = new[]
+		                {
+		                    new GptCliParamSpec("module", GptCliParamType.String, "Module id", Required: true, Choices: BuildModuleIdChoices())
+		                },
+		                ExecuteAsync = (ctx, argsJson, ct) => ExecuteModuleSetEnabledAsync(ctx, argsJson, enabled: false, ct)
+		            },
             new()
             {
                 ToolName = "gptcli_clear",
@@ -3774,17 +3987,92 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
                 ExecuteAsync = ExecuteInstructionClearAsync
             },
 
-            BuildCoreSetOption("enabled", GptCliParamType.Boolean, "Enable or disable the chat bot in this channel.", ExecuteSetEnabledAsync),
-            BuildCoreSetOption("mute", GptCliParamType.Boolean, "Mute or unmute the chat bot in this channel.", ExecuteSetMuteAsync),
-            BuildCoreSetOption("response-mode", GptCliParamType.String, "Set the response mode (All|Matches).", ExecuteSetResponseModeAsync,
-                choices: new[] { new GptCliParamChoice("All", "All"), new GptCliParamChoice("Matches", "Matches") }),
+	            BuildCoreSetOption("enabled", GptCliParamType.Boolean, "Enable or disable the chat bot in this channel.", ExecuteSetEnabledAsync),
+	            BuildCoreSetOption("mute", GptCliParamType.Boolean, "Mute or unmute the chat bot in this channel.", ExecuteSetMuteAsync),
+	            BuildCoreSetOption("response-mode", GptCliParamType.String, "Set the response mode (All|Matches).", ExecuteSetResponseModeAsync,
+	                choices: new[] { new GptCliParamChoice("All", "All"), new GptCliParamChoice("Matches", "Matches") }),
             BuildCoreSetOption("embed-mode", GptCliParamType.String, "Set the embed mode (Explicit|All).", ExecuteSetEmbedModeAsync,
                 choices: new[] { new GptCliParamChoice("Explicit", "Explicit"), new GptCliParamChoice("All", "All") }),
             BuildCoreSetOption("max-chat-history-length", GptCliParamType.Integer, "Set the maximum chat history length.", ExecuteSetMaxChatHistoryAsync, minInt: 100),
             BuildCoreSetOption("max-tokens", GptCliParamType.Integer, "Set the maximum tokens.", ExecuteSetMaxTokensAsync, minInt: 50),
             BuildCoreSetOption("model", GptCliParamType.String, "Set the model name.", ExecuteSetModelAsync)
-        };
+	        };
+	    }
+
+    private IReadOnlyList<GptCliParamChoice> BuildModuleIdChoices()
+    {
+        // Build-time choices help UX in Discord. If no modules are loaded, fall back to free text.
+        var ids = _modulePipeline?.Modules?
+            .Where(m => m != null && !string.IsNullOrWhiteSpace(m.Id))
+            .Select(m => m.Id.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(s => s, StringComparer.OrdinalIgnoreCase)
+            .ToList() ?? new List<string>();
+
+        // Discord caps choices; keep it small but useful.
+        return ids.Take(25).Select(id => new GptCliParamChoice(id, id)).ToList();
     }
+
+		    private async Task<GptCliExecutionResult> ExecuteModuleSetEnabledAsync(GptCliExecutionContext ctx, string argsJson, bool enabled, CancellationToken ct)
+		    {
+		        if (ctx?.ChannelState == null)
+		        {
+	            return new GptCliExecutionResult(true, "No channel state.", false);
+	        }
+
+        if (!GptCliFunction.TryGetJsonProperty(argsJson, "module", out var m) || m.ValueKind != JsonValueKind.String)
+        {
+            return new GptCliExecutionResult(true, "Missing required 'module' parameter.", false);
+        }
+
+        var moduleId = (m.GetString() ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(moduleId))
+        {
+            return new GptCliExecutionResult(true, "Module id cannot be empty.", false);
+        }
+
+        // Validate module id if we know the loaded modules.
+        var loadedIds = _modulePipeline?.Modules?
+            .Where(mm => mm != null && !string.IsNullOrWhiteSpace(mm.Id))
+            .Select(mm => mm.Id.Trim())
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (loadedIds is { Count: > 0 } && !loadedIds.Contains(moduleId))
+        {
+            return new GptCliExecutionResult(true, $"Unknown module '{moduleId}'.", false);
+        }
+
+	        SetModuleEnabled(ctx.ChannelState, moduleId, enabled);
+
+	        // Give modules a chance to run side effects (e.g., stop timers) when toggled.
+	        var module = _modulePipeline?.Modules?.FirstOrDefault(mm => string.Equals(mm?.Id, moduleId, StringComparison.OrdinalIgnoreCase));
+	        if (module is IModuleEnablementHooks hooks)
+        {
+            try
+            {
+                await hooks.OnModuleEnabledChangedAsync(ctx.Context, ctx.ChannelState, ctx.Channel, enabled, ct);
+            }
+            catch (Exception ex)
+            {
+                await Console.Out.WriteLineAsync($"Module enable hook failed for {moduleId}: {ex.GetType().Name} {ex.Message}");
+	            }
+	        }
+
+	        // Persist immediately so modules don't "forget" their enabled state when the first interaction is a slash/tool call.
+	        try
+	        {
+	            if (ctx.ChannelState.ChannelId != 0)
+	            {
+	                ChannelBots[ctx.ChannelState.ChannelId] = ctx.ChannelState;
+	                await SaveCachedChannelState(ctx.ChannelState.ChannelId);
+	            }
+	        }
+	        catch (Exception ex)
+	        {
+	            await Console.Out.WriteLineAsync($"Module enable persistence failed for {moduleId}: {ex.GetType().Name} {ex.Message}");
+	        }
+
+	        return new GptCliExecutionResult(true, $"module {moduleId} {(enabled ? "enabled" : "disabled")}", true);
+	    }
 
     private GptCliFunction BuildCoreSetOption(
         string optionName,
@@ -3899,12 +4187,12 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 	                            continue;
 	                        }
 
-	                        if (!IsFunctionAvailable(channelState, fn))
-	                        {
-	                            responses.Add($"Module '{fn.ModuleId}' is disabled. Enable it via `/gptcli set {fn.ModuleId} true`.");
-                            try { await Console.Out.WriteLineAsync($"[slash:{requestId}] set blocked tool={fn.ToolName} module={fn.ModuleId}"); } catch { }
-	                            continue;
-	                        }
+		                        if (!IsFunctionAvailable(channelState, fn))
+		                        {
+		                            responses.Add($"Module '{fn.ModuleId}' is disabled. Enable it via `/gptcli modules enable module:{fn.ModuleId}`.");
+	                            try { await Console.Out.WriteLineAsync($"[slash:{requestId}] set blocked tool={fn.ToolName} module={fn.ModuleId}"); } catch { }
+		                            continue;
+		                        }
 
 	                        var paramName = fn.Parameters?.FirstOrDefault()?.Name ?? "value";
 	                        var argsJson = BuildJsonObject(new Dictionary<string, object> { [paramName] = setOpt.Value });
@@ -3931,12 +4219,12 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 
 	                if (bySubCommand.TryGetValue(option.Name, out var subFn))
 	                {
-	                    if (!IsFunctionAvailable(channelState, subFn))
-	                    {
-	                        responses.Add($"Module '{subFn.ModuleId}' is disabled. Enable it via `/gptcli set {subFn.ModuleId} true`.");
-                            try { await Console.Out.WriteLineAsync($"[slash:{requestId}] subcommand blocked tool={subFn.ToolName} module={subFn.ModuleId}"); } catch { }
-	                        continue;
-	                    }
+		                    if (!IsFunctionAvailable(channelState, subFn))
+		                    {
+		                        responses.Add($"Module '{subFn.ModuleId}' is disabled. Enable it via `/gptcli modules enable module:{subFn.ModuleId}`.");
+	                            try { await Console.Out.WriteLineAsync($"[slash:{requestId}] subcommand blocked tool={subFn.ToolName} module={subFn.ModuleId}"); } catch { }
+		                        continue;
+		                    }
 
 	                    var argsJson = BuildJsonObject(BuildArgsFromSlashOptions(option.Options));
 	                    var ctx = new GptCliExecutionContext(moduleContext, channelState, command.Channel, command.User, command, null);
@@ -3979,12 +4267,12 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 	                    continue;
 	                }
 
-	                if (!IsFunctionAvailable(channelState, fn))
-	                {
-	                    responses.Add($"Module '{fn.ModuleId}' is disabled. Enable it via `/gptcli set {fn.ModuleId} true`.");
-                        try { await Console.Out.WriteLineAsync($"[slash:{requestId}] group-subcommand blocked tool={fn.ToolName} module={fn.ModuleId}"); } catch { }
-	                    continue;
-	                }
+		                if (!IsFunctionAvailable(channelState, fn))
+		                {
+		                    responses.Add($"Module '{fn.ModuleId}' is disabled. Enable it via `/gptcli modules enable module:{fn.ModuleId}`.");
+	                        try { await Console.Out.WriteLineAsync($"[slash:{requestId}] group-subcommand blocked tool={fn.ToolName} module={fn.ModuleId}"); } catch { }
+		                    continue;
+		                }
 
 	                var argsJson = BuildJsonObject(BuildArgsFromSlashOptions(sub.Options));
 	                var ctx = new GptCliExecutionContext(moduleContext, channelState, command.Channel, command.User, command, null);
@@ -4093,10 +4381,28 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 	        }
 	    }
 
-	    private List<SlashCommandOptionBuilder> BuildGptCliSlashOptions(IReadOnlyList<GptCliFunction> functions)
-	    {
-	        var topLevel = new Dictionary<string, SlashCommandOptionBuilder>(StringComparer.OrdinalIgnoreCase);
-	        var order = new List<string>();
+		    private static string TruncateDiscordDescription(string value, string fallback)
+		    {
+		        const int limit = 100;
+		        var s = string.IsNullOrWhiteSpace(value) ? (fallback ?? string.Empty) : value;
+		        s = (s ?? string.Empty).Replace('\n', ' ').Replace('\r', ' ').Trim();
+		        if (s.Length == 0)
+		        {
+		            s = (fallback ?? "command").Trim();
+		        }
+		        if (s.Length <= limit)
+		        {
+		            return s;
+		        }
+		        var prefixLen = Math.Max(0, limit - 3);
+		        var prefix = s[..prefixLen].TrimEnd();
+		        return prefix.Length == 0 ? (fallback ?? "command").Trim() : (prefix + "...");
+		    }
+
+		    private List<SlashCommandOptionBuilder> BuildGptCliSlashOptions(IReadOnlyList<GptCliFunction> functions)
+		    {
+		        var topLevel = new Dictionary<string, SlashCommandOptionBuilder>(StringComparer.OrdinalIgnoreCase);
+		        var order = new List<string>();
 
 	        foreach (var fn in functions ?? Array.Empty<GptCliFunction>())
 	        {
@@ -4111,15 +4417,15 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 	                case GptCliSlashBindingKind.SubCommand:
 	                {
 	                    var name = slash.TopLevelName.Trim();
-	                    if (!topLevel.TryGetValue(name, out var opt))
-	                    {
-	                        opt = new SlashCommandOptionBuilder()
-	                            .WithName(name)
-	                            .WithDescription(slash.TopLevelDescription ?? fn.Description ?? name)
-	                            .WithType(ApplicationCommandOptionType.SubCommand);
-	                        topLevel[name] = opt;
-	                        order.Add(name);
-	                    }
+		                    if (!topLevel.TryGetValue(name, out var opt))
+		                    {
+		                        opt = new SlashCommandOptionBuilder()
+		                            .WithName(name)
+		                            .WithDescription(TruncateDiscordDescription(slash.TopLevelDescription ?? fn.Description ?? name, name))
+		                            .WithType(ApplicationCommandOptionType.SubCommand);
+		                        topLevel[name] = opt;
+		                        order.Add(name);
+		                    }
 
 	                    if (opt.Type != ApplicationCommandOptionType.SubCommand)
 	                    {
@@ -4145,15 +4451,15 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 	                case GptCliSlashBindingKind.GroupSubCommand:
 	                {
 	                    var groupName = slash.TopLevelName.Trim();
-	                    if (!topLevel.TryGetValue(groupName, out var group))
-	                    {
-	                        group = new SlashCommandOptionBuilder()
-	                            .WithName(groupName)
-	                            .WithDescription(slash.TopLevelDescription ?? groupName)
-	                            .WithType(ApplicationCommandOptionType.SubCommandGroup);
-	                        topLevel[groupName] = group;
-	                        order.Add(groupName);
-	                    }
+		                    if (!topLevel.TryGetValue(groupName, out var group))
+		                    {
+		                        group = new SlashCommandOptionBuilder()
+		                            .WithName(groupName)
+		                            .WithDescription(TruncateDiscordDescription(slash.TopLevelDescription ?? groupName, groupName))
+		                            .WithType(ApplicationCommandOptionType.SubCommandGroup);
+		                        topLevel[groupName] = group;
+		                        order.Add(groupName);
+		                    }
 
 	                    if (group.Type != ApplicationCommandOptionType.SubCommandGroup || string.IsNullOrWhiteSpace(slash.SubCommandName))
 	                    {
@@ -4172,15 +4478,15 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 	                case GptCliSlashBindingKind.SetOption:
 	                {
 	                    var setCommandName = slash.TopLevelName.Trim();
-	                    if (!topLevel.TryGetValue(setCommandName, out var set))
-	                    {
-	                        set = new SlashCommandOptionBuilder()
-	                            .WithName(setCommandName)
-	                            .WithDescription(slash.TopLevelDescription ?? "Settings")
-	                            .WithType(ApplicationCommandOptionType.SubCommand);
-	                        topLevel[setCommandName] = set;
-	                        order.Add(setCommandName);
-	                    }
+		                    if (!topLevel.TryGetValue(setCommandName, out var set))
+		                    {
+		                        set = new SlashCommandOptionBuilder()
+		                            .WithName(setCommandName)
+		                            .WithDescription(TruncateDiscordDescription(slash.TopLevelDescription ?? "Settings", "Settings"))
+		                            .WithType(ApplicationCommandOptionType.SubCommand);
+		                        topLevel[setCommandName] = set;
+		                        order.Add(setCommandName);
+		                    }
 
 	                    if (set.Type != ApplicationCommandOptionType.SubCommandGroup && set.Type != ApplicationCommandOptionType.SubCommand)
 	                    {
@@ -4209,13 +4515,41 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 	            }
 	        }
 
-	        return result;
-	    }
+		        return result;
+		    }
 
-	    private string BuildModulesText(ChannelState channelState)
-	    {
-	        if (_modulePipeline == null)
-	        {
+		    private string BuildModuleArchitectureSystemMessage(ChannelState channelState)
+		    {
+		        var loaded = _modulePipeline?.Modules
+		                     ?.Where(m => m != null && !string.IsNullOrWhiteSpace(m.Id))
+		                     .OrderBy(m => m.Id, StringComparer.OrdinalIgnoreCase)
+		                     .ToList() ?? new List<IFeatureModule>();
+
+		        var lines = new List<string>
+		        {
+		            "System context: modular GPT-CLI Discord bot.",
+		            "Modules may extend the prime directive with their own sub-prime directives and may expose tools (slash commands) for the model to call.",
+		            "Module preambles describe when to engage and what context to maintain; tool definitions describe callable functions.",
+		        };
+
+		        lines.Add($"Loaded modules ({loaded.Count}):");
+		        foreach (var m in loaded.Take(40))
+		        {
+		            var name = string.IsNullOrWhiteSpace(m.Name) ? m.Id : m.Name.Trim();
+		            lines.Add($"- {m.Id}: {name}");
+		        }
+		        if (loaded.Count > 40)
+		        {
+		            lines.Add($"- ... +{loaded.Count - 40} more");
+		        }
+
+		        return string.Join("\n", lines).Trim();
+		    }
+
+		    private string BuildModulesText(ChannelState channelState)
+		    {
+		        if (_modulePipeline == null)
+		        {
 	            return "Modules are not enabled.";
 	        }
 
@@ -4231,15 +4565,19 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 	                     ?? new List<IFeatureModule>();
 
 	        lines.Add($"Loaded modules ({loaded.Count}):");
-	        foreach (var module in loaded.OrderBy(m => m.Id, StringComparer.OrdinalIgnoreCase))
-	        {
-	            var enabled = channelState == null ? true : IsModuleEnabled(channelState, module.Id);
-	            lines.Add($"- {module.Id} ({module.Name}) enabled={(enabled ? "true" : "false")}");
-	        }
+		        foreach (var module in loaded.OrderBy(m => m.Id, StringComparer.OrdinalIgnoreCase))
+		        {
+		            var enabled = channelState == null ? true : IsModuleEnabled(channelState, module.Id);
+		            lines.Add($"- {module.Id} ({module.Name}) enabled={(enabled ? "true" : "false")}");
+		        }
+		        lines.Add("");
+		        lines.Add("Enable/disable modules:");
+		        lines.Add("• `/gptcli modules enable module:<id>`");
+		        lines.Add("• `/gptcli modules disable module:<id>`");
 
-	        if (channelState?.Options?.ModulesEnabled is { Count: > 0 })
-	        {
-	            lines.Add("");
+		        if (channelState?.Options?.ModulesEnabled is { Count: > 0 })
+		        {
+		            lines.Add("");
 	            lines.Add("Channel module overrides:");
 	            foreach (var kvp in channelState.Options.ModulesEnabled.OrderBy(k => k.Key, StringComparer.OrdinalIgnoreCase))
 	            {
@@ -4347,29 +4685,23 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 		            .OrderBy(s => s, StringComparer.OrdinalIgnoreCase)
 		            .ToList();
 
-		        if (moduleIds.Count > 0)
-		        {
-		            lines.Add("");
-		            lines.Add("**Modules**");
-		            foreach (var moduleId in moduleIds)
-		            {
-		                var enabled = channelState != null ? IsModuleEnabled(channelState, moduleId) : (bool?)null;
-		                var enabledText = enabled.HasValue ? (enabled.Value ? "enabled" : "disabled") : "enabled=?";
-		                lines.Add($"**{moduleId}** ({enabledText})");
+			        if (moduleIds.Count > 0)
+			        {
+			            lines.Add("");
+			            lines.Add("**Modules**");
+			            lines.Add("• `/gptcli modules list`");
+			            lines.Add("• `/gptcli modules enable module:<id>`");
+			            lines.Add("• `/gptcli modules disable module:<id>`");
+			            foreach (var moduleId in moduleIds)
+			            {
+			                var enabled = channelState != null ? IsModuleEnabled(channelState, moduleId) : (bool?)null;
+			                var enabledText = enabled.HasValue ? (enabled.Value ? "enabled" : "disabled") : "enabled=?";
+			                lines.Add($"**{moduleId}** ({enabledText})");
 
-		                // If a module has a set toggle, show it first.
-		                var setToggles = setFunctions
-		                    .Where(f => string.Equals(f.ModuleId, moduleId, StringComparison.OrdinalIgnoreCase))
-		                    .ToList();
-		                foreach (var toggle in setToggles)
-		                {
-		                    lines.Add($"• {FormatSetOptionLine(toggle)}");
-		                }
-
-		                var moduleCmds = moduleFunctions
-		                    .Where(f => string.Equals(f.ModuleId, moduleId, StringComparison.OrdinalIgnoreCase) &&
-		                                f.Slash.Kind != GptCliSlashBindingKind.SetOption)
-		                    .ToList();
+			                var moduleCmds = moduleFunctions
+			                    .Where(f => string.Equals(f.ModuleId, moduleId, StringComparison.OrdinalIgnoreCase) &&
+			                                f.Slash.Kind != GptCliSlashBindingKind.SetOption)
+			                    .ToList();
 
 		                var moduleLines = BuildHelpLinesForFunctions(channelState, moduleCmds, moduleId);
 		                if (moduleLines.Count == 0)

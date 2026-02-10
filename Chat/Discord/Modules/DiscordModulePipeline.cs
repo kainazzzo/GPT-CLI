@@ -57,8 +57,35 @@ public sealed class DiscordModulePipeline
 
     public async Task OnMessageReceivedAsync(SocketMessage message, CancellationToken cancellationToken)
     {
+        // Central gate: do not even dispatch messages to modules that are disabled for this channel.
+        // Modules may still do their own checks, but this avoids wasted work and makes disable semantics reliable.
+        InstructionGPT.ChannelState channelState = null;
+        try
+        {
+            if (message?.Channel != null)
+            {
+                channelState = _context.Host.GetOrCreateChannelState(message.Channel);
+                if (message.Channel is IGuildChannel guildChannel)
+                {
+                    _context.Host.EnsureChannelStateMetadata(channelState, guildChannel);
+                }
+            }
+        }
+        catch
+        {
+            channelState = null;
+        }
+
         foreach (var module in _modules)
         {
+            if (channelState != null &&
+                module != null &&
+                !string.IsNullOrWhiteSpace(module.Id) &&
+                !InstructionGPT.IsModuleEnabled(channelState, module.Id))
+            {
+                continue;
+            }
+
             await SafeInvokeAsync(module, () => module.OnMessageReceivedAsync(_context, message, cancellationToken));
         }
     }

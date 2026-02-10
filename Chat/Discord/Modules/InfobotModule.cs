@@ -124,6 +124,11 @@ public sealed class InfobotModule : FeatureModuleBase
             return;
         }
 
+        if (!InstructionGPT.IsModuleEnabled(channel, Id))
+        {
+            return;
+        }
+
         if (!channel.Options.LearningEnabled)
         {
             return;
@@ -142,7 +147,24 @@ public sealed class InfobotModule : FeatureModuleBase
             return Array.Empty<ChatMessage>();
         }
 
-        return await BuildFactoidContextMessagesAsync(context, channel, message);
+        var outMessages = new List<ChatMessage>
+        {
+            BuildModulePreambleMessage(
+                "Sub-Prime Directive:\n" +
+                "- Provide quick, factual answers using learned factoids for this channel when relevant.\n" +
+                "- If the user asks about a term that matches a factoid, use the factoid as the source of truth.\n" +
+                "When To Engage (triggers):\n" +
+                "- Questions starting with who/what/where, especially about known terms.\n" +
+                "- Requests to remember, set, delete, or list factoids.\n")
+        };
+
+        var factoids = await BuildFactoidContextMessagesAsync(context, channel, message);
+        if (factoids is { Count: > 0 })
+        {
+            outMessages.AddRange(factoids);
+        }
+
+        return outMessages;
     }
 
     public override async Task OnReactionAddedAsync(DiscordModuleContext context, Cacheable<IUserMessage, ulong> userMessage, Cacheable<IMessageChannel, ulong> messageChannel, SocketReaction reaction, CancellationToken cancellationToken)

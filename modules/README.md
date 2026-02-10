@@ -47,14 +47,33 @@ Another example:
 - Source: `modules/examples/DndModuleExample`
 - Build: `modules/examples/DndModuleExample/build-module.sh`
 - Output: `modules/DndModuleExample.dll`
-- Setup/control (slash): `/gptcli dnd status`, `/gptcli dnd mode`, `/gptcli dnd campaigncreate`,
-  `/gptcli dnd campaignrefine`, `/gptcli dnd campaignoverwrite`, `/gptcli dnd charactercreate`,
-  `/gptcli dnd charactershow`, `/gptcli dnd npccreate`, `/gptcli dnd npclist`, `/gptcli dnd npcshow`,
-  `/gptcli dnd npcremove`, `/gptcli dnd ledger`, `/gptcli dnd campaignhistory`
-- Live action tags: `!roll`, `!check`, `!save`, `!attack`, `!initiative`, `!endturn`
-- Persisted docs per campaign:
-  - `campaign.json` (campaign details + generation trigger + prompt tweak chain + revision chain)
-  - `ledger.json` (official actions/rolls/outcomes referencing campaign document revision)
+- Modes:
+  - `off`: module ignores messages
+  - `draft`: natural language campaign drafting + party setup (does not write the campaign catalog)
+  - `game`: gameplay/encounters (finalizes the active draft into the catalog/run on entry)
+- Primary workflow (natural language):
+  - Enable module in your channel: `/gptcli modules enable module:dnd`
+  - Switch to `draft`, then describe your campaign in plain English (name + theme + party).
+  - Keep iterating in `draft` by asking for story changes ("rewrite the hook...", "add a rival faction...") or party changes ("add @User", "add npc:...").
+  - Switch to `game` to finalize and start playing.
+- Slash commands (draft):
+  - `/gptcli dnd status`, `/gptcli dnd mode value:off|draft|game`
+  - `/gptcli dnd campaigncreate` (build/overwrite the active draft)
+  - `/gptcli dnd draftupdate` (apply a modification prompt to the existing draft story)
+  - `/gptcli dnd partyshow`, `/gptcli dnd partyaddpc`, `/gptcli dnd partyremovepc`, `/gptcli dnd partyaddnpc`
+  - `/gptcli dnd charactercreate`, `/gptcli dnd charactershow`
+  - `/gptcli dnd npccreate`, `/gptcli dnd npclist`, `/gptcli dnd npcshow`, `/gptcli dnd npcremove`
+  - `/gptcli dnd campaignlist`, `/gptcli dnd campaignstart`, `/gptcli dnd encounterlist`
+  - `/gptcli dnd campaignfinalize` (optional; game mode also finalizes)
+- Slash commands (game):
+  - `/gptcli dnd encounterstart`, `/gptcli dnd encounterstatus`, `/gptcli dnd encounterend`
+  - `/gptcli dnd ledger`
+  - `/gptcli dnd liveconfig` (game-mode ticking/timeouts)
+- Game-mode actions are typically driven by natural language (auto-routing) or by `!` tags:
+  - `!state`, `!targets`, `!attack <target>`, `!cast <target>`, `!pass`, `!rollall`, `!ledger [n]`
+- Persistence (per Discord channel state dir):
+  - Drafts: `dnd-lite/drafts/<campaign-slug>/draft.json` + `party.json`
+  - Final: `dnd-lite/campaigns/<campaign-slug>/campaign.json` and `dnd-lite/runs/<campaign-slug>/...`
 
 ## Docker
 

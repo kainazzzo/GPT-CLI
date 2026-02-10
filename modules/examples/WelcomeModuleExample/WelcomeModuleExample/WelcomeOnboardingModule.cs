@@ -33,6 +33,17 @@ public sealed class WelcomeOnboardingModule : FeatureModuleBase
             return false;
         }
 
+        var channelState = context.Host.GetOrCreateChannelState(command.Channel);
+        if (command.Channel is IGuildChannel guildChannel)
+        {
+            context.Host.EnsureChannelStateMetadata(channelState, guildChannel);
+        }
+
+        if (!InstructionGPT.IsModuleEnabled(channelState, Id))
+        {
+            return false;
+        }
+
         if (command.Data.Options == null || command.Data.Options.Count == 0)
         {
             return false;
@@ -65,6 +76,11 @@ public sealed class WelcomeOnboardingModule : FeatureModuleBase
 
         var configState = FindWelcomeConfigState(context, guildChannel.Guild.Id);
         if (configState == null)
+        {
+            return;
+        }
+
+        if (!InstructionGPT.IsModuleEnabled(configState, Id))
         {
             return;
         }
@@ -124,6 +140,11 @@ public sealed class WelcomeOnboardingModule : FeatureModuleBase
 
         var configState = FindWelcomeConfigState(context, guildChannel.Guild.Id);
         if (configState == null)
+        {
+            return;
+        }
+
+        if (!InstructionGPT.IsModuleEnabled(configState, Id))
         {
             return;
         }

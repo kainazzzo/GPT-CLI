@@ -62,6 +62,28 @@ public sealed record GptCliExecutionResult(
 
 public sealed class GptCliFunction
 {
+    private const int DiscordDescriptionLimit = 100;
+
+    private static string SanitizeDiscordDescription(string value, string fallback)
+    {
+        var s = string.IsNullOrWhiteSpace(value) ? (fallback ?? string.Empty) : value;
+        s = (s ?? string.Empty).Replace('\n', ' ').Replace('\r', ' ').Trim();
+        if (s.Length == 0)
+        {
+            s = (fallback ?? "command").Trim();
+        }
+
+        if (s.Length <= DiscordDescriptionLimit)
+        {
+            return s;
+        }
+
+        // Keep the end-user UX readable without violating Discord's 100 char max.
+        var prefixLen = Math.Max(0, DiscordDescriptionLimit - 3);
+        var prefix = s[..prefixLen].TrimEnd();
+        return prefix.Length == 0 ? (fallback ?? "command").Trim() : (prefix + "...");
+    }
+
     public string ToolName { get; init; }
     public string Description { get; init; }
     public GptCliSlashBinding Slash { get; init; }
@@ -150,17 +172,18 @@ public sealed class GptCliFunction
         };
     }
 
-    public SlashCommandOptionBuilder BuildSlashSubCommand()
-    {
-        if (Slash?.Kind != GptCliSlashBindingKind.GroupSubCommand)
-        {
-            throw new InvalidOperationException("BuildSlashSubCommand is only valid for GroupSubCommand bindings.");
-        }
+	    public SlashCommandOptionBuilder BuildSlashSubCommand()
+	    {
+	        if (Slash?.Kind != GptCliSlashBindingKind.GroupSubCommand)
+	        {
+	            throw new InvalidOperationException("BuildSlashSubCommand is only valid for GroupSubCommand bindings.");
+	        }
 
-        var builder = new SlashCommandOptionBuilder()
-            .WithName(Slash.SubCommandName)
-            .WithDescription(string.IsNullOrWhiteSpace(Description) ? Slash.SubCommandName : Description)
-            .WithType(ApplicationCommandOptionType.SubCommand);
+	        var desc = SanitizeDiscordDescription(Description, Slash.SubCommandName);
+	        var builder = new SlashCommandOptionBuilder()
+	            .WithName(Slash.SubCommandName)
+	            .WithDescription(desc)
+	            .WithType(ApplicationCommandOptionType.SubCommand);
 
         foreach (var p in Parameters ?? Array.Empty<GptCliParamSpec>())
         {
@@ -189,8 +212,8 @@ public sealed class GptCliFunction
         return BuildSlashParamOption(renamed);
     }
 
-    public SlashCommandOptionBuilder BuildSlashParamOption(GptCliParamSpec p)
-    {
+	    public SlashCommandOptionBuilder BuildSlashParamOption(GptCliParamSpec p)
+	    {
         var optType = p.Type switch
         {
             GptCliParamType.Boolean => ApplicationCommandOptionType.Boolean,
@@ -203,11 +226,12 @@ public sealed class GptCliFunction
             _ => ApplicationCommandOptionType.String
         };
 
-        var option = new SlashCommandOptionBuilder()
-            .WithName(p.Name)
-            .WithDescription(p.Description ?? p.Name)
-            .WithType(optType)
-            .WithRequired(p.Required);
+	        var desc = SanitizeDiscordDescription(p.Description ?? p.Name, p.Name);
+	        var option = new SlashCommandOptionBuilder()
+	            .WithName(p.Name)
+	            .WithDescription(desc)
+	            .WithType(optType)
+	            .WithRequired(p.Required);
 
         if (p.Choices is { Count: > 0 } && optType == ApplicationCommandOptionType.String)
         {

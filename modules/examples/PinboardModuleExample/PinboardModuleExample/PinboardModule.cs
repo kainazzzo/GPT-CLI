@@ -30,6 +30,17 @@ public sealed class PinboardModule : FeatureModuleBase
             return false;
         }
 
+        var channelState = context.Host.GetOrCreateChannelState(command.Channel);
+        if (command.Channel is IGuildChannel guildChannel)
+        {
+            context.Host.EnsureChannelStateMetadata(channelState, guildChannel);
+        }
+
+        if (!InstructionGPT.IsModuleEnabled(channelState, Id))
+        {
+            return false;
+        }
+
         if (command.Data.Options == null || command.Data.Options.Count == 0)
         {
             return false;
@@ -72,6 +83,11 @@ public sealed class PinboardModule : FeatureModuleBase
         }
 
         if (!context.Host.IsChannelGuildMatch(channelState, message.Channel, "pin-message"))
+        {
+            return;
+        }
+
+        if (!InstructionGPT.IsModuleEnabled(channelState, Id))
         {
             return;
         }

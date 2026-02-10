@@ -98,11 +98,16 @@ dotnet build -c Release
 cp bin/Release/net10.0/MyGptCliModule.dll /path/to/gpt-cli/modules/
 ```
 
-Example module in this repo:
-- Source: `modules/examples/CasinoModuleExample`
-- Build: `modules/examples/CasinoModuleExample/build-module.sh` or `modules/examples/CasinoModuleExample/build-module.bat`
-- Output DLL is copied to `modules/` so it loads on next bot restart.
-- The example implements a casino game mode and uses the built-in instruction set to style responses.
+Example modules in this repo:
+- Casino:
+  - Source: `modules/examples/CasinoModuleExample`
+  - Build: `modules/examples/CasinoModuleExample/build-module.sh` or `modules/examples/CasinoModuleExample/build-module.bat`
+  - Output DLL is copied to `modules/` so it loads on next bot restart.
+- DnD (simplified, natural language):
+  - Source: `modules/examples/DndModuleExample`
+  - Build: `modules/examples/DndModuleExample/build-module.sh`
+  - Output DLL is copied to `modules/` so it loads on next bot restart.
+  - Key idea: enable the module in your channel, switch to `/gptcli dnd mode value:draft`, and describe your campaign in plain English; iterate on story/party in draft; switch to `/gptcli dnd mode value:game` to finalize and play.
 
 Minimal module skeleton:
 

@@ -1,7 +1,11 @@
+using System.Text.Json.Serialization;
+
 namespace GPT.CLI;
 
-public record GptOptions
+public record GptOptions 
 {
+    // Secrets are global app settings and must never be persisted in per-channel state JSON.
+    [JsonIgnore]
     public string ApiKey { get; set; }
 
     public string BaseDomain { get; set; }
@@ -40,6 +44,8 @@ public record GptOptions
 
     public string[] EmbedDirectoryNames { get; set; }
 
+    // Secrets are global app settings and must never be persisted in per-channel state JSON.
+    [JsonIgnore]
     public string BotToken { get; set; }
 
     public uint MaxChatHistoryLength { get; set; } = 4096;
