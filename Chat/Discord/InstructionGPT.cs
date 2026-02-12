@@ -1,5 +1,6 @@
 ﻿using System.Collections.Concurrent;
 using System.Globalization;
+using System.Threading;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Text.Json;
@@ -14,29 +15,43 @@ using GPT.CLI.Chat.Discord.Modules;
 using Mapster;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
-using OpenAI.ObjectModels;
-using OpenAI.ObjectModels.RequestModels;
-using OpenAI.ObjectModels.SharedModels;
+using Betalgo.Ranul.OpenAI.ObjectModels;
+using Betalgo.Ranul.OpenAI.ObjectModels.RequestModels;
+using Betalgo.Ranul.OpenAI.Contracts.Enums;
+using Betalgo.Ranul.OpenAI.ObjectModels.SharedModels;
 
 namespace GPT.CLI.Chat.Discord;
 
 public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 {
     private readonly IServiceProvider _services;
+    private readonly IHostApplicationLifetime _appLifetime;
     private readonly ConcurrentDictionary<ulong, HashSet<string>> _imageResponseMap = new();
 	private DiscordModulePipeline _modulePipeline;
 	private DiscordModuleContext _moduleContext;
 	private CancellationToken _shutdownToken;
+    private int _stopping;
 
 	public InstructionGPT(
-        DiscordSocketClient client,
-        IConfiguration configuration,
-        OpenAILogic openAILogic,
-        GptOptions defaultParameters,
-        IServiceProvider services) : base(client, configuration, openAILogic, defaultParameters)
-    {
-        _services = services;
-    }
+	        DiscordSocketClient client,
+	        IConfiguration configuration,
+	        OpenAILogic openAILogic,
+	        GptOptions defaultParameters,
+	        IServiceProvider services,
+            IHostApplicationLifetime appLifetime) : base(client, configuration, openAILogic, defaultParameters)
+	    {
+	        _services = services;
+            _appLifetime = appLifetime;
+            _appLifetime.ApplicationStopping.Register(() =>
+            {
+                Interlocked.Exchange(ref _stopping, 1);
+                Console.WriteLine("[dnd] host: ApplicationStopping signaled.");
+            });
+            _appLifetime.ApplicationStopped.Register(() =>
+            {
+                Console.WriteLine("[dnd] host: ApplicationStopped signaled.");
+            });
+	    }
     public record ChannelState
     {
         [JsonPropertyName("guild-id")]
@@ -278,6 +293,16 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
         Client.Log += LogAsync;
         Client.Disconnected += async ex =>
         {
+            var duringShutdown =
+                _shutdownToken.IsCancellationRequested ||
+                Volatile.Read(ref _stopping) == 1 ||
+                ex is OperationCanceledException;
+            if (duringShutdown)
+            {
+                await Console.Out.WriteLineAsync("Gateway disconnected during shutdown.");
+                return;
+            }
+
             await Console.Out.WriteLineAsync(ex == null
                 ? "Gateway disconnected."
                 : $"Gateway disconnected: {ex.GetType().Name} - {ex.Message}");
@@ -663,7 +688,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
                     if (channelState.Options.Enabled)
                     {
                         var chatBot = channelState.InstructionChat;
-                        chatBot.AddInstruction(new ChatMessage(StaticValues.ChatMessageRoles.System, message.Content));
+                        chatBot.AddInstruction(new ChatMessage(ChatCompletionRole.System, message.Content));
 
 
                         using var typingState = channel.EnterTypingState();
@@ -1086,9 +1111,13 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 
     public override async Task StopAsync(CancellationToken cancellationToken)
     {
+        Interlocked.Exchange(ref _stopping, 1);
+        Console.WriteLine("[dnd] host: StopAsync invoked.");
         // Save state to discordState.json
         await SaveState();
+        Console.WriteLine("[dnd] host: state saved.");
         await Client.StopAsync();
+        Console.WriteLine("[dnd] host: discord client stopped.");
     }
 
     private async Task LogAsync(LogMessage log)
@@ -1164,7 +1193,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 
         // Always record the message for context, but only respond to @mentions.
         var mentionToken = $"<@{message.Author.Id}>";
-        channel.InstructionChat.AddMessage(new ChatMessage(StaticValues.ChatMessageRoles.User,
+        channel.InstructionChat.AddMessage(new ChatMessage(ChatCompletionRole.User,
             $"{message.Author.Username} (mention: {mentionToken}): {message.Content}"));
         if (!shouldRespond)
         {
@@ -1209,11 +1238,11 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 
                 if (textDocuments.Count > 0)
                 {
-                    channel.InstructionChat.AddMessage(new(StaticValues.ChatMessageRoles.System,
+                    channel.InstructionChat.AddMessage(new(ChatCompletionRole.System,
                         $"Context for the next {textDocuments.Count} message(s). Use this to answer:"));
                     foreach (var closestDocument in textDocuments)
                     {
-                        channel.InstructionChat.AddMessage(new(StaticValues.ChatMessageRoles.System,
+                        channel.InstructionChat.AddMessage(new(ChatCompletionRole.System,
                             $"---context---\r\n{closestDocument.Document.Text}\r\n--end context---"));
                     }
                 }
@@ -1262,7 +1291,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 	        }
 
 	        var additionalMessages = new List<ChatMessage>();
-	        additionalMessages.Add(new ChatMessage(StaticValues.ChatMessageRoles.System, BuildModuleArchitectureSystemMessage(channel)));
+	        additionalMessages.Add(new ChatMessage(ChatCompletionRole.System, BuildModuleArchitectureSystemMessage(channel)));
 	        if (_modulePipeline != null)
 	        {
 	            var moduleMessages = await _modulePipeline.GetAdditionalMessageContextAsync(message, channel, _shutdownToken);
@@ -1278,7 +1307,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
         if (imageAttachments.Count > 0)
         {
             var imageNames = string.Join(", ", imageAttachments.Select(att => att.Name));
-            additionalMessages.Add(new ChatMessage(StaticValues.ChatMessageRoles.System,
+            additionalMessages.Add(new ChatMessage(ChatCompletionRole.System,
                 $"Your response will include the image file(s) attached: {imageNames}. " +
                 "Do not say you cannot show, attach, or resend the image."));
         }
@@ -1339,7 +1368,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
             var historyText = BuildHistoryText(cleanedText, allAttachments);
             if (!string.IsNullOrWhiteSpace(historyText))
             {
-                channel.InstructionChat.AddMessage(new ChatMessage(StaticValues.ChatMessageRoles.Assistant, historyText));
+                channel.InstructionChat.AddMessage(new ChatMessage(ChatCompletionRole.Assistant, historyText));
             }
         }
 
@@ -1696,8 +1725,8 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 	            ParallelToolCalls = false,
 	            Messages = new List<ChatMessage>
 	            {
-	                new(StaticValues.ChatMessageRoles.System, system),
-	                new(StaticValues.ChatMessageRoles.User, strippedContent)
+	                new(ChatCompletionRole.System, system),
+	                new(ChatCompletionRole.User, strippedContent)
 	            },
 	            Tools = tools,
 	            ToolChoice = new ToolChoice { Type = "auto" }
@@ -1874,7 +1903,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
     private readonly List<ChatMessage> _defaultPrimeDirective = new(1)
     {
         new
-        (StaticValues.ChatMessageRoles.System,
+        (ChatCompletionRole.System,
             "This is the Prime Directive: You are a chat bot running in [GPT-CLI](https://github.com/kainazzzo/GPT-CLI) on Discord.\n" +
             "\n" +
             "Architecture:\n" +
@@ -2861,7 +2890,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
             var description = !string.IsNullOrWhiteSpace(doc.Description) ? doc.Description : doc.Text;
             if (!string.IsNullOrWhiteSpace(description))
             {
-                messages.Add(new ChatMessage(StaticValues.ChatMessageRoles.System, $"Image context ({name}): {description}"));
+                messages.Add(new ChatMessage(ChatCompletionRole.System, $"Image context ({name}): {description}"));
             }
         }
 
@@ -3031,9 +3060,9 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 	            Model = visionModel,
             Messages = new List<ChatMessage>
             {
-                new(StaticValues.ChatMessageRoles.System,
+                new(ChatCompletionRole.System,
                     "You describe images for a Discord bot. Return only the description text. No markdown or code fences."),
-                new ChatMessage(StaticValues.ChatMessageRoles.User, contentItems)
+                new ChatMessage(ChatCompletionRole.User, contentItems)
             },
 	            Stream = false,
 	            Temperature = 0.2f,
@@ -3099,7 +3128,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 
         var messages = new List<ChatMessage>
         {
-            new(StaticValues.ChatMessageRoles.System,
+            new(ChatCompletionRole.System,
                 "You are a Discord bot with vision. Use the attached image(s) to answer. " +
                 "The platform will attach the image file(s) to your reply. Never claim you cannot show or attach them. " +
                 "Be concise. Never use triple backtick code fences unless explicitly asked.")
@@ -3187,7 +3216,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
             return (null, skipped, imageCount, totalBytes, prompt.Length);
         }
 
-        var chatMessage = new ChatMessage(StaticValues.ChatMessageRoles.User, contentItems);
+        var chatMessage = new ChatMessage(ChatCompletionRole.User, contentItems);
         return (chatMessage, skipped, imageCount, totalBytes, prompt.Length);
     }
 
@@ -3815,7 +3844,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
         if (channelState.Options.Enabled)
         {
             var chatBot = channelState.InstructionChat;
-            chatBot.AddInstruction(new ChatMessage(StaticValues.ChatMessageRoles.System, command.Message.Content));
+            chatBot.AddInstruction(new ChatMessage(ChatCompletionRole.System, command.Message.Content));
             await SaveCachedChannelState(command.Channel.Id);
 
             using var typingState = command.Channel.EnterTypingState();
@@ -4906,7 +4935,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
             return Task.FromResult(new GptCliExecutionResult(true, "Provide instruction text.", false));
         }
 
-        ctx.ChannelState.InstructionChat.AddInstruction(new ChatMessage(StaticValues.ChatMessageRoles.System, text.Trim()));
+        ctx.ChannelState.InstructionChat.AddInstruction(new ChatMessage(ChatCompletionRole.System, text.Trim()));
         return Task.FromResult(new GptCliExecutionResult(true, "Instruction added."));
     }
 

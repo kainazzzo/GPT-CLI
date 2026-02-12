@@ -10,8 +10,9 @@ using Discord;
 using Discord.Net;
 using Discord.WebSocket;
 using GPT.CLI.Embeddings;
-using OpenAI.ObjectModels;
-using OpenAI.ObjectModels.RequestModels;
+using Betalgo.Ranul.OpenAI.ObjectModels;
+using Betalgo.Ranul.OpenAI.ObjectModels.RequestModels;
+using Betalgo.Ranul.OpenAI.Contracts.Enums;
 
 namespace GPT.CLI.Chat.Discord.Modules;
 
@@ -674,12 +675,12 @@ public sealed class InfobotModule : FeatureModuleBase
 
         var messages = new List<ChatMessage>
         {
-            new(StaticValues.ChatMessageRoles.System,
+            new(ChatCompletionRole.System,
                 "Factoid context for the next message. Use these facts if relevant:")
         };
         foreach (var factoid in closestChannel)
         {
-            messages.Add(new ChatMessage(StaticValues.ChatMessageRoles.System,
+            messages.Add(new ChatMessage(ChatCompletionRole.System,
                 $"---factoid---\r\n{factoid.Text}\r\n--end factoid---"));
         }
 
@@ -830,8 +831,8 @@ public sealed class InfobotModule : FeatureModuleBase
             Model = channel.InstructionChat.ChatBotState.Parameters.Model,
             Messages = new List<ChatMessage>
             {
-                new(StaticValues.ChatMessageRoles.System, systemPrompt),
-                new(StaticValues.ChatMessageRoles.User, prompt)
+                new(ChatCompletionRole.System, systemPrompt),
+                new(ChatCompletionRole.User, prompt)
             }
         };
 

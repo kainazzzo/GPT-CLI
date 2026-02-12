@@ -1,7 +1,7 @@
 using Discord;
 using Discord.WebSocket;
 using GPT.CLI.Chat.Discord.Commands;
-using OpenAI.ObjectModels.RequestModels;
+using Betalgo.Ranul.OpenAI.ObjectModels.RequestModels;
 
 namespace GPT.CLI.Chat.Discord.Modules;
 

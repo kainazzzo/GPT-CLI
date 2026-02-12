@@ -1,7 +1,8 @@
 ﻿using System.Text.Json.Serialization;
-using OpenAI.ObjectModels;
-using OpenAI.ObjectModels.RequestModels;
-using OpenAI.ObjectModels.ResponseModels;
+using Betalgo.Ranul.OpenAI.ObjectModels;
+using Betalgo.Ranul.OpenAI.ObjectModels.RequestModels;
+using Betalgo.Ranul.OpenAI.Contracts.Enums;
+using Betalgo.Ranul.OpenAI.ObjectModels.ResponseModels;
 
 namespace GPT.CLI.Chat;
 
@@ -22,7 +23,7 @@ public class InstructionChatBot
         public uint MessageLength { get; set; }
 
         [JsonPropertyName("prime-directives")]
-        public List<ChatMessage> PrimeDirectives { get; set; } = new() {new(StaticValues.ChatMessageRoles.System,
+        public List<ChatMessage> PrimeDirectives { get; set; } = new() {new(ChatCompletionRole.System,
             "Your Prime Directive: This is a chat bot running in [GPT-CLI](https://github.com/kainazzzo/GPT-CLI). Analyze and understand these instructions and apply them strictly to the response message:")};
 
         [JsonPropertyName("response-mode")]
@@ -117,10 +118,10 @@ public class InstructionChatBot
     public async IAsyncEnumerable<ChatCompletionCreateResponse> GetResponseAsync(IEnumerable<ChatMessage> additionalMessages)
     {
         // Consolidate prime directives into a single ChatMessage
-        var primeDirectiveMessage = new ChatMessage(StaticValues.ChatMessageRoles.System, $"Prime Directive: {PrimeDirectiveStr}");
+        var primeDirectiveMessage = new ChatMessage(ChatCompletionRole.System, $"Prime Directive: {PrimeDirectiveStr}");
 
         // Consolidate ChatBotState.Instructions into a single ChatMessage
-        var instructionMessage = new ChatMessage(StaticValues.ChatMessageRoles.System, $"Instructions: {InstructionStr}");
+        var instructionMessage = new ChatMessage(ChatCompletionRole.System, $"Instructions: {InstructionStr}");
 
         var messages = new List<ChatMessage> { primeDirectiveMessage, instructionMessage };
         messages.AddRange(ChatBotState.Messages);

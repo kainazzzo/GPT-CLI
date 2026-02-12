@@ -1,7 +1,8 @@
 ﻿using System.Text.Json;
 using GPT.CLI.Embeddings;
-using OpenAI.ObjectModels;
-using OpenAI.ObjectModels.RequestModels;
+using Betalgo.Ranul.OpenAI.ObjectModels;
+using Betalgo.Ranul.OpenAI.ObjectModels.RequestModels;
+using Betalgo.Ranul.OpenAI.Contracts.Enums;
 
 namespace GPT.CLI;
 
@@ -29,7 +30,7 @@ public static class ParameterMapping
                 {
                     foreach (var closestDocument in closestDocuments)
                     {
-                        request.Messages.Add(new(StaticValues.ChatMessageRoles.User,
+                        request.Messages.Add(new(ChatCompletionRole.User,
                             $"Context for the next message: {closestDocument.Document.Text}"));
                     }
                 }
@@ -79,18 +80,18 @@ public static class ParameterMapping
         {
             Messages = new List<ChatMessage>()
             {
-                new(StaticValues.ChatMessageRoles.System,
+                new(ChatCompletionRole.System,
                     "You will receive two messages from the user. The first message will be text for you to parse and understand. The next message will be a prompt describing how you should proceed. You will read through the text or code in the first message, understand it, and then apply the prompt in the second message, with the first message as your main context. Your final message after the prompt should only be the result of the prompt applied to the input text with no preamble."),
-                new(StaticValues.ChatMessageRoles.Assistant,
+                new(ChatCompletionRole.Assistant,
                     "Sure. I will read through the first message and understand it. Then I'll wait for another message containing the prompt. After I apply the prompt to the original text, my final response will be the result of applying the prompt to my understanding of the input text."),
-                new(StaticValues.ChatMessageRoles.User, input),
-                new(StaticValues.ChatMessageRoles.Assistant,
+                new(ChatCompletionRole.User, input),
+                new(ChatCompletionRole.Assistant,
                     "Thank you. Now I will wait for the prompt and then apply it in context.")
             }
         }, Mode.Completion);
 
         // This is placed here so the MapCommon method can add contextual embeddings before the prompt
-        request.Messages.Add(new(StaticValues.ChatMessageRoles.User, parameters.Prompt));
+        request.Messages.Add(new(ChatCompletionRole.User, parameters.Prompt));
 
         return request;
 
@@ -104,7 +105,7 @@ public static class ParameterMapping
             Messages = new List<ChatMessage>()
         }, Mode.Completion);
 
-        request.Messages.Add(new(StaticValues.ChatMessageRoles.System, parameters.Prompt));
+        request.Messages.Add(new(ChatCompletionRole.System, parameters.Prompt));
 
         return request;
     }

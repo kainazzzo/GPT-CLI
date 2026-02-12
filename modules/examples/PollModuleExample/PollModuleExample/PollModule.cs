@@ -4,8 +4,9 @@ using Discord;
 using Discord.WebSocket;
 using GPT.CLI.Chat.Discord;
 using GPT.CLI.Chat.Discord.Modules;
-using OpenAI.ObjectModels;
-using OpenAI.ObjectModels.RequestModels;
+using Betalgo.Ranul.OpenAI.ObjectModels;
+using Betalgo.Ranul.OpenAI.ObjectModels.RequestModels;
+using Betalgo.Ranul.OpenAI.Contracts.Enums;
 
 namespace PollModuleExample;
 
@@ -478,8 +479,8 @@ public sealed class PollModule : FeatureModuleBase
         var prompt = BuildResultPrompt(result);
         var additionalMessages = new List<ChatMessage>
         {
-            new(StaticValues.ChatMessageRoles.System, PollSystemPrompt),
-            new(StaticValues.ChatMessageRoles.User, prompt)
+            new(ChatCompletionRole.System, PollSystemPrompt),
+            new(ChatCompletionRole.User, prompt)
         };
 
         var sb = new StringBuilder();

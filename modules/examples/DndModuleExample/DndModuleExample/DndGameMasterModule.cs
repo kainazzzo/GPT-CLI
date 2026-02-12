@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -9,10 +10,11 @@ using GPT.CLI.Chat.Discord;
 using GPT.CLI.Chat.Discord.Commands;
 using GPT.CLI.Chat.Discord.Modules;
 using GPT.CLI.Chat.Dnd;
-using OpenAI.ObjectModels;
-using OpenAI.ObjectModels.RequestModels;
-using OpenAI.ObjectModels.ResponseModels;
-using OpenAI.ObjectModels.SharedModels;
+using Betalgo.Ranul.OpenAI.ObjectModels;
+using Betalgo.Ranul.OpenAI.ObjectModels.RequestModels;
+using Betalgo.Ranul.OpenAI.Contracts.Enums;
+using Betalgo.Ranul.OpenAI.ObjectModels.ResponseModels;
+using Betalgo.Ranul.OpenAI.ObjectModels.SharedModels;
 
 namespace DndModuleExample;
 
@@ -28,6 +30,21 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
     private const int DiscordMessageLimit = 1800;
     private const int MaxCampaignChars = 24000;
     private const int CampaignCreateTimeoutSeconds = 60;
+    private const int ResponsesLoopMaxRounds = 4;
+
+    private static readonly HttpClient ResponsesHttpClient = new();
+
+    private enum DndLogLevel
+    {
+        None = 0,
+        Error = 1,
+        Warning = 2,
+        Information = 3,
+        Debug = 4,
+        Trace = 5
+    }
+
+    private sealed record DndLogPolicy(DndLogLevel ConsoleMinLevel, DndLogLevel DiscordMinLevel);
 
     private static readonly Regex BotMentionRegexTemplate =
         new(@"<@!?(?<id>\d+)>", RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -947,7 +964,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             ParallelToolCalls = false,
             Messages = new List<ChatMessage>
             {
-                new(StaticValues.ChatMessageRoles.System, system)
+                new(ChatCompletionRole.System, system)
             },
             Tools = tools,
             ToolChoice = new ToolChoice { Type = "auto" }
@@ -971,7 +988,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             // ignore
         }
 
-        request.Messages.Add(new ChatMessage(StaticValues.ChatMessageRoles.User, userCtx.ToString().Trim()));
+        request.Messages.Add(new ChatMessage(ChatCompletionRole.User, userCtx.ToString().Trim()));
 
         ChatCompletionCreateResponse response;
         try
@@ -1043,11 +1060,12 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             return false;
         }
 
+        var msgText = ExtractChatMessageText(msg);
         try
         {
             var choice = response.Choices?.FirstOrDefault();
             var finish = choice?.FinishReason?.ToString() ?? "(null)";
-            var contentLen = msg.Content == null ? -1 : msg.Content.Length;
+            var contentLen = msgText == null ? -1 : msgText.Length;
             var toolCallCount = msg.ToolCalls?.Count ?? 0;
             var hasFnCall = msg.FunctionCall != null;
             Console.WriteLine($"[dnd] auto-route: llm response choices={(response.Choices?.Count ?? 0)} finish={finish} contentLen={contentLen} toolCalls={toolCallCount} functionCall={hasFnCall}");
@@ -1126,11 +1144,11 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 
             // In draft mode, allow the model to include a short GM note alongside the tool calls (e.g. next steps).
             if (string.Equals(mode, ModeDraft, StringComparison.OrdinalIgnoreCase) &&
-                !string.IsNullOrWhiteSpace(msg.Content))
+                !string.IsNullOrWhiteSpace(msgText))
             {
                 replyLines.Add(string.Empty);
                 replyLines.Add("GM:");
-                replyLines.Add(TrimToLimit(msg.Content.Trim(), 900));
+                replyLines.Add(TrimToLimit(msgText.Trim(), 900));
             }
 
             var reply = string.Join("\n", replyLines);
@@ -1144,7 +1162,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             return true;
         }
 
-        var content = msg.Content;
+        var content = msgText;
         if (string.IsNullOrWhiteSpace(content))
         {
             return false;
@@ -2332,18 +2350,32 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             Console.WriteLine(
                 $"[dnd] campaigncreate[{reqId}]: start campaign=\"{campaignName}\" promptLen={prompt.Trim().Length} pcRosterLen={(pcRosterContext ?? string.Empty).Length} (channel={ctx.Channel?.Id})");
 
-            var gen = await GenerateCampaignPackageAsync(ctx.Context, ctx.ChannelState, reqId, campaignName.Trim(), prompt.Trim(), pcRosterContext, ct);
+            async Task Progress(string text)
+                => await SendProgressUpdateAsync(ctx.Channel, text, ctx.Context);
+
+            await Progress($"Campaign generation started for \"{campaignName}\".");
+            var gen = await GenerateCampaignPackageAsync(
+                ctx.Context,
+                ctx.ChannelState,
+                reqId,
+                campaignName.Trim(),
+                prompt.Trim(),
+                pcRosterContext,
+                ct,
+                Progress);
             var pkg = gen?.Package;
             if (pkg == null)
             {
                 var reason = string.IsNullOrWhiteSpace(gen?.Error) ? "Unknown error." : gen.Error.Trim();
                 Console.WriteLine($"[dnd] campaigncreate[{reqId}]: generation failed model={gen?.Model} httpMs={gen?.HttpMs} err={reason}");
+                await Progress($"Campaign generation failed: {TrimToLimit(reason, 220)}");
                 return new GptCliExecutionResult(true, $"Campaign generation failed: {reason}", false);
             }
             if (string.IsNullOrWhiteSpace(pkg.CampaignMarkdown))
             {
                 Console.WriteLine(
                     $"[dnd] campaigncreate[{reqId}]: generation returned empty markdown model={gen?.Model} httpMs={gen?.HttpMs} encounters={(pkg.Encounters?.Count ?? 0)} fnCalls={(pkg.FunctionCalls?.Count ?? 0)}");
+                await Progress("Campaign generation failed: model returned empty markdown.");
                 return new GptCliExecutionResult(true, "Campaign generation failed: empty campaignMarkdown returned by OpenAI.", false);
             }
 
@@ -2423,6 +2455,8 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             {
                 summary += "\n\n" + BuildCampaignCreatePartySummary(npcsWritten, pcsWritten, pkg.UnassignedPcs);
             }
+            await Progress(
+                $"Campaign generation complete: templates={doc.EncounterTemplates?.Count ?? 0}, npcSheets={npcsWritten.Count}, pcSheets={pcsWritten.Count}.");
             Console.WriteLine(
                 $"[dnd] campaigncreate[{reqId}]: done campaign=\"{doc.CampaignName}\" templates={(doc.EncounterTemplates?.Count ?? 0)} npcs={npcsWritten.Count} pcs={pcsWritten.Count} unassigned={(pkg.UnassignedPcs?.Count ?? 0)}");
             return new GptCliExecutionResult(true, summary, true);
@@ -2460,11 +2494,6 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         {
             lockHandle.Release();
         }
-    }
-
-    private sealed class DraftUpdateResponseDto
-    {
-        public string CampaignMarkdown { get; set; }
     }
 
     private static string BuildDraftUpdatePrompt(string campaignName, string existingMarkdown, string modificationPrompt)
@@ -2529,83 +2558,32 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 
             using var typing = DiscordTyping.Begin(ctx.Channel);
 
-            var model = ResolveModel(ctx.Context, ctx.ChannelState);
             var requestPrompt = BuildDraftUpdatePrompt(campaignName, draft.CampaignMarkdown, prompt.Trim());
+            Console.WriteLine($"[dnd] draftupdate: campaign=\"{campaignName}\" existingLen={draft.CampaignMarkdown.Length} modLen={prompt.Trim().Length} promptLen={requestPrompt.Length}");
+            async Task Progress(string text)
+                => await SendProgressUpdateAsync(ctx.Channel, text, ctx.Context);
 
-            Console.WriteLine($"[dnd] draftupdate: campaign=\"{campaignName}\" model={model} existingLen={draft.CampaignMarkdown.Length} modLen={prompt.Trim().Length} promptLen={requestPrompt.Length}");
-            Console.WriteLine("[dnd] draftupdate: system=You are revising a D&D campaign draft. Return strict JSON only. No markdown. No code fences.");
-            Console.WriteLine($"[dnd] draftupdate: userPrompt={requestPrompt}");
-
-            var request = new ChatCompletionCreateRequest
+            await Progress($"Draft update started for \"{campaignName}\".");
+            var generated = await GenerateDraftUpdateMarkdownAsync(
+                ctx.Context,
+                ctx.ChannelState,
+                campaignName,
+                draft.CampaignMarkdown,
+                prompt.Trim(),
+                ct,
+                Progress);
+            if (!generated.Successful)
             {
-                Model = model,
-                Temperature = 0.2f,
-                MaxCompletionTokens = 2200,
-                Messages = new List<ChatMessage>
-                {
-                    new(StaticValues.ChatMessageRoles.System, "You are revising a D&D campaign draft. Return strict JSON only. No markdown. No code fences."),
-                    new(StaticValues.ChatMessageRoles.User, requestPrompt)
-                }
-            };
-
-            ChatCompletionCreateResponse response;
-            try
-            {
-                response = await ctx.Context.OpenAILogic.CreateChatCompletionAsync(request);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[dnd] draftupdate: llm exception {ex.GetType().Name} {ex.Message}");
-                return new GptCliExecutionResult(true, $"Draft update failed: {ex.GetType().Name} {ex.Message}", false);
+                Console.WriteLine($"[dnd] draftupdate: generation failed err={generated.Error}");
+                await Progress($"Draft update failed: {TrimToLimit(generated.Error, 220)}");
+                return new GptCliExecutionResult(true, $"Draft update failed: {generated.Error}", false);
             }
 
-            if (!response.Successful)
-            {
-                var err = $"{response.Error?.Code} {response.Error?.Message}".Trim();
-                Console.WriteLine($"[dnd] draftupdate: llm unsuccessful {err}");
-                return new GptCliExecutionResult(true, $"Draft update failed: {err}", false);
-            }
-
-            var content = response.Choices?.FirstOrDefault()?.Message?.Content?.Trim();
-            if (string.IsNullOrWhiteSpace(content))
-            {
-                Console.WriteLine("[dnd] draftupdate: empty content");
-                try
-                {
-                    var choice = response.Choices?.FirstOrDefault();
-                    var dumped = JsonSerializer.Serialize(choice, _jsonOptions);
-                    Console.WriteLine($"[dnd] draftupdate: choiceDump={dumped}");
-                }
-                catch
-                {
-                    // ignore
-                }
-                return new GptCliExecutionResult(true, "Draft update failed: empty response content from OpenAI.", false);
-            }
-
-            var json = ExtractJsonObject(content);
-            if (string.IsNullOrWhiteSpace(json))
-            {
-                Console.WriteLine($"[dnd] draftupdate: non-json content={content}");
-                return new GptCliExecutionResult(true, "Draft update failed: OpenAI returned non-JSON content.", false);
-            }
-
-            DraftUpdateResponseDto parsed;
-            try
-            {
-                parsed = JsonSerializer.Deserialize<DraftUpdateResponseDto>(json, _jsonOptions);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[dnd] draftupdate: json parse exception {ex.GetType().Name} {ex.Message} json={json}");
-                return new GptCliExecutionResult(true, $"Draft update failed: {ex.GetType().Name} {ex.Message}", false);
-            }
-
-            var updated = parsed?.CampaignMarkdown?.Trim();
+            var updated = generated.CampaignMarkdown?.Trim();
             if (string.IsNullOrWhiteSpace(updated))
             {
-                Console.WriteLine($"[dnd] draftupdate: missing campaignMarkdown json={json}");
-                return new GptCliExecutionResult(true, "Draft update failed: JSON missing campaignMarkdown.", false);
+                Console.WriteLine("[dnd] draftupdate: missing campaignMarkdown from responses loop");
+                return new GptCliExecutionResult(true, "Draft update failed: no campaign markdown produced.", false);
             }
 
             draft.CampaignMarkdown = TrimToLimit(updated, MaxCampaignChars);
@@ -2622,6 +2600,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 
             st.ActiveCampaignName = draft.CampaignName;
             await SaveStateAsync(ctx.ChannelState, st, ct);
+            await Progress("Draft update complete.");
 
             var sb = new StringBuilder();
             sb.AppendLine($"Draft updated for \"{draft.CampaignName}\".");
@@ -3456,15 +3435,21 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             }
 
             using var typing = DiscordTyping.Begin(ctx.Channel);
+            async Task Progress(string text)
+                => await SendProgressUpdateAsync(ctx.Channel, text, ctx.Context);
+
+            await Progress($"Character generation started for \"{name.Trim()}\".");
             var created = await GenerateCharacterAsync(
                 ctx.Context,
                 ctx.ChannelState,
                 name.Trim(),
                 concept.Trim(),
                 (campaign?.CampaignMarkdown ?? draft?.CampaignMarkdown),
-                ct);
+                ct,
+                Progress);
             if (created == null || created.Stats == null || created.MaxHp <= 0)
             {
+                await Progress("Character generation failed.");
                 return new GptCliExecutionResult(true, "Character generation failed.", false);
             }
 
@@ -3612,15 +3597,21 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             }
 
             using var typing = DiscordTyping.Begin(ctx.Channel);
+            async Task Progress(string text)
+                => await SendProgressUpdateAsync(ctx.Channel, text, ctx.Context);
+
+            await Progress($"NPC generation started for \"{name.Trim()}\".");
             var created = await GenerateCharacterAsync(
                 ctx.Context,
                 ctx.ChannelState,
                 name.Trim(),
                 concept.Trim(),
                 (campaign?.CampaignMarkdown ?? draft?.CampaignMarkdown),
-                ct);
+                ct,
+                Progress);
             if (created == null || created.Stats == null || created.MaxHp <= 0)
             {
+                await Progress("NPC generation failed.");
                 return new GptCliExecutionResult(true, "NPC generation failed.", false);
             }
 
@@ -4715,9 +4706,9 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             MaxCompletionTokens = 700,
             Messages = new List<ChatMessage>
             {
-                new(StaticValues.ChatMessageRoles.System, system),
-                new(StaticValues.ChatMessageRoles.User, sb.ToString().Trim()),
-                new(StaticValues.ChatMessageRoles.User, $"User question: {text}")
+                new(ChatCompletionRole.System, system),
+                new(ChatCompletionRole.User, sb.ToString().Trim()),
+                new(ChatCompletionRole.User, $"User question: {text}")
             }
         };
 
@@ -4747,7 +4738,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             return true;
         }
 
-        var content = response.Choices?.FirstOrDefault()?.Message?.Content;
+        var content = ExtractChatMessageText(response.Choices?.FirstOrDefault()?.Message);
         if (string.IsNullOrWhiteSpace(content))
         {
             return true;
@@ -4799,8 +4790,8 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 ParallelToolCalls = false,
                 Messages = new List<ChatMessage>
                 {
-                    new(StaticValues.ChatMessageRoles.System, system),
-                    new(StaticValues.ChatMessageRoles.User, user.ToString())
+                    new(ChatCompletionRole.System, system),
+                    new(ChatCompletionRole.User, user.ToString())
                 },
                 Tools = tools,
                 ToolChoice = new ToolChoice { Type = "auto" }
@@ -6168,6 +6159,891 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
     }
 
     private sealed record CampaignGenerateResult(CampaignCreateResponseDto Package, string Error, int HttpMs, string Model);
+    private sealed record DraftUpdateGenerateResult(bool Successful, string Error, string CampaignMarkdown);
+    private sealed record ResponsesToolCall(string CallId, string Name, string ArgumentsJson, string Status, bool IsIncomplete);
+    private sealed record ResponsesApiResult(bool Successful, string Error, int HttpMs, string ResponseId, string OutputText, List<ResponsesToolCall> ToolCalls, string RawJson);
+    private sealed record ResponsesLoopResult(bool Successful, string Error, int HttpMs, string OutputText, int Rounds);
+
+    private sealed class CampaignStageOneAccumulator
+    {
+        public string CampaignMarkdown { get; set; }
+        public List<EncounterTemplateDto> Encounters { get; } = new();
+        public bool Finalized { get; set; }
+        public int CampaignMarkdownSetCalls { get; set; }
+    }
+
+    private sealed class CampaignStageTwoAccumulator
+    {
+        public List<DndLiteFunctionCallDto> FunctionCalls { get; } = new();
+        public List<UnassignedPcDto> UnassignedPcs { get; } = new();
+        public HashSet<string> NpcIds { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public HashSet<string> PcActorIds { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public HashSet<string> UnassignedNames { get; } = new(StringComparer.OrdinalIgnoreCase);
+        public bool Finalized { get; set; }
+    }
+
+    private sealed class CharacterSheetAccumulator
+    {
+        public CharacterCreateResponseDto Sheet { get; set; }
+        public bool Finalized { get; set; }
+    }
+
+    private static string ResolveCampaignBootstrapModel(DiscordModuleContext context, InstructionGPT.ChannelState channelState)
+    {
+        // Responses-based campaign generation should use the primary text model, not the vision model.
+        // Some saved channel states still carry older vision defaults (e.g. gpt-5.2-nano) that are invalid.
+        var model = ResolveModel(context, channelState);
+        return string.IsNullOrWhiteSpace(model) ? "gpt-5.2" : model.Trim();
+    }
+
+    private static string ResolveResponsesApiKey(DiscordModuleContext context, InstructionGPT.ChannelState channelState)
+    {
+        var key = context?.DefaultParameters?.ApiKey;
+        if (!string.IsNullOrWhiteSpace(key))
+        {
+            return key.Trim();
+        }
+
+        return context?.Configuration?["OpenAI:ApiKey"]?.Trim();
+    }
+
+    private static string ResolveResponsesEndpoint(DiscordModuleContext context, InstructionGPT.ChannelState channelState)
+    {
+        var baseDomain = context?.DefaultParameters?.BaseDomain;
+        if (string.IsNullOrWhiteSpace(baseDomain))
+        {
+            baseDomain = context?.Configuration?["OpenAI:BaseDomain"];
+        }
+
+        if (string.IsNullOrWhiteSpace(baseDomain))
+        {
+            return "https://api.openai.com/v1/responses";
+        }
+
+        var trimmed = baseDomain.Trim().TrimEnd('/');
+        if (trimmed.EndsWith("/v1/responses", StringComparison.OrdinalIgnoreCase))
+        {
+            return trimmed;
+        }
+        if (trimmed.EndsWith("/v1", StringComparison.OrdinalIgnoreCase))
+        {
+            return $"{trimmed}/responses";
+        }
+        return $"{trimmed}/v1/responses";
+    }
+
+    private static bool TryGetPropertyIgnoreCase(JsonElement obj, string propertyName, out JsonElement value)
+    {
+        if (obj.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var p in obj.EnumerateObject())
+            {
+                if (string.Equals(p.Name, propertyName, StringComparison.OrdinalIgnoreCase))
+                {
+                    value = p.Value;
+                    return true;
+                }
+            }
+        }
+
+        value = default;
+        return false;
+    }
+
+    private static bool TryParseJsonElement(string json, out JsonElement root)
+    {
+        root = default;
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return false;
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            root = doc.RootElement.Clone();
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static string ExtractResponsesError(string rawJson)
+    {
+        if (!TryParseJsonElement(rawJson, out var root))
+        {
+            return null;
+        }
+
+        if (TryGetPropertyIgnoreCase(root, "error", out var err))
+        {
+            if (TryGetPropertyIgnoreCase(err, "message", out var msgEl) && msgEl.ValueKind == JsonValueKind.String)
+            {
+                var msg = msgEl.GetString();
+                if (!string.IsNullOrWhiteSpace(msg))
+                {
+                    var code = TryGetPropertyIgnoreCase(err, "code", out var codeEl) && codeEl.ValueKind == JsonValueKind.String
+                        ? codeEl.GetString()
+                        : null;
+                    return string.IsNullOrWhiteSpace(code) ? msg.Trim() : $"{code}: {msg.Trim()}";
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static List<ResponsesToolCall> ExtractResponsesToolCalls(JsonElement root)
+    {
+        var calls = new List<ResponsesToolCall>();
+        if (!TryGetPropertyIgnoreCase(root, "output", out var output) || output.ValueKind != JsonValueKind.Array)
+        {
+            return calls;
+        }
+
+        foreach (var item in output.EnumerateArray())
+        {
+            if (!TryGetPropertyIgnoreCase(item, "type", out var typeEl) || typeEl.ValueKind != JsonValueKind.String)
+            {
+                continue;
+            }
+
+            if (!string.Equals(typeEl.GetString(), "function_call", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            string callId = null;
+            if (TryGetPropertyIgnoreCase(item, "call_id", out var callIdEl) && callIdEl.ValueKind == JsonValueKind.String)
+            {
+                callId = callIdEl.GetString();
+            }
+            if (string.IsNullOrWhiteSpace(callId) &&
+                TryGetPropertyIgnoreCase(item, "id", out var idEl) && idEl.ValueKind == JsonValueKind.String)
+            {
+                callId = idEl.GetString();
+            }
+
+            string name = null;
+            if (TryGetPropertyIgnoreCase(item, "name", out var nameEl) && nameEl.ValueKind == JsonValueKind.String)
+            {
+                name = nameEl.GetString();
+            }
+
+            string status = null;
+            if (TryGetPropertyIgnoreCase(item, "status", out var statusEl) && statusEl.ValueKind == JsonValueKind.String)
+            {
+                status = statusEl.GetString()?.Trim();
+            }
+
+            string arguments = "{}";
+            if (TryGetPropertyIgnoreCase(item, "arguments", out var argsEl))
+            {
+                arguments = argsEl.ValueKind == JsonValueKind.String ? argsEl.GetString() : argsEl.GetRawText();
+            }
+
+            if (!string.IsNullOrWhiteSpace(name))
+            {
+                var isIncomplete = string.Equals(status, "incomplete", StringComparison.OrdinalIgnoreCase);
+                calls.Add(new ResponsesToolCall(
+                    callId ?? string.Empty,
+                    name.Trim(),
+                    string.IsNullOrWhiteSpace(arguments) ? "{}" : arguments,
+                    status ?? string.Empty,
+                    isIncomplete));
+            }
+        }
+
+        return calls;
+    }
+
+    private static string ExtractResponsesOutputText(JsonElement root)
+    {
+        if (TryGetPropertyIgnoreCase(root, "output_text", out var outputTextEl) && outputTextEl.ValueKind == JsonValueKind.String)
+        {
+            var direct = outputTextEl.GetString();
+            if (!string.IsNullOrWhiteSpace(direct))
+            {
+                return direct.Trim();
+            }
+        }
+
+        if (!TryGetPropertyIgnoreCase(root, "output", out var output) || output.ValueKind != JsonValueKind.Array)
+        {
+            return null;
+        }
+
+        var chunks = new List<string>();
+        foreach (var item in output.EnumerateArray())
+        {
+            if (!TryGetPropertyIgnoreCase(item, "type", out var typeEl) || typeEl.ValueKind != JsonValueKind.String)
+            {
+                continue;
+            }
+
+            var type = typeEl.GetString();
+            if (string.Equals(type, "message", StringComparison.OrdinalIgnoreCase) &&
+                TryGetPropertyIgnoreCase(item, "content", out var contentEl) &&
+                contentEl.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var part in contentEl.EnumerateArray())
+                {
+                    if (!TryGetPropertyIgnoreCase(part, "type", out var partTypeEl) || partTypeEl.ValueKind != JsonValueKind.String)
+                    {
+                        continue;
+                    }
+
+                    if (!string.Equals(partTypeEl.GetString(), "output_text", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
+                    if (TryGetPropertyIgnoreCase(part, "text", out var textEl) && textEl.ValueKind == JsonValueKind.String)
+                    {
+                        var t = textEl.GetString();
+                        if (!string.IsNullOrWhiteSpace(t))
+                        {
+                            chunks.Add(t.Trim());
+                        }
+                    }
+                }
+            }
+        }
+
+        return chunks.Count == 0 ? null : string.Join("\n", chunks);
+    }
+
+    private async Task<ResponsesApiResult> ExecuteResponsesRequestAsync(
+        DiscordModuleContext context,
+        InstructionGPT.ChannelState channelState,
+        string requestId,
+        string operation,
+        object requestBody,
+        int timeoutSeconds,
+        CancellationToken ct,
+        Func<string, Task> progress = null,
+        DndLogPolicy logPolicy = null)
+    {
+        logPolicy ??= ResolveDndLogPolicy(context);
+        var endpoint = ResolveResponsesEndpoint(context, channelState);
+        var apiKey = ResolveResponsesApiKey(context, channelState);
+        var opLabel = DescribeResponsesOperation(operation);
+        if (string.IsNullOrWhiteSpace(apiKey))
+        {
+            return new ResponsesApiResult(false, "Missing OpenAI API key.", 0, null, null, new List<ResponsesToolCall>(), null);
+        }
+
+        var requestJson = JsonSerializer.Serialize(requestBody);
+        var sw = Stopwatch.StartNew();
+        try
+        {
+            using var req = new HttpRequestMessage(HttpMethod.Post, endpoint)
+            {
+                Content = new StringContent(requestJson, Encoding.UTF8, "application/json")
+            };
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+            req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeoutCts.CancelAfter(TimeSpan.FromSeconds(Math.Max(5, timeoutSeconds)));
+
+            await EmitResponsesTraceAsync(requestId, operation, logPolicy, DndLogLevel.Information, $"{opLabel}: endpoint={endpoint} timeout={timeoutSeconds}s bodyLen={requestJson.Length}", progress);
+            await EmitResponsesTraceAsync(requestId, operation, logPolicy, DndLogLevel.Debug, $"{opLabel}: request-json={NormalizeJsonForTrace(requestJson)}", progress);
+
+            using var resp = await ResponsesHttpClient.SendAsync(req, timeoutCts.Token);
+            var raw = await resp.Content.ReadAsStringAsync(timeoutCts.Token);
+            sw.Stop();
+            await EmitResponsesTraceAsync(requestId, operation, logPolicy, DndLogLevel.Debug, $"{opLabel}: response-json={NormalizeJsonForTrace(raw)}", progress);
+
+            if (!resp.IsSuccessStatusCode)
+            {
+                var err = ExtractResponsesError(raw) ?? $"{(int)resp.StatusCode} {resp.ReasonPhrase}".Trim();
+                await EmitResponsesTraceAsync(requestId, operation, logPolicy, DndLogLevel.Error, $"{opLabel}: http={(int)resp.StatusCode} ms={sw.ElapsedMilliseconds} err={err}", progress);
+                return new ResponsesApiResult(false, err, (int)sw.ElapsedMilliseconds, null, null, new List<ResponsesToolCall>(), raw);
+            }
+
+            if (!TryParseJsonElement(raw, out var root))
+            {
+                await EmitResponsesTraceAsync(requestId, operation, logPolicy, DndLogLevel.Error, $"{opLabel}: ms={sw.ElapsedMilliseconds} parse=invalid-json", progress);
+                return new ResponsesApiResult(false, "Invalid JSON response from OpenAI Responses API.", (int)sw.ElapsedMilliseconds, null, null, new List<ResponsesToolCall>(), raw);
+            }
+
+            var responseId = TryGetPropertyIgnoreCase(root, "id", out var idEl) && idEl.ValueKind == JsonValueKind.String
+                ? idEl.GetString()
+                : null;
+            var toolCalls = ExtractResponsesToolCalls(root);
+            var outputText = ExtractResponsesOutputText(root);
+            await EmitResponsesTraceAsync(requestId, operation, logPolicy, DndLogLevel.Information, $"{opLabel}: ms={sw.ElapsedMilliseconds} responseId={responseId} toolCalls={toolCalls.Count} textLen={(outputText?.Length ?? 0)}", progress);
+            return new ResponsesApiResult(true, null, (int)sw.ElapsedMilliseconds, responseId, outputText, toolCalls, raw);
+        }
+        catch (OperationCanceledException)
+        {
+            sw.Stop();
+            var err = ct.IsCancellationRequested ? "Canceled." : $"Timed out after {timeoutSeconds}s.";
+            await EmitResponsesTraceAsync(requestId, operation, logPolicy, DndLogLevel.Error, $"{opLabel}: ms={sw.ElapsedMilliseconds} timeout=true", progress);
+            return new ResponsesApiResult(false, err, (int)sw.ElapsedMilliseconds, null, null, new List<ResponsesToolCall>(), null);
+        }
+        catch (Exception ex)
+        {
+            sw.Stop();
+            await EmitResponsesTraceAsync(requestId, operation, logPolicy, DndLogLevel.Error, $"{opLabel}: ms={sw.ElapsedMilliseconds} ex={ex.GetType().Name} msg={ex.Message}", progress);
+            return new ResponsesApiResult(false, $"{ex.GetType().Name}: {ex.Message}", (int)sw.ElapsedMilliseconds, null, null, new List<ResponsesToolCall>(), null);
+        }
+    }
+
+    private static Dictionary<string, object> BuildResponsesFunctionTool(string name, string description, Dictionary<string, object> parameters, bool strict = true)
+    {
+        // Responses strict tool schemas require object nodes to explicitly set additionalProperties=false.
+        // Normalize nested schema nodes so hand-authored schemas don't fail validation.
+        if (strict)
+        {
+            NormalizeStrictSchema(parameters);
+        }
+        return new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["type"] = "function",
+            ["name"] = name,
+            ["description"] = description,
+            ["parameters"] = parameters,
+            ["strict"] = strict
+        };
+    }
+
+    private static void NormalizeStrictSchema(object schemaNode)
+    {
+        if (schemaNode is IDictionary<string, object> map)
+        {
+            var isObjectSchema = false;
+            IDictionary<string, object> propsMap = null;
+            if (TryGetMapValueIgnoreCase(map, "type", out var typeObj) &&
+                typeObj is string typeStr &&
+                string.Equals(typeStr, "object", StringComparison.OrdinalIgnoreCase))
+            {
+                isObjectSchema = true;
+            }
+
+            if (TryGetMapValueIgnoreCase(map, "properties", out var propsObj) &&
+                propsObj is IDictionary<string, object> existingProps)
+            {
+                isObjectSchema = true;
+                propsMap = existingProps;
+                foreach (var property in propsMap.Values)
+                {
+                    NormalizeStrictSchema(property);
+                }
+            }
+
+            if (isObjectSchema)
+            {
+                propsMap ??= new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+                map["properties"] = propsMap;
+
+                // Strict function schemas expect `required` to exactly mirror property keys.
+                // Derive it from `properties` to avoid drift between hand-edited definitions and validator rules.
+                map["required"] = propsMap.Keys.ToArray();
+                map["additionalProperties"] = false;
+            }
+
+            if (TryGetMapValueIgnoreCase(map, "items", out var itemsObj))
+            {
+                NormalizeStrictSchema(itemsObj);
+            }
+
+            if (TryGetMapValueIgnoreCase(map, "oneOf", out var oneOf))
+            {
+                NormalizeStrictSchema(oneOf);
+            }
+
+            if (TryGetMapValueIgnoreCase(map, "anyOf", out var anyOf))
+            {
+                NormalizeStrictSchema(anyOf);
+            }
+
+            if (TryGetMapValueIgnoreCase(map, "allOf", out var allOf))
+            {
+                NormalizeStrictSchema(allOf);
+            }
+
+            return;
+        }
+
+        if (schemaNode is IEnumerable<object> list)
+        {
+            foreach (var item in list)
+            {
+                NormalizeStrictSchema(item);
+            }
+        }
+    }
+
+    private static bool TryGetMapValueIgnoreCase(IDictionary<string, object> map, string key, out object value)
+    {
+        foreach (var pair in map)
+        {
+            if (string.Equals(pair.Key, key, StringComparison.OrdinalIgnoreCase))
+            {
+                value = pair.Value;
+                return true;
+            }
+        }
+
+        value = null;
+        return false;
+    }
+
+    private static List<Dictionary<string, object>> BuildResponsesInput(string systemPrompt, string userPrompt)
+        => new()
+        {
+            new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["role"] = "system",
+                ["content"] = new List<Dictionary<string, object>>
+                {
+                    new(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["type"] = "input_text",
+                        ["text"] = systemPrompt
+                    }
+                }
+            },
+            new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["role"] = "user",
+                ["content"] = new List<Dictionary<string, object>>
+                {
+                    new(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["type"] = "input_text",
+                        ["text"] = userPrompt
+                    }
+                }
+            }
+        };
+
+    private static string DescribeResponsesOperation(string operation)
+    {
+        var raw = operation?.Trim() ?? string.Empty;
+        var colon = raw.IndexOf(':');
+        var key = (colon >= 0 ? raw[..colon] : raw).Trim().ToLowerInvariant();
+        return key switch
+        {
+            "campaign-stage1" => "Stage 1 - Campaign Foundation",
+            "campaign-stage1-recovery" => "Stage 1 Recovery - Encounter Templates",
+            "campaign-stage2" => "Stage 2 - Party and Sheets",
+            "draft-update" => "Draft Revision",
+            "character-create" => "Sheet Generation",
+            _ => string.IsNullOrWhiteSpace(operation) ? "Responses Stage" : operation.Trim()
+        };
+    }
+
+    private static DndLogPolicy ResolveDndLogPolicy(DiscordModuleContext context)
+    {
+        var cfg = context?.Configuration;
+        var minLevelRaw = cfg?["Discord:Modules:Dnd:Logging:MinLevel"];
+        var consoleMinRaw = cfg?["Discord:Modules:Dnd:Logging:ConsoleMinLevel"];
+        var discordMinRaw = cfg?["Discord:Modules:Dnd:Logging:DiscordMinLevel"];
+
+        var globalMin = ParseDndLogLevel(minLevelRaw, DndLogLevel.Information);
+        var consoleMin = ParseDndLogLevel(consoleMinRaw, globalMin);
+        var discordMin = ParseDndLogLevel(discordMinRaw, globalMin);
+        return new DndLogPolicy(consoleMin, discordMin);
+    }
+
+    private static DndLogLevel ParseDndLogLevel(string raw, DndLogLevel defaultLevel)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return defaultLevel;
+        }
+
+        var s = raw.Trim().ToLowerInvariant();
+        return s switch
+        {
+            "none" or "off" or "silent" => DndLogLevel.None,
+            "error" => DndLogLevel.Error,
+            "warn" or "warning" => DndLogLevel.Warning,
+            "info" or "information" => DndLogLevel.Information,
+            "debug" => DndLogLevel.Debug,
+            "trace" => DndLogLevel.Trace,
+            _ => defaultLevel
+        };
+    }
+
+    private static bool ShouldLog(DndLogLevel messageLevel, DndLogLevel minLevel)
+        => minLevel != DndLogLevel.None && messageLevel <= minLevel;
+
+    private static async Task EmitResponsesTraceAsync(
+        string requestId,
+        string operation,
+        DndLogPolicy policy,
+        DndLogLevel level,
+        string message,
+        Func<string, Task> progress = null)
+    {
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            return;
+        }
+
+        policy ??= new DndLogPolicy(DndLogLevel.Information, DndLogLevel.Information);
+        var text = message.Trim();
+        if (ShouldLog(level, policy.ConsoleMinLevel))
+        {
+            Console.WriteLine($"[dnd] responses[{requestId}]: op={operation} [{level}] {text}");
+        }
+
+        if (progress == null || !ShouldLog(level, policy.DiscordMinLevel))
+        {
+            return;
+        }
+
+        try
+        {
+            await progress(text);
+        }
+        catch
+        {
+            // Trace messaging should not break generation.
+        }
+    }
+
+    private async Task<ResponsesLoopResult> RunResponsesToolLoopAsync(
+        DiscordModuleContext context,
+        InstructionGPT.ChannelState channelState,
+        string requestId,
+        string operation,
+        string model,
+        string systemPrompt,
+        string userPrompt,
+        IReadOnlyList<Dictionary<string, object>> tools,
+        Func<ResponsesToolCall, string> onToolCall,
+        Func<bool> isComplete,
+        int maxOutputTokens,
+        int timeoutSeconds,
+        CancellationToken ct,
+        bool allowNoToolCallsTerminal = false,
+        Func<string, Task> progress = null)
+    {
+        var logPolicy = ResolveDndLogPolicy(context);
+        Task EmitProgressAsync(string message, DndLogLevel level = DndLogLevel.Information)
+            => EmitResponsesTraceAsync(requestId, operation, logPolicy, level, message, progress);
+
+        var operationLabel = DescribeResponsesOperation(operation);
+
+        string previousResponseId = null;
+        object input = BuildResponsesInput(systemPrompt, userPrompt);
+        var totalMs = 0;
+        var lastToolCallNames = string.Empty;
+        var lastToolCallDetail = string.Empty;
+        var lastOutputText = string.Empty;
+
+        for (var round = 1; round <= ResponsesLoopMaxRounds; round++)
+        {
+            await EmitProgressAsync($"{operationLabel}: round {round}/{ResponsesLoopMaxRounds} started.");
+
+            var body = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["model"] = model,
+                ["input"] = input,
+                ["tools"] = tools,
+                ["tool_choice"] = "auto",
+                ["parallel_tool_calls"] = false,
+                ["max_output_tokens"] = Math.Max(200, maxOutputTokens),
+                ["reasoning"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["effort"] = "low"
+                },
+                ["text"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["verbosity"] = "low"
+                }
+            };
+            if (!string.IsNullOrWhiteSpace(previousResponseId))
+            {
+                body["previous_response_id"] = previousResponseId;
+            }
+
+            var resp = await ExecuteResponsesRequestAsync(context, channelState, requestId, $"{operation}:round{round}", body, timeoutSeconds, ct, progress, logPolicy);
+            totalMs += resp.HttpMs;
+            lastOutputText = resp.OutputText;
+            if (!resp.Successful)
+            {
+                await EmitProgressAsync($"{operationLabel}: round {round} failed ({TrimToLimit(resp.Error, 220)}).", DndLogLevel.Error);
+                return new ResponsesLoopResult(false, resp.Error, totalMs, resp.OutputText, round);
+            }
+
+            if (resp.ToolCalls.Count == 0)
+            {
+                if (allowNoToolCallsTerminal || isComplete == null || isComplete())
+                {
+                    await EmitProgressAsync($"{operationLabel}: round {round} complete (no more tool calls).");
+                    return new ResponsesLoopResult(true, null, totalMs, resp.OutputText, round);
+                }
+
+                var extra = string.IsNullOrWhiteSpace(resp.OutputText) ? string.Empty : $" output={TrimToLimit(resp.OutputText, 200)}";
+                await EmitProgressAsync($"{operationLabel}: round {round} returned no tool calls before completion.", DndLogLevel.Warning);
+                return new ResponsesLoopResult(false, $"No tool calls returned before completion.{extra}", totalMs, resp.OutputText, round);
+            }
+
+            var callNames = string.Join(", ", resp.ToolCalls.Select(c => c?.Name).Where(n => !string.IsNullOrWhiteSpace(n)).Take(6));
+            lastToolCallNames = callNames;
+            await EmitProgressAsync($"{operationLabel}: round {round} received {resp.ToolCalls.Count} tool call(s){(string.IsNullOrWhiteSpace(callNames) ? string.Empty : $": {callNames}")}.");
+
+            var outputs = new List<Dictionary<string, object>>();
+            for (var i = 0; i < resp.ToolCalls.Count; i++)
+            {
+                var call = resp.ToolCalls[i];
+                var callName = string.IsNullOrWhiteSpace(call?.Name) ? "(unnamed)" : call.Name.Trim();
+                var argsPreview = NormalizeJsonForTrace(call?.ArgumentsJson);
+                await EmitResponsesTraceAsync(
+                    requestId,
+                    $"{operation}:round{round}",
+                    logPolicy,
+                    DndLogLevel.Debug,
+                    $"{operationLabel}: round {round} toolcall[{i + 1}/{resp.ToolCalls.Count}] name={callName} callId={call?.CallId} args={argsPreview}",
+                    progress);
+
+                if (call?.IsIncomplete == true)
+                {
+                    var preview = TrimToLimit(argsPreview, 240);
+                    var err =
+                        $"Incomplete tool call arguments for '{callName}' (status={call.Status}). " +
+                        $"The model likely hit max_output_tokens before finishing valid JSON. args={preview}";
+                    await EmitProgressAsync($"{operationLabel}: round {round} failed ({TrimToLimit(err, 260)}).", DndLogLevel.Error);
+                    return new ResponsesLoopResult(false, err, totalMs, resp.OutputText, round);
+                }
+
+                if (string.IsNullOrWhiteSpace(call.CallId))
+                {
+                    await EmitProgressAsync($"{operationLabel}: round {round} failed (tool call missing call_id).", DndLogLevel.Error);
+                    return new ResponsesLoopResult(false, $"Tool call '{call.Name}' missing call_id.", totalMs, resp.OutputText, round);
+                }
+
+                string outText;
+                try
+                {
+                    outText = onToolCall?.Invoke(call) ?? "{\"ok\":true}";
+                }
+                catch (Exception ex)
+                {
+                    outText = JsonSerializer.Serialize(new { ok = false, error = $"{ex.GetType().Name}: {ex.Message}" });
+                }
+                var outPreview = NormalizeJsonForTrace(outText);
+                lastToolCallDetail = $"{callName} args={argsPreview} output={outPreview}";
+                await EmitResponsesTraceAsync(
+                    requestId,
+                    $"{operation}:round{round}",
+                    logPolicy,
+                    DndLogLevel.Debug,
+                    $"{operationLabel}: round {round} toolout[{i + 1}/{resp.ToolCalls.Count}] name={callName} callId={call.CallId} output={outPreview}",
+                    progress);
+
+                outputs.Add(new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["type"] = "function_call_output",
+                    ["call_id"] = call.CallId,
+                    ["output"] = string.IsNullOrWhiteSpace(outText) ? "{\"ok\":true}" : outText
+                });
+            }
+
+            if (isComplete != null && isComplete())
+            {
+                await EmitProgressAsync($"{operationLabel}: round {round} completion criteria satisfied.");
+                return new ResponsesLoopResult(true, null, totalMs, resp.OutputText, round);
+            }
+
+            previousResponseId = resp.ResponseId;
+            input = outputs;
+            await EmitProgressAsync($"{operationLabel}: round {round} tool outputs submitted, continuing.");
+        }
+
+        var details = new List<string>(2);
+        if (!string.IsNullOrWhiteSpace(lastToolCallNames))
+        {
+            details.Add($"last tool calls: {lastToolCallNames}");
+        }
+        if (!string.IsNullOrWhiteSpace(lastToolCallDetail))
+        {
+            details.Add($"last tool detail: {TrimToLimit(lastToolCallDetail, 260)}");
+        }
+        if (!string.IsNullOrWhiteSpace(lastOutputText))
+        {
+            details.Add($"last output: {TrimToLimit(lastOutputText, 180)}");
+        }
+
+        var reason =
+            $"Exceeded max rounds ({ResponsesLoopMaxRounds}); model did not reach completion criteria." +
+            (details.Count == 0 ? string.Empty : $" ({string.Join(" | ", details)})");
+        await EmitProgressAsync($"{operationLabel}: failed ({TrimToLimit(reason, 260)}).", DndLogLevel.Error);
+        return new ResponsesLoopResult(false, reason, totalMs, lastOutputText, ResponsesLoopMaxRounds);
+    }
+
+    private List<EncounterTemplateDto> NormalizeEncounterTemplates(IEnumerable<EncounterTemplateDto> encounters)
+    {
+        var normalized = new List<EncounterTemplateDto>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var src in encounters ?? Enumerable.Empty<EncounterTemplateDto>())
+        {
+            if (src == null)
+            {
+                continue;
+            }
+
+            var templateId = SlugifySegment(src.TemplateId);
+            if (string.IsNullOrWhiteSpace(templateId))
+            {
+                templateId = SlugifySegment(src.Name);
+            }
+            if (string.IsNullOrWhiteSpace(templateId))
+            {
+                continue;
+            }
+            if (!seen.Add(templateId))
+            {
+                continue;
+            }
+
+            var boss = src.Boss ?? new ActorDto();
+            boss.Id = SlugifySegment(boss.Id);
+            if (string.IsNullOrWhiteSpace(boss.Id))
+            {
+                boss.Id = "boss";
+            }
+            boss.Name = string.IsNullOrWhiteSpace(boss.Name) ? "Boss" : boss.Name.Trim();
+            boss.Description ??= string.Empty;
+            boss.MaxHp = Math.Clamp(boss.MaxHp <= 0 ? 40 : boss.MaxHp, 1, 250);
+            boss.MaxMp = Math.Clamp(boss.MaxMp, 0, 100);
+            boss.Stats = ClampStats(boss.Stats);
+
+            var adds = new List<ActorDto>();
+            foreach (var add in (src.Adds ?? new List<ActorDto>()).Take(6))
+            {
+                if (add == null)
+                {
+                    continue;
+                }
+                var id = SlugifySegment(add.Id);
+                if (string.IsNullOrWhiteSpace(id))
+                {
+                    id = SlugifySegment(add.Name);
+                }
+                if (string.IsNullOrWhiteSpace(id))
+                {
+                    continue;
+                }
+
+                adds.Add(new ActorDto
+                {
+                    Id = id,
+                    Name = string.IsNullOrWhiteSpace(add.Name) ? id : add.Name.Trim(),
+                    Description = add.Description ?? string.Empty,
+                    MaxHp = Math.Clamp(add.MaxHp <= 0 ? 12 : add.MaxHp, 1, 250),
+                    MaxMp = Math.Clamp(add.MaxMp, 0, 100),
+                    Stats = ClampStats(add.Stats)
+                });
+            }
+
+            normalized.Add(new EncounterTemplateDto
+            {
+                TemplateId = templateId,
+                Name = string.IsNullOrWhiteSpace(src.Name) ? templateId : src.Name.Trim(),
+                Scene = src.Scene ?? string.Empty,
+                Rewards = src.Rewards ?? string.Empty,
+                Boss = boss,
+                Adds = adds
+            });
+
+            if (normalized.Count >= 12)
+            {
+                break;
+            }
+        }
+
+        return normalized;
+    }
+
+    private static HashSet<string> ParseAllowedPcActorIds(string pcRosterContext)
+    {
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(pcRosterContext))
+        {
+            return set;
+        }
+
+        foreach (Match m in Regex.Matches(pcRosterContext, @"u:\d+", RegexOptions.IgnoreCase))
+        {
+            if (m.Success && !string.IsNullOrWhiteSpace(m.Value))
+            {
+                set.Add(m.Value.Trim());
+            }
+        }
+        return set;
+    }
+
+    private static string BuildCampaignStageOneSystemPrompt(bool strict)
+        => strict
+            ? "You are a GM prep agent in DRAFT mode. Call tools only. Follow this exact order: 1) call builder_set_campaign_markdown exactly once, 2) call builder_add_encounter_templates with 3-8 encounters, 3) call builder_finalize_package. Do not call builder_set_campaign_markdown again after step 1 unless the tool explicitly returned an error. Keep campaignMarkdown compact and concise."
+            : "You are a GM prep agent in DRAFT mode. Use tools to draft campaign markdown and encounter templates. Call builder_set_campaign_markdown first, then builder_add_encounter_templates (3-8 encounters), then builder_finalize_package. Avoid repeated markdown tool calls. Keep campaignMarkdown compact.";
+
+    private static string BuildCampaignStageOneUserPrompt(string campaignName, string prompt, string pcRosterContext)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("Stage 1 of 2: build campaign story + encounters only.");
+        sb.AppendLine("Use tools in order: set markdown once, add 3-8 encounter templates, finalize.");
+        sb.AppendLine("Do not call builder_set_campaign_markdown repeatedly.");
+        sb.AppendLine("Keep campaignMarkdown concise (target <= 4000 chars, compact bullets/headings).");
+        sb.AppendLine("Do not create NPC/PC sheets in this stage.");
+        sb.AppendLine();
+        sb.AppendLine($"Campaign name: {campaignName}");
+        if (!string.IsNullOrWhiteSpace(pcRosterContext))
+        {
+            sb.AppendLine("PC roster context:");
+            sb.AppendLine(pcRosterContext.Trim());
+            sb.AppendLine();
+        }
+        sb.AppendLine("Prompt:");
+        sb.AppendLine(prompt ?? string.Empty);
+        return sb.ToString().Trim();
+    }
+
+    private static string BuildCampaignStageTwoSystemPrompt(bool strict)
+        => strict
+            ? "You are a GM prep agent in DRAFT mode. Call tools only. Build NPC/PC sheet specs and unassigned PCs, then call builder_finalize_package. Keep outputs compact: each profileMarkdown <= 600 chars; do not emit long narrative blocks."
+            : "You are a GM prep agent in DRAFT mode. Use tools to build party sheet specs and unassigned PCs, then finalize. Keep outputs compact (profileMarkdown <= 600 chars).";
+
+    private static string BuildCampaignStageTwoUserPrompt(
+        string campaignName,
+        string prompt,
+        string pcRosterContext,
+        string campaignMarkdown,
+        IReadOnlyList<EncounterTemplateDto> encounters)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("Stage 2 of 2: build party-related artifacts only.");
+        sb.AppendLine("Use tools to add NPC/PC sheet specs and unassigned PCs.");
+        sb.AppendLine("Do not rewrite campaign markdown or encounters in this stage.");
+        sb.AppendLine("Keep each profileMarkdown concise (target <= 600 chars).");
+        sb.AppendLine();
+        sb.AppendLine($"Campaign name: {campaignName}");
+        sb.AppendLine("Draft markdown excerpt:");
+        sb.AppendLine(TrimToLimit(campaignMarkdown ?? string.Empty, 1200));
+        sb.AppendLine();
+        sb.AppendLine("Encounter template ids:");
+        sb.AppendLine(string.Join(", ", (encounters ?? Array.Empty<EncounterTemplateDto>()).Select(e => e?.TemplateId).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.OrdinalIgnoreCase)));
+        sb.AppendLine();
+        if (!string.IsNullOrWhiteSpace(pcRosterContext))
+        {
+            sb.AppendLine("PC roster context (only these actorIds may be used for PC sheets):");
+            sb.AppendLine(pcRosterContext.Trim());
+            sb.AppendLine();
+        }
+        sb.AppendLine("Prompt:");
+        sb.AppendLine(prompt ?? string.Empty);
+        return sb.ToString().Trim();
+    }
 
     private async Task<CampaignGenerateResult> GenerateCampaignPackageAsync(
         DiscordModuleContext context,
@@ -6176,210 +7052,638 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         string campaignName,
         string prompt,
         string pcRosterContext,
-        CancellationToken ct)
+        CancellationToken ct,
+        Func<string, Task> progress = null)
     {
-        var model = ResolveModel(context, channelState);
-        var requestPrompt = BuildCreateCampaignPrompt(campaignName, prompt, pcRosterContext);
-
-        var request = new ChatCompletionCreateRequest
-        {
-            Model = model,
-            // Keep this tight: large generations tend to hit token limits and produce invalid/empty JSON.
-            Temperature = 0.1f,
-            MaxCompletionTokens = 1200,
-            Messages = new List<ChatMessage>
-            {
-                new(StaticValues.ChatMessageRoles.System,
-                    "You are a campaign bootstrapper for a simplified D&D-like Discord engine. " +
-                    "Return strict JSON only. No markdown. No code fences."),
-                new(StaticValues.ChatMessageRoles.User, requestPrompt)
-            }
-        };
-
-        ChatCompletionCreateResponse response;
+        var model = ResolveCampaignBootstrapModel(context, channelState);
         var sw = Stopwatch.StartNew();
-        try
+
+        async Task<(CampaignCreateResponseDto Package, string Error)> AttemptAsync(bool strict)
         {
-            Console.WriteLine(
-                $"[dnd] campaign-generate[{requestId}]: request model={model} temp={request.Temperature} maxCompletionTokens={request.MaxCompletionTokens} msgChars={requestPrompt.Length}");
-            Console.WriteLine($"[dnd] campaign-generate[{requestId}]: system={request.Messages[0].Content}");
-            Console.WriteLine($"[dnd] campaign-generate[{requestId}]: userPrompt={requestPrompt}");
-        }
-        catch
-        {
-            // ignore log serialization issues
-        }
-        try
-        {
-            var responseTask = context.OpenAILogic.CreateChatCompletionAsync(request);
-            var timeoutTask = Task.Delay(TimeSpan.FromSeconds(CampaignCreateTimeoutSeconds), ct);
-            var done = await Task.WhenAny(responseTask, timeoutTask);
-            if (done != responseTask)
+            var stage1 = new CampaignStageOneAccumulator();
+            var stage1Tools = new List<Dictionary<string, object>>
             {
-                sw.Stop();
-                Console.WriteLine(
-                    $"[dnd] campaign-generate[{requestId}]: timeout after {sw.ElapsedMilliseconds}ms (limit={CampaignCreateTimeoutSeconds}s) model={model} promptLen={requestPrompt.Length}");
-                return new CampaignGenerateResult(null, $"Timed out after {CampaignCreateTimeoutSeconds}s.", (int)sw.ElapsedMilliseconds, model);
+                BuildResponsesFunctionTool(
+                    "builder_set_campaign_markdown",
+                    "Set or replace the campaign markdown draft.",
+                    new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["type"] = "object",
+                        ["additionalProperties"] = false,
+                        ["properties"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+                        {
+                            ["campaignMarkdown"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase) { ["type"] = "string" }
+                        },
+                        ["required"] = new[] { "campaignMarkdown" }
+                    }),
+                BuildResponsesFunctionTool(
+                    "builder_add_encounter_templates",
+                    "Add encounter template definitions.",
+                    new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["type"] = "object",
+                        ["additionalProperties"] = false,
+                        ["properties"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+                        {
+                            ["encounters"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+                            {
+                                ["type"] = "array",
+                                ["items"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+                                {
+                                    ["type"] = "object",
+                                    ["additionalProperties"] = true
+                                }
+                            }
+                        },
+                        ["required"] = new[] { "encounters" }
+                    },
+                    strict: false),
+                BuildResponsesFunctionTool(
+                    "builder_finalize_package",
+                    "Signal that stage output is complete.",
+                    new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["type"] = "object",
+                        ["additionalProperties"] = true
+                    })
+            };
+
+            string StageOneToolHandler(ResponsesToolCall call)
+            {
+                if (!TryParseJsonElement(call.ArgumentsJson, out var args))
+                {
+                    return JsonSerializer.Serialize(new { ok = false, error = "Invalid arguments JSON." });
+                }
+
+                switch (call.Name.Trim().ToLowerInvariant())
+                {
+                    case "builder_set_campaign_markdown":
+                    {
+                        if (!TryGetPropertyIgnoreCase(args, "campaignMarkdown", out var mdEl) || mdEl.ValueKind != JsonValueKind.String)
+                        {
+                            return JsonSerializer.Serialize(new { ok = false, error = "campaignMarkdown missing." });
+                        }
+                        var markdown = mdEl.GetString()?.Trim();
+                        if (string.IsNullOrWhiteSpace(markdown))
+                        {
+                            return JsonSerializer.Serialize(new { ok = false, error = "campaignMarkdown empty." });
+                        }
+                        stage1.CampaignMarkdownSetCalls++;
+                        if (!string.IsNullOrWhiteSpace(stage1.CampaignMarkdown) && stage1.Encounters.Count == 0)
+                        {
+                            return JsonSerializer.Serialize(new
+                            {
+                                ok = false,
+                                error = "campaignMarkdown already set. Next call must be builder_add_encounter_templates with 3-8 encounters, then builder_finalize_package."
+                            });
+                        }
+                        stage1.CampaignMarkdown = TrimToLimit(markdown, MaxCampaignChars);
+                        return JsonSerializer.Serialize(new { ok = true, markdownLen = stage1.CampaignMarkdown.Length, setCalls = stage1.CampaignMarkdownSetCalls });
+                    }
+                    case "builder_add_encounter_templates":
+                    {
+                        if (!TryGetPropertyIgnoreCase(args, "encounters", out var arrEl) || arrEl.ValueKind != JsonValueKind.Array)
+                        {
+                            return JsonSerializer.Serialize(new { ok = false, error = "encounters array missing." });
+                        }
+                        List<EncounterTemplateDto> parsed;
+                        try
+                        {
+                            parsed = JsonSerializer.Deserialize<List<EncounterTemplateDto>>(arrEl.GetRawText(), _jsonOptions) ?? new List<EncounterTemplateDto>();
+                        }
+                        catch (Exception ex)
+                        {
+                            return JsonSerializer.Serialize(new { ok = false, error = $"Encounter parse failed: {ex.Message}" });
+                        }
+                        stage1.Encounters.AddRange(parsed);
+                        return JsonSerializer.Serialize(new { ok = true, added = parsed.Count, total = stage1.Encounters.Count });
+                    }
+                    case "builder_finalize_package":
+                        stage1.Finalized = true;
+                        return JsonSerializer.Serialize(new { ok = true, finalized = true });
+                    default:
+                        return JsonSerializer.Serialize(new { ok = false, error = $"Unknown tool: {call.Name}" });
+                }
             }
 
-            response = await responseTask;
+            var stage1Loop = await RunResponsesToolLoopAsync(
+                context,
+                channelState,
+                requestId,
+                "campaign-stage1",
+                model,
+                BuildCampaignStageOneSystemPrompt(strict),
+                BuildCampaignStageOneUserPrompt(campaignName, prompt, pcRosterContext),
+                stage1Tools,
+                StageOneToolHandler,
+                () => stage1.Finalized || (!string.IsNullOrWhiteSpace(stage1.CampaignMarkdown) && stage1.Encounters.Count > 0),
+                maxOutputTokens: strict ? 2800 : 1600,
+                timeoutSeconds: CampaignCreateTimeoutSeconds,
+                ct: ct,
+                progress: progress);
+            if (!stage1Loop.Successful)
+            {
+                var canRecoverEncountersOnly =
+                    !string.IsNullOrWhiteSpace(stage1.CampaignMarkdown) &&
+                    stage1.Encounters.Count == 0;
+                if (!canRecoverEncountersOnly)
+                {
+                    return (null, $"Stage 1 failed: {stage1Loop.Error}");
+                }
+
+                if (progress != null)
+                {
+                    await progress($"Stage 1 Recovery - Encounter Templates: started because the first pass stalled ({TrimToLimit(stage1Loop.Error, 180)}).");
+                }
+
+                var stage1RecoveryTools = new List<Dictionary<string, object>>
+                {
+                    BuildResponsesFunctionTool(
+                        "builder_add_encounter_templates",
+                        "Add encounter template definitions.",
+                        new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+                        {
+                            ["type"] = "object",
+                            ["additionalProperties"] = false,
+                            ["properties"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+                            {
+                                ["encounters"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+                                {
+                                    ["type"] = "array",
+                                    ["items"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+                                    {
+                                        ["type"] = "object",
+                                        ["additionalProperties"] = true
+                                    }
+                                }
+                            },
+                            ["required"] = new[] { "encounters" }
+                        },
+                        strict: false),
+                    BuildResponsesFunctionTool(
+                        "builder_finalize_package",
+                        "Signal that stage output is complete.",
+                        new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+                        {
+                            ["type"] = "object",
+                            ["additionalProperties"] = true
+                        })
+                };
+
+                var recoveryLoop = await RunResponsesToolLoopAsync(
+                    context,
+                    channelState,
+                    requestId,
+                    "campaign-stage1-recovery",
+                    model,
+                    "You are finishing stage 1. Campaign markdown is already locked and cannot be changed. Call builder_add_encounter_templates with 3-8 encounters, then call builder_finalize_package.",
+                    $"Campaign name: {campaignName}\n\nCampaign markdown (do not rewrite):\n{TrimToLimit(stage1.CampaignMarkdown, 1400)}\n\nOriginal prompt:\n{prompt ?? string.Empty}",
+                    stage1RecoveryTools,
+                    StageOneToolHandler,
+                    () => stage1.Finalized || stage1.Encounters.Count > 0,
+                    maxOutputTokens: 1400,
+                    timeoutSeconds: CampaignCreateTimeoutSeconds,
+                    ct: ct,
+                    progress: progress);
+                if (!recoveryLoop.Successful)
+                {
+                    return (null, $"Stage 1 failed: {stage1Loop.Error}; encounter recovery failed: {recoveryLoop.Error}");
+                }
+            }
+
+            var normalizedEncounters = NormalizeEncounterTemplates(stage1.Encounters);
+            if (string.IsNullOrWhiteSpace(stage1.CampaignMarkdown))
+            {
+                return (null, "Stage 1 produced no campaign markdown.");
+            }
+            if (normalizedEncounters.Count == 0)
+            {
+                return (null, "Stage 1 produced no encounter templates.");
+            }
+
+            var stage2 = new CampaignStageTwoAccumulator();
+            var allowedPcActorIds = ParseAllowedPcActorIds(pcRosterContext);
+            var stage2Tools = new List<Dictionary<string, object>>
+            {
+                BuildResponsesFunctionTool(
+                    "builder_add_npc_sheet_specs",
+                    "Add NPC sheet specs to be turned into dnd_create_npc_sheet function calls.",
+                    new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["type"] = "object",
+                        ["additionalProperties"] = false,
+                        ["properties"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+                        {
+                            ["npcs"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+                            {
+                                ["type"] = "array",
+                                ["items"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+                                {
+                                    ["type"] = "object",
+                                    ["additionalProperties"] = true
+                                }
+                            }
+                        },
+                        ["required"] = new[] { "npcs" }
+                    },
+                    strict: false),
+                BuildResponsesFunctionTool(
+                    "builder_add_pc_sheet_specs",
+                    "Add PC sheet specs to be turned into dnd_create_pc_sheet function calls.",
+                    new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["type"] = "object",
+                        ["additionalProperties"] = false,
+                        ["properties"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+                        {
+                            ["pcs"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+                            {
+                                ["type"] = "array",
+                                ["items"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+                                {
+                                    ["type"] = "object",
+                                    ["additionalProperties"] = true
+                                }
+                            }
+                        },
+                        ["required"] = new[] { "pcs" }
+                    },
+                    strict: false),
+                BuildResponsesFunctionTool(
+                    "builder_set_unassigned_pcs",
+                    "Set or append unassigned PCs that could not be mapped to roster actorIds.",
+                    new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["type"] = "object",
+                        ["additionalProperties"] = false,
+                        ["properties"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+                        {
+                            ["unassignedPcs"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+                            {
+                                ["type"] = "array",
+                                ["items"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+                                {
+                                    ["type"] = "object",
+                                    ["additionalProperties"] = true
+                                }
+                            }
+                        },
+                        ["required"] = new[] { "unassignedPcs" }
+                    },
+                    strict: false),
+                BuildResponsesFunctionTool(
+                    "builder_finalize_package",
+                    "Signal that stage output is complete.",
+                    new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["type"] = "object",
+                        ["additionalProperties"] = true
+                    })
+            };
+
+            void AddFunctionCall(string name, object argsObj)
+            {
+                stage2.FunctionCalls.Add(new DndLiteFunctionCallDto
+                {
+                    Name = name,
+                    Arguments = JsonSerializer.SerializeToElement(argsObj)
+                });
+            }
+
+            string StageTwoToolHandler(ResponsesToolCall call)
+            {
+                if (!TryParseJsonElement(call.ArgumentsJson, out var args))
+                {
+                    return JsonSerializer.Serialize(new { ok = false, error = "Invalid arguments JSON." });
+                }
+
+                switch (call.Name.Trim().ToLowerInvariant())
+                {
+                    case "builder_add_npc_sheet_specs":
+                    {
+                        if (!TryGetPropertyIgnoreCase(args, "npcs", out var arrEl) || arrEl.ValueKind != JsonValueKind.Array)
+                        {
+                            return JsonSerializer.Serialize(new { ok = false, error = "npcs array missing." });
+                        }
+
+                        List<DndCreateNpcSheetArgsDto> specs;
+                        try
+                        {
+                            specs = JsonSerializer.Deserialize<List<DndCreateNpcSheetArgsDto>>(arrEl.GetRawText(), _jsonOptions) ?? new List<DndCreateNpcSheetArgsDto>();
+                        }
+                        catch (Exception ex)
+                        {
+                            return JsonSerializer.Serialize(new { ok = false, error = $"NPC parse failed: {ex.Message}" });
+                        }
+
+                        var added = 0;
+                        foreach (var s in specs)
+                        {
+                            if (s == null)
+                            {
+                                continue;
+                            }
+                            var id = SlugifySegment(s.Id);
+                            if (string.IsNullOrWhiteSpace(id))
+                            {
+                                id = SlugifySegment(s.Name);
+                            }
+                            if (string.IsNullOrWhiteSpace(id) || !stage2.NpcIds.Add(id))
+                            {
+                                continue;
+                            }
+
+                            var normalized = new DndCreateNpcSheetArgsDto
+                            {
+                                Id = id,
+                                Name = string.IsNullOrWhiteSpace(s.Name) ? id : s.Name.Trim(),
+                                Concept = s.Concept?.Trim() ?? string.Empty,
+                                ProfileMarkdown = s.ProfileMarkdown?.Trim() ?? string.Empty,
+                                PersonalityNotes = s.PersonalityNotes?.Trim() ?? string.Empty,
+                                MaxHp = Math.Clamp(s.MaxHp <= 0 ? 24 : s.MaxHp, 1, 250),
+                                MaxMp = Math.Clamp(s.MaxMp, 0, 100),
+                                Stats = ClampStats(s.Stats)
+                            };
+                            AddFunctionCall("dnd_create_npc_sheet", normalized);
+                            added++;
+                        }
+
+                        return JsonSerializer.Serialize(new { ok = true, added, total = stage2.FunctionCalls.Count });
+                    }
+                    case "builder_add_pc_sheet_specs":
+                    {
+                        if (!TryGetPropertyIgnoreCase(args, "pcs", out var arrEl) || arrEl.ValueKind != JsonValueKind.Array)
+                        {
+                            return JsonSerializer.Serialize(new { ok = false, error = "pcs array missing." });
+                        }
+
+                        List<DndCreatePcSheetArgsDto> specs;
+                        try
+                        {
+                            specs = JsonSerializer.Deserialize<List<DndCreatePcSheetArgsDto>>(arrEl.GetRawText(), _jsonOptions) ?? new List<DndCreatePcSheetArgsDto>();
+                        }
+                        catch (Exception ex)
+                        {
+                            return JsonSerializer.Serialize(new { ok = false, error = $"PC parse failed: {ex.Message}" });
+                        }
+
+                        var added = 0;
+                        var unassignedAdded = 0;
+                        foreach (var s in specs)
+                        {
+                            if (s == null)
+                            {
+                                continue;
+                            }
+
+                            var actorId = s.ActorId?.Trim() ?? string.Empty;
+                            var actorAllowed = !string.IsNullOrWhiteSpace(actorId) &&
+                                               TryParsePcActorId(actorId, out _) &&
+                                               (allowedPcActorIds.Count == 0 || allowedPcActorIds.Contains(actorId));
+                            if (!actorAllowed)
+                            {
+                                var unassignedName = string.IsNullOrWhiteSpace(s.Name) ? "unknown-pc" : s.Name.Trim();
+                                if (stage2.UnassignedNames.Add(unassignedName))
+                                {
+                                    stage2.UnassignedPcs.Add(new UnassignedPcDto
+                                    {
+                                        Name = unassignedName,
+                                        Concept = s.Concept?.Trim() ?? string.Empty
+                                    });
+                                    unassignedAdded++;
+                                }
+                                continue;
+                            }
+
+                            if (!stage2.PcActorIds.Add(actorId))
+                            {
+                                continue;
+                            }
+
+                            var normalized = new DndCreatePcSheetArgsDto
+                            {
+                                ActorId = actorId,
+                                Name = string.IsNullOrWhiteSpace(s.Name) ? actorId : s.Name.Trim(),
+                                Concept = s.Concept?.Trim() ?? string.Empty,
+                                ProfileMarkdown = s.ProfileMarkdown?.Trim() ?? string.Empty,
+                                MaxHp = Math.Clamp(s.MaxHp <= 0 ? 20 : s.MaxHp, 1, 250),
+                                MaxMp = Math.Clamp(s.MaxMp, 0, 100),
+                                Stats = ClampStats(s.Stats)
+                            };
+                            AddFunctionCall("dnd_create_pc_sheet", normalized);
+                            added++;
+                        }
+
+                        return JsonSerializer.Serialize(new { ok = true, added, unassignedAdded, total = stage2.FunctionCalls.Count });
+                    }
+                    case "builder_set_unassigned_pcs":
+                    {
+                        if (!TryGetPropertyIgnoreCase(args, "unassignedPcs", out var arrEl) || arrEl.ValueKind != JsonValueKind.Array)
+                        {
+                            return JsonSerializer.Serialize(new { ok = false, error = "unassignedPcs array missing." });
+                        }
+
+                        List<UnassignedPcDto> parsed;
+                        try
+                        {
+                            parsed = JsonSerializer.Deserialize<List<UnassignedPcDto>>(arrEl.GetRawText(), _jsonOptions) ?? new List<UnassignedPcDto>();
+                        }
+                        catch (Exception ex)
+                        {
+                            return JsonSerializer.Serialize(new { ok = false, error = $"Unassigned parse failed: {ex.Message}" });
+                        }
+
+                        var added = 0;
+                        foreach (var p in parsed)
+                        {
+                            var name = p?.Name?.Trim();
+                            if (string.IsNullOrWhiteSpace(name) || !stage2.UnassignedNames.Add(name))
+                            {
+                                continue;
+                            }
+                            stage2.UnassignedPcs.Add(new UnassignedPcDto { Name = name, Concept = p?.Concept?.Trim() ?? string.Empty });
+                            added++;
+                        }
+                        return JsonSerializer.Serialize(new { ok = true, added, total = stage2.UnassignedPcs.Count });
+                    }
+                    case "builder_finalize_package":
+                        stage2.Finalized = true;
+                        return JsonSerializer.Serialize(new { ok = true, finalized = true });
+                    default:
+                        return JsonSerializer.Serialize(new { ok = false, error = $"Unknown tool: {call.Name}" });
+                }
+            }
+
+            var stage2Loop = await RunResponsesToolLoopAsync(
+                context,
+                channelState,
+                requestId,
+                "campaign-stage2",
+                model,
+                BuildCampaignStageTwoSystemPrompt(strict),
+                BuildCampaignStageTwoUserPrompt(campaignName, prompt, pcRosterContext, stage1.CampaignMarkdown, normalizedEncounters),
+                stage2Tools,
+                StageTwoToolHandler,
+                () => stage2.Finalized,
+                maxOutputTokens: strict ? 2200 : 1400,
+                timeoutSeconds: CampaignCreateTimeoutSeconds,
+                ct: ct,
+                allowNoToolCallsTerminal: true,
+                progress: progress);
+            if (!stage2Loop.Successful)
+            {
+                return (null, $"Stage 2 failed: {stage2Loop.Error}");
+            }
+
+            var package = new CampaignCreateResponseDto
+            {
+                CampaignMarkdown = TrimToLimit(stage1.CampaignMarkdown.Trim(), MaxCampaignChars),
+                Encounters = normalizedEncounters,
+                FunctionCalls = stage2.FunctionCalls,
+                UnassignedPcs = stage2.UnassignedPcs
+            };
+            return (package, null);
         }
-        catch (Exception ex)
+
+        var first = await AttemptAsync(strict: false);
+        if (first.Package != null)
         {
             sw.Stop();
-            Console.WriteLine(
-                $"[dnd] campaign-generate[{requestId}]: exception after {sw.ElapsedMilliseconds}ms model={model} ex={ex.GetType().Name} msg={ex.Message}");
-            return new CampaignGenerateResult(null, $"{ex.GetType().Name}: {ex.Message}", (int)sw.ElapsedMilliseconds, model);
+            Console.WriteLine($"[dnd] campaign-generate[{requestId}]: ok responses model={model} ms={sw.ElapsedMilliseconds} encounters={first.Package.Encounters.Count} fnCalls={first.Package.FunctionCalls.Count}");
+            return new CampaignGenerateResult(first.Package, null, (int)sw.ElapsedMilliseconds, model);
         }
+
+        Console.WriteLine($"[dnd] campaign-generate[{requestId}]: first attempt failed err={first.Error}; retrying strict");
+        if (progress != null)
+        {
+            await progress($"Stage 1 - Campaign Foundation: retrying with stricter instructions ({TrimToLimit(first.Error, 200)}).");
+        }
+        var second = await AttemptAsync(strict: true);
         sw.Stop();
-
-        try
+        if (second.Package != null)
         {
-            var choice = response.Choices?.FirstOrDefault();
-            var msg = choice?.Message;
-            var finish = choice?.FinishReason?.ToString() ?? "(null)";
-            var role = msg?.Role ?? "(null)";
-            var contentLen = msg?.Content == null ? -1 : msg.Content.Length;
-            var toolCalls = msg?.ToolCalls?.Count ?? 0;
-            var hasFnCall = msg?.FunctionCall != null;
-            var usage = response.Usage == null
-                ? "(no usage)"
-                : $"prompt={response.Usage.PromptTokens} completion={response.Usage.CompletionTokens} total={response.Usage.TotalTokens}";
-
-            Console.WriteLine(
-                $"[dnd] campaign-generate[{requestId}]: response httpMs={sw.ElapsedMilliseconds} ok={response.Successful} choices={(response.Choices?.Count ?? 0)} finish={finish} role={role} contentLen={contentLen} toolCalls={toolCalls} functionCall={hasFnCall} usage={usage}");
-        }
-        catch
-        {
-            // ignore
+            Console.WriteLine($"[dnd] campaign-generate[{requestId}]: strict retry succeeded model={model} ms={sw.ElapsedMilliseconds}");
+            return new CampaignGenerateResult(second.Package, null, (int)sw.ElapsedMilliseconds, model);
         }
 
-        if (!response.Successful)
+        var err = string.IsNullOrWhiteSpace(second.Error) ? first.Error : second.Error;
+        Console.WriteLine($"[dnd] campaign-generate[{requestId}]: failed model={model} ms={sw.ElapsedMilliseconds} err={err}");
+        return new CampaignGenerateResult(null, err ?? "Responses campaign generation failed.", (int)sw.ElapsedMilliseconds, model);
+    }
+
+    private async Task<DraftUpdateGenerateResult> GenerateDraftUpdateMarkdownAsync(
+        DiscordModuleContext context,
+        InstructionGPT.ChannelState channelState,
+        string campaignName,
+        string existingMarkdown,
+        string modificationPrompt,
+        CancellationToken ct,
+        Func<string, Task> progress = null)
+    {
+        var model = ResolveCampaignBootstrapModel(context, channelState);
+
+        async Task<DraftUpdateGenerateResult> AttemptAsync(bool strict)
         {
-            var err = $"{response.Error?.Code} {response.Error?.Message}".Trim();
-            Console.WriteLine(
-                $"[dnd] campaign-generate[{requestId}]: openai unsuccessful httpMs={sw.ElapsedMilliseconds} model={model} err={err}");
-            return new CampaignGenerateResult(null, $"OpenAI error: {err}", (int)sw.ElapsedMilliseconds, model);
-        }
-
-        var content = response.Choices.FirstOrDefault()?.Message?.Content?.Trim();
-        if (string.IsNullOrWhiteSpace(content))
-        {
-            Console.WriteLine(
-                $"[dnd] campaign-generate[{requestId}]: empty content httpMs={sw.ElapsedMilliseconds} model={model} choices={(response.Choices?.Count ?? 0)}");
-
-            string recoveredFromArgs = null;
-            try
+            string updated = null;
+            var finalized = false;
+            var tools = new List<Dictionary<string, object>>
             {
-                // Dump the entire choice message so we can see if output is in an unexpected field.
-                var choice = response.Choices?.FirstOrDefault();
-                var dumped = JsonSerializer.Serialize(choice, _jsonOptions);
-                Console.WriteLine($"[dnd] campaign-generate[{requestId}]: choiceDump={dumped}");
-
-                // Sometimes models emit JSON in function/tool-call arguments even when not requested.
-                var msg = choice?.Message;
-                var argCandidate = msg?.FunctionCall?.Arguments
-                                   ?? msg?.ToolCalls?.FirstOrDefault()?.FunctionCall?.Arguments;
-                var argJson = ExtractJsonObject(argCandidate ?? string.Empty);
-                if (!string.IsNullOrWhiteSpace(argJson))
-                {
-                    recoveredFromArgs = argJson.Trim();
-                    Console.WriteLine($"[dnd] campaign-generate[{requestId}]: recoveredJsonFromArgs len={recoveredFromArgs.Length}");
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[dnd] campaign-generate[{requestId}]: choiceDump failed: {ex.GetType().Name} {ex.Message}");
-            }
-
-            if (!string.IsNullOrWhiteSpace(recoveredFromArgs))
-            {
-                content = recoveredFromArgs;
-            }
-
-            if (string.IsNullOrWhiteSpace(content))
-            {
-                // One retry with stricter instructions; we've observed occasional 200 responses with empty content.
-                try
-                {
-                    var retry = new ChatCompletionCreateRequest
+                BuildResponsesFunctionTool(
+                    "builder_set_campaign_markdown",
+                    "Set the updated campaign markdown.",
+                    new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
                     {
-                        Model = model,
-                        Temperature = 0,
-                        MaxCompletionTokens = 1200,
-                        Messages = new List<ChatMessage>
+                        ["type"] = "object",
+                        ["additionalProperties"] = false,
+                        ["properties"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
                         {
-                            new(StaticValues.ChatMessageRoles.System,
-                                "You are a campaign bootstrapper for a simplified D&D-like Discord engine. " +
-                                "Return strict JSON only in assistant message content. " +
-                                "Do not call tools or functions. Do not return empty content. No markdown. No code fences."),
-                            new(StaticValues.ChatMessageRoles.User, requestPrompt)
-                        }
-                    };
-
-                    Console.WriteLine($"[dnd] campaign-generate[{requestId}]: retry request model={model} temp={retry.Temperature} maxCompletionTokens={retry.MaxCompletionTokens} msgChars={requestPrompt.Length}");
-                    var retrySw = Stopwatch.StartNew();
-                    var retryResp = await context.OpenAILogic.CreateChatCompletionAsync(retry);
-                    retrySw.Stop();
-                    var retryContent = retryResp?.Choices?.FirstOrDefault()?.Message?.Content?.Trim();
-                    Console.WriteLine($"[dnd] campaign-generate[{requestId}]: retry response httpMs={retrySw.ElapsedMilliseconds} ok={retryResp?.Successful} contentLen={(retryContent == null ? -1 : retryContent.Length)}");
-                    if (retryResp is { Successful: true } && !string.IsNullOrWhiteSpace(retryContent))
+                            ["campaignMarkdown"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase) { ["type"] = "string" }
+                        },
+                        ["required"] = new[] { "campaignMarkdown" }
+                    }),
+                BuildResponsesFunctionTool(
+                    "builder_finalize_package",
+                    "Signal completion.",
+                    new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
                     {
-                        content = retryContent;
-                    }
-                }
-                catch (Exception ex)
+                        ["type"] = "object",
+                        ["additionalProperties"] = true
+                    })
+            };
+
+            string ToolHandler(ResponsesToolCall call)
+            {
+                if (!TryParseJsonElement(call.ArgumentsJson, out var args))
                 {
-                    Console.WriteLine($"[dnd] campaign-generate[{requestId}]: retry exception {ex.GetType().Name} {ex.Message}");
+                    return JsonSerializer.Serialize(new { ok = false, error = "Invalid JSON args." });
+                }
+
+                switch (call.Name.Trim().ToLowerInvariant())
+                {
+                    case "builder_set_campaign_markdown":
+                    {
+                        if (!TryGetPropertyIgnoreCase(args, "campaignMarkdown", out var mdEl) || mdEl.ValueKind != JsonValueKind.String)
+                        {
+                            return JsonSerializer.Serialize(new { ok = false, error = "campaignMarkdown missing." });
+                        }
+                        var md = mdEl.GetString()?.Trim();
+                        if (string.IsNullOrWhiteSpace(md))
+                        {
+                            return JsonSerializer.Serialize(new { ok = false, error = "campaignMarkdown empty." });
+                        }
+                        updated = TrimToLimit(md, MaxCampaignChars);
+                        return JsonSerializer.Serialize(new { ok = true, markdownLen = updated.Length });
+                    }
+                    case "builder_finalize_package":
+                        finalized = true;
+                        return JsonSerializer.Serialize(new { ok = true, finalized = true });
+                    default:
+                        return JsonSerializer.Serialize(new { ok = false, error = $"Unknown tool: {call.Name}" });
                 }
             }
 
-            if (string.IsNullOrWhiteSpace(content))
+            var loop = await RunResponsesToolLoopAsync(
+                context,
+                channelState,
+                Guid.NewGuid().ToString("n")[..8],
+                "draft-update",
+                model,
+                strict
+                    ? "You are a GM prep agent revising a campaign draft. Call tools only. You MUST call builder_set_campaign_markdown and then builder_finalize_package."
+                    : "You are a GM prep agent revising a campaign draft. Use tools to set updated campaign markdown, then finalize.",
+                BuildDraftUpdatePrompt(campaignName, existingMarkdown, modificationPrompt),
+                tools,
+                ToolHandler,
+                () => finalized || !string.IsNullOrWhiteSpace(updated),
+                maxOutputTokens: 1200,
+                timeoutSeconds: 45,
+                ct: ct,
+                progress: progress);
+
+            if (!loop.Successful)
             {
-                return new CampaignGenerateResult(null, "Empty response content from OpenAI.", (int)sw.ElapsedMilliseconds, model);
+                return new DraftUpdateGenerateResult(false, loop.Error, null);
             }
-        }
-
-        var json = ExtractJsonObject(content);
-        if (string.IsNullOrWhiteSpace(json))
-        {
-            Console.WriteLine(
-                $"[dnd] campaign-generate[{requestId}]: non-JSON response httpMs={sw.ElapsedMilliseconds} model={model} contentLen={content.Length}");
-            Console.WriteLine($"[dnd] campaign-generate[{requestId}]: content={content}");
-            return new CampaignGenerateResult(null, "OpenAI returned non-JSON content (no JSON object found).", (int)sw.ElapsedMilliseconds, model);
-        }
-
-        try
-        {
-            var parsed = JsonSerializer.Deserialize<CampaignCreateResponseDto>(json, _jsonOptions);
-            if (parsed == null)
+            if (string.IsNullOrWhiteSpace(updated))
             {
-                Console.WriteLine(
-                    $"[dnd] campaign-generate[{requestId}]: JSON deserialized to null httpMs={sw.ElapsedMilliseconds} model={model} jsonLen={json.Length}");
-                Console.WriteLine($"[dnd] campaign-generate[{requestId}]: json={json}");
-                return new CampaignGenerateResult(null, "Failed to parse JSON response (null).", (int)sw.ElapsedMilliseconds, model);
-            }
-
-            parsed.CampaignMarkdown = parsed.CampaignMarkdown?.Trim();
-            parsed.Encounters ??= new List<EncounterTemplateDto>();
-            parsed.FunctionCalls ??= new List<DndLiteFunctionCallDto>();
-            parsed.UnassignedPcs ??= new List<UnassignedPcDto>();
-            if (parsed.Encounters.Count > 12)
-            {
-                parsed.Encounters = parsed.Encounters.Take(12).ToList();
+                return new DraftUpdateGenerateResult(false, "No updated campaign markdown produced.", null);
             }
 
-            Console.WriteLine(
-                $"[dnd] campaign-generate[{requestId}]: ok httpMs={sw.ElapsedMilliseconds} model={model} mdLen={(parsed.CampaignMarkdown ?? string.Empty).Length} encounters={parsed.Encounters.Count} fnCalls={parsed.FunctionCalls.Count} unassigned={parsed.UnassignedPcs.Count}");
-            return new CampaignGenerateResult(parsed, null, (int)sw.ElapsedMilliseconds, model);
+            return new DraftUpdateGenerateResult(true, null, updated);
         }
-        catch (Exception ex)
+
+        var first = await AttemptAsync(false);
+        if (first.Successful)
         {
-            Console.WriteLine(
-                $"[dnd] campaign-generate[{requestId}]: JSON parse exception httpMs={sw.ElapsedMilliseconds} model={model} ex={ex.GetType().Name} msg={ex.Message} jsonLen={json.Length}");
-            Console.WriteLine($"[dnd] campaign-generate[{requestId}]: json={json}");
-            return new CampaignGenerateResult(null, $"Failed to parse JSON response: {ex.GetType().Name} {ex.Message}", (int)sw.ElapsedMilliseconds, model);
+            return first;
         }
+
+        Console.WriteLine($"[dnd] draftupdate: first responses attempt failed err={first.Error}; retrying strict");
+        if (progress != null)
+        {
+            await progress($"Draft Revision: retrying with stricter instructions ({TrimToLimit(first.Error, 200)}).");
+        }
+        return await AttemptAsync(true);
     }
 
     private async Task<CharacterCreateResponseDto> GenerateCharacterAsync(
@@ -6388,59 +7692,134 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         string name,
         string concept,
         string campaignMarkdown,
-        CancellationToken ct)
+        CancellationToken ct,
+        Func<string, Task> progress = null)
     {
-        var model = ResolveModel(context, channelState);
-        var requestPrompt = BuildCreateCharacterPrompt(name, concept, campaignMarkdown);
+        var model = ResolveCampaignBootstrapModel(context, channelState);
+        var prompt = BuildCreateCharacterPrompt(name, concept, campaignMarkdown);
 
-        var request = new ChatCompletionCreateRequest
+        async Task<CharacterCreateResponseDto> AttemptAsync(bool strict)
         {
-            Model = model,
-            Messages = new List<ChatMessage>
+            var acc = new CharacterSheetAccumulator();
+            var tools = new List<Dictionary<string, object>>
             {
-                new(StaticValues.ChatMessageRoles.System,
-                    "You are creating a simplified character sheet for a Discord D&D-like engine. " +
-                    "Return strict JSON only. No markdown. No code fences."),
-                new(StaticValues.ChatMessageRoles.User, requestPrompt)
+                BuildResponsesFunctionTool(
+                    "builder_set_character_sheet",
+                    "Set the generated character sheet fields.",
+                    new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["type"] = "object",
+                        ["additionalProperties"] = false,
+                        ["properties"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+                        {
+                            ["profileMarkdown"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase) { ["type"] = "string" },
+                            ["maxHp"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase) { ["type"] = "integer" },
+                            ["maxMp"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase) { ["type"] = "integer" },
+                            ["stats"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+                            {
+                                ["type"] = "object",
+                                ["additionalProperties"] = false,
+                                ["properties"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+                                {
+                                    ["str"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase) { ["type"] = "integer" },
+                                    ["def"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase) { ["type"] = "integer" },
+                                    ["dex"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase) { ["type"] = "integer" },
+                                    ["spellPower"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase) { ["type"] = "integer" },
+                                    ["luck"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase) { ["type"] = "integer" }
+                                },
+                                ["required"] = new[] { "str", "def", "dex", "spellPower", "luck" }
+                            }
+                        },
+                        ["required"] = new[] { "profileMarkdown", "maxHp", "maxMp", "stats" }
+                    }),
+                BuildResponsesFunctionTool(
+                    "builder_finalize_package",
+                    "Signal completion.",
+                    new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        ["type"] = "object",
+                        ["additionalProperties"] = true
+                    })
+            };
+
+            string ToolHandler(ResponsesToolCall call)
+            {
+                if (!TryParseJsonElement(call.ArgumentsJson, out var args))
+                {
+                    return JsonSerializer.Serialize(new { ok = false, error = "Invalid JSON args." });
+                }
+
+                switch (call.Name.Trim().ToLowerInvariant())
+                {
+                    case "builder_set_character_sheet":
+                    {
+                        try
+                        {
+                            var parsed = JsonSerializer.Deserialize<CharacterCreateResponseDto>(args.GetRawText(), _jsonOptions);
+                            if (parsed == null)
+                            {
+                                return JsonSerializer.Serialize(new { ok = false, error = "Sheet payload missing." });
+                            }
+
+                            parsed.ProfileMarkdown = parsed.ProfileMarkdown?.Trim() ?? string.Empty;
+                            parsed.Stats = ClampStats(parsed.Stats);
+                            parsed.MaxHp = Math.Clamp(parsed.MaxHp <= 0 ? 20 : parsed.MaxHp, 1, 200);
+                            parsed.MaxMp = Math.Clamp(parsed.MaxMp, 0, 200);
+                            acc.Sheet = parsed;
+                            return JsonSerializer.Serialize(new { ok = true, hp = parsed.MaxHp, mp = parsed.MaxMp });
+                        }
+                        catch (Exception ex)
+                        {
+                            return JsonSerializer.Serialize(new { ok = false, error = $"Sheet parse failed: {ex.Message}" });
+                        }
+                    }
+                    case "builder_finalize_package":
+                        acc.Finalized = true;
+                        return JsonSerializer.Serialize(new { ok = true, finalized = true });
+                    default:
+                        return JsonSerializer.Serialize(new { ok = false, error = $"Unknown tool: {call.Name}" });
+                }
             }
-        };
 
-        var response = await context.OpenAILogic.CreateChatCompletionAsync(request);
-        if (!response.Successful)
-        {
-            return null;
-        }
+            var loop = await RunResponsesToolLoopAsync(
+                context,
+                channelState,
+                Guid.NewGuid().ToString("n")[..8],
+                "character-create",
+                model,
+                strict
+                    ? "You are generating a simplified D&D character sheet. Call tools only. You MUST call builder_set_character_sheet and then builder_finalize_package."
+                    : "You are generating a simplified D&D character sheet. Use tools to set the sheet, then finalize.",
+                prompt,
+                tools,
+                ToolHandler,
+                () => acc.Finalized || acc.Sheet != null,
+                maxOutputTokens: 900,
+                timeoutSeconds: 45,
+                ct: ct,
+                progress: progress);
 
-        var content = response.Choices.FirstOrDefault()?.Message?.Content?.Trim();
-        if (string.IsNullOrWhiteSpace(content))
-        {
-            return null;
-        }
-
-        var json = ExtractJsonObject(content);
-        if (string.IsNullOrWhiteSpace(json))
-        {
-            return null;
-        }
-
-        try
-        {
-            var parsed = JsonSerializer.Deserialize<CharacterCreateResponseDto>(json, _jsonOptions);
-            if (parsed == null)
+            if (!loop.Successful)
             {
+                Console.WriteLine($"[dnd] character-generate: loop failed err={loop.Error}");
                 return null;
             }
 
-            parsed.ProfileMarkdown = parsed.ProfileMarkdown?.Trim();
-            parsed.Stats ??= new DndStats(10, 10, 10, 10, 10);
-            parsed.MaxHp = Math.Clamp(parsed.MaxHp, 1, 200);
-            parsed.MaxMp = Math.Clamp(parsed.MaxMp, 0, 200);
-            return parsed;
+            return acc.Sheet;
         }
-        catch
+
+        var first = await AttemptAsync(false);
+        if (first != null)
         {
-            return null;
+            return first;
         }
+
+        Console.WriteLine("[dnd] character-generate: retrying strict");
+        if (progress != null)
+        {
+            await progress("Sheet Generation: retrying with stricter instructions.");
+        }
+        return await AttemptAsync(true);
     }
 
     private async Task<string> GenerateNpcFlavorLineAsync(
@@ -6501,9 +7880,9 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             Model = model,
             Messages = new List<ChatMessage>
             {
-                new(StaticValues.ChatMessageRoles.System,
+                new(ChatCompletionRole.System,
                     "You are the game master. Return strict JSON only. No markdown. No code fences."),
-                new(StaticValues.ChatMessageRoles.User, sb.ToString().Trim())
+                new(ChatCompletionRole.User, sb.ToString().Trim())
             }
         };
 
@@ -6513,7 +7892,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             return null;
         }
 
-        var content = response.Choices.FirstOrDefault()?.Message?.Content?.Trim();
+        var content = ExtractChatMessageText(response.Choices.FirstOrDefault()?.Message)?.Trim();
         if (string.IsNullOrWhiteSpace(content))
         {
             return null;
@@ -6556,6 +7935,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         sb.AppendLine("functionCalls: array of objects: {\"name\":\"...\",\"arguments\":{...}}.");
         sb.AppendLine("unassignedPcs: array of PCs mentioned in the prompt that cannot be mapped to the provided PC roster; each: {\"name\":\"...\",\"concept\":\"...\"}.");
         sb.AppendLine("Hard limit: keep the entire JSON response under ~6000 characters.");
+        sb.AppendLine("Output rule: the FIRST character of your response must be '{' and the LAST character must be '}'.");
         sb.AppendLine();
         sb.AppendLine("You are generating a NEW version of the campaign. Treat any existing campaign content as disposable and overwrite it.");
         sb.AppendLine("This tool catalogs replayable campaigns (campaign.json is party-free).");
@@ -7490,6 +8870,34 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         return value[..maxChars];
     }
 
+    private static string NormalizeJsonForTrace(string json, int maxChars = 0)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return "{}";
+        }
+
+        string normalized;
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            normalized = JsonSerializer.Serialize(doc.RootElement);
+        }
+        catch
+        {
+            normalized = json;
+        }
+
+        var compact = normalized.Replace('\r', ' ').Replace('\n', ' ').Trim();
+        compact = Regex.Replace(compact, @"\s+", " ");
+        if (maxChars > 0)
+        {
+            return TrimToLimit(compact, Math.Max(40, maxChars));
+        }
+
+        return compact;
+    }
+
     private async Task AppendPartyRosterContextAsync(
         StringBuilder userCtx,
         InstructionGPT.ChannelState channelState,
@@ -7609,7 +9017,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 
             var mentionToken = $"<@{message.Author.Id}>";
             var text = $"{message.Author.Username} (mention: {mentionToken}): {content}";
-            channelState.InstructionChat.AddMessage(new ChatMessage(StaticValues.ChatMessageRoles.User, text));
+            channelState.InstructionChat.AddMessage(new ChatMessage(ChatCompletionRole.User, text));
             return true;
         }
         catch
@@ -7634,7 +9042,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 return false;
             }
 
-            channelState.InstructionChat.AddMessage(new ChatMessage(StaticValues.ChatMessageRoles.Assistant, cleaned));
+            channelState.InstructionChat.AddMessage(new ChatMessage(ChatCompletionRole.Assistant, cleaned));
             return true;
         }
         catch
@@ -7663,14 +9071,19 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             var msg = node.Value;
             node = node.Previous;
 
-            if (msg == null || string.IsNullOrWhiteSpace(msg.Content) || string.IsNullOrWhiteSpace(msg.Role))
+            if (msg == null || string.IsNullOrWhiteSpace(msg.Content))
+            {
+                continue;
+            }
+
+            if (msg.Role is not { } role)
             {
                 continue;
             }
 
             // Keep only user/assistant turns for follow-up corrections.
-            if (!string.Equals(msg.Role, StaticValues.ChatMessageRoles.User, StringComparison.OrdinalIgnoreCase) &&
-                !string.Equals(msg.Role, StaticValues.ChatMessageRoles.Assistant, StringComparison.OrdinalIgnoreCase))
+            if (role != ChatCompletionRole.User &&
+                role != ChatCompletionRole.Assistant)
             {
                 continue;
             }
@@ -7693,7 +9106,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 content = content[^remaining..];
             }
 
-            result.Add(new ChatMessage(msg.Role, content));
+            result.Add(new ChatMessage(role, content));
             total += content.Length;
         }
 
@@ -7717,6 +9130,87 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         }
 
         return trimmed[start..(end + 1)].Trim();
+    }
+
+    private static string ExtractChatMessageText(ChatMessage msg)
+    {
+        if (msg == null)
+        {
+            return null;
+        }
+
+        // Most models populate `Content` directly.
+        if (!string.IsNullOrWhiteSpace(msg.Content))
+        {
+            return msg.Content;
+        }
+
+        // Some providers/models return structured content parts; the SDK exposes those via ContentCalculated (typed as object).
+        try
+        {
+            var calc = msg.ContentCalculated;
+            if (calc is string s)
+            {
+                return s;
+            }
+
+            if (calc is IEnumerable<MessageContent> parts)
+            {
+                var sb = new StringBuilder();
+                foreach (var p in parts)
+                {
+                    if (p == null)
+                    {
+                        continue;
+                    }
+
+                    if (string.Equals(p.Type, "text", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(p.Text))
+                    {
+                        sb.Append(p.Text);
+                    }
+                }
+
+                var joined = sb.ToString();
+                return string.IsNullOrWhiteSpace(joined) ? null : joined;
+            }
+
+            return calc?.ToString();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private async Task SendProgressUpdateAsync(IMessageChannel channel, string text, DiscordModuleContext context = null)
+    {
+        if (channel == null || string.IsNullOrWhiteSpace(text))
+        {
+            return;
+        }
+
+        var logPolicy = ResolveDndLogPolicy(context ?? _moduleContext);
+        try
+        {
+            var payload = $"⏳ {text.Trim()}";
+            if (ShouldLog(DndLogLevel.Debug, logPolicy.ConsoleMinLevel))
+            {
+                var preview = TrimToLimit(payload.Replace('\n', ' ').Replace('\r', ' '), 180);
+                Console.WriteLine($"[dnd] progress->send channel={channel.Id} len={payload.Length} text={preview}");
+            }
+            await SendChunkedAsync(channel, payload);
+            if (ShouldLog(DndLogLevel.Debug, logPolicy.ConsoleMinLevel))
+            {
+                Console.WriteLine($"[dnd] progress->sent channel={channel.Id} len={payload.Length}");
+            }
+        }
+        catch (Exception ex)
+        {
+            if (ShouldLog(DndLogLevel.Error, logPolicy.ConsoleMinLevel))
+            {
+                Console.WriteLine($"[dnd] progress->send-failed channel={channel.Id} ex={ex.GetType().Name} msg={ex.Message}");
+            }
+        }
     }
 
     private static async Task SendChunkedAsync(IMessageChannel channel, string text)

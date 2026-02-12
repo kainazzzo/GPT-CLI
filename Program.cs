@@ -8,10 +8,11 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using GPT.CLI.Chat.Discord;
 using GPT.CLI.Chat;
-using OpenAI.Extensions;
-using OpenAI.ObjectModels;
-using OpenAI.ObjectModels.RequestModels;
-using OpenAI.ObjectModels.ResponseModels;
+using Betalgo.Ranul.OpenAI.Extensions;
+using Betalgo.Ranul.OpenAI.ObjectModels;
+using Betalgo.Ranul.OpenAI.ObjectModels.RequestModels;
+using Betalgo.Ranul.OpenAI.Contracts.Enums;
+using Betalgo.Ranul.OpenAI.ObjectModels.ResponseModels;
 
 namespace GPT.CLI;
 
@@ -19,6 +20,44 @@ class Program
 {
     static async Task Main(string[] args)
     {
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+        {
+            try
+            {
+                var ex = e.ExceptionObject as Exception;
+                Console.Error.WriteLine(
+                    ex == null
+                        ? $"[host] UnhandledException terminating={e.IsTerminating} object={e.ExceptionObject}"
+                        : $"[host] UnhandledException terminating={e.IsTerminating}: {ex}");
+            }
+            catch
+            {
+                // Best effort only.
+            }
+        };
+        TaskScheduler.UnobservedTaskException += (_, e) =>
+        {
+            try
+            {
+                Console.Error.WriteLine($"[host] UnobservedTaskException: {e.Exception}");
+            }
+            catch
+            {
+                // Best effort only.
+            }
+        };
+        AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+        {
+            try
+            {
+                Console.WriteLine("[host] ProcessExit received.");
+            }
+            catch
+            {
+                // Best effort only.
+            }
+        };
+
         var (modeOverride, remainingArgs) = ParseModeOverride(args);
 
         using var host = Host.CreateDefaultBuilder(remainingArgs)
@@ -156,7 +195,7 @@ class Program
         {
             Messages = new List<ChatMessage>(50)
             {
-                new(StaticValues.ChatMessageRoles.System,
+                new(ChatCompletionRole.System,
                     "You are ChatGPT CLI, the helpful assistant, but you're running on a command line.")
             }
         }, ParameterMapping.Mode.Chat);
@@ -203,7 +242,7 @@ class Program
             if (chatInput.StartsWith("!instruction "))
             {
                 // add instruction:
-                chatBot.AddInstruction(new ChatMessage(StaticValues.ChatMessageRoles.System,
+                chatBot.AddInstruction(new ChatMessage(ChatCompletionRole.System,
                     chatInput.Substring(13)));
                 await Console.Out.WriteLineAsync($"Instructions added: {chatInput.Substring(13)}");
                 continue;
@@ -238,8 +277,8 @@ class Program
 
             for (int i = 0; i < prompts.Count; i++)
             {
-                chatBot.AddMessage(new(StaticValues.ChatMessageRoles.User, prompts[i]));
-                chatBot.AddMessage(new(StaticValues.ChatMessageRoles.Assistant, promptResponses[i]));
+                chatBot.AddMessage(new(ChatCompletionRole.User, prompts[i]));
+                chatBot.AddMessage(new(ChatCompletionRole.Assistant, promptResponses[i]));
             }
 
             // If there's embedded context provided, inject it after the existing chat history, and before the new prompt
@@ -248,17 +287,17 @@ class Program
                 // Search for the closest few documents and add those if they aren't used yet
                 var closestDocuments =
                     Document.FindMostSimilarDocuments(documents, await openAILogic.GetEmbeddingForPrompt(chatInput), gptParameters.ClosestMatchLimit).ToList();
-                chatBot.AddMessage(new(StaticValues.ChatMessageRoles.User,
+                chatBot.AddMessage(new(ChatCompletionRole.User,
                     $"Embedding context for the next {closestDocuments.Count} message(s). Please use this information to answer the next prompt"));
                 foreach (var closestDocument in closestDocuments)
                 {
-                    chatBot.AddMessage(new(StaticValues.ChatMessageRoles.User,
+                    chatBot.AddMessage(new(ChatCompletionRole.User,
                         $"---context---\r\n{closestDocument.Document.Text}\r\n--end context---"));
                 }
             }
 
             prompts.Add(chatInput);
-            chatBot.AddMessage(new(StaticValues.ChatMessageRoles.User, chatInput));
+            chatBot.AddMessage(new(ChatCompletionRole.User, chatInput));
 
             // Get the new response:
             var responses = chatBot.GetResponseAsync();

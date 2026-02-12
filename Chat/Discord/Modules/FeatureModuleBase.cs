@@ -1,8 +1,9 @@
 using Discord;
 using Discord.WebSocket;
 using GPT.CLI.Chat.Discord.Commands;
-using OpenAI.ObjectModels;
-using OpenAI.ObjectModels.RequestModels;
+using Betalgo.Ranul.OpenAI.ObjectModels;
+using Betalgo.Ranul.OpenAI.ObjectModels.RequestModels;
+using Betalgo.Ranul.OpenAI.Contracts.Enums;
 
 namespace GPT.CLI.Chat.Discord.Modules;
 
@@ -17,7 +18,7 @@ public abstract class FeatureModuleBase : IFeatureModule
         body ??= string.Empty;
         var header = $"Module: {Name} (id={Id})";
         var content = string.IsNullOrWhiteSpace(body) ? header : $"{header}\n{body.Trim()}";
-        return new ChatMessage(StaticValues.ChatMessageRoles.System, content.Trim());
+        return new ChatMessage(ChatCompletionRole.System, content.Trim());
     }
 
     public virtual Task InitializeAsync(DiscordModuleContext context, CancellationToken cancellationToken) => Task.CompletedTask;
