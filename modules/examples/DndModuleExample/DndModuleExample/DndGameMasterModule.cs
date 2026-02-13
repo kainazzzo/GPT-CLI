@@ -1723,8 +1723,40 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         TryGetStringArg(argsJson, "prompt", out var promptRaw);
         TryGetBoolArg(argsJson, "overwrite", out var overwrite);
 
-        if (string.IsNullOrWhiteSpace(campaignNameRaw) &&
-            TryDetectCampaignCreateIntent(strippedText, out var detectedName, out var detectedOverwrite))
+        var explicitCampaignCreate = TryDetectCampaignCreateIntent(strippedText, out var detectedName, out var detectedOverwrite);
+        if (!explicitCampaignCreate)
+        {
+            if (LooksLikeDraftUpdateIntent(strippedText))
+            {
+                return await HandleDraftRouteDraftUpdateAsync(
+                    context,
+                    channelState,
+                    message,
+                    dndState,
+                    "{}",
+                    strippedText,
+                    ct);
+            }
+
+            if (LooksLikeCharacterCreateIntent(strippedText) || LooksLikeNpcCreateIntentFromText(strippedText))
+            {
+                return await HandleDraftRouteSheetCreateAsync(
+                    context,
+                    channelState,
+                    message,
+                    dndState,
+                    "{}",
+                    strippedText,
+                    ct);
+            }
+
+            return new DraftIntentRouterDispatchResult(
+                true,
+                "I won't create or overwrite a campaign unless you explicitly ask for that. " +
+                "For example: `create a new campaign named ...`.");
+        }
+
+        if (string.IsNullOrWhiteSpace(campaignNameRaw))
         {
             campaignNameRaw = detectedName;
             overwrite = overwrite || detectedOverwrite;
@@ -1787,6 +1819,38 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
     {
         TryGetStringArg(argsJson, "name", out var campaignNameRaw);
         TryGetStringArg(argsJson, "prompt", out var promptRaw);
+
+        var explicitDraftUpdate = LooksLikeDraftUpdateIntent(strippedText);
+        if (!explicitDraftUpdate)
+        {
+            if (TryDetectCampaignCreateIntent(strippedText, out _, out _))
+            {
+                return await HandleDraftRouteCampaignCreateAsync(
+                    context,
+                    channelState,
+                    message,
+                    dndState,
+                    "{}",
+                    strippedText,
+                    ct);
+            }
+
+            if (LooksLikeCharacterCreateIntent(strippedText) || LooksLikeNpcCreateIntentFromText(strippedText))
+            {
+                return await HandleDraftRouteSheetCreateAsync(
+                    context,
+                    channelState,
+                    message,
+                    dndState,
+                    "{}",
+                    strippedText,
+                    ct);
+            }
+
+            return new DraftIntentRouterDispatchResult(
+                true,
+                "I won't rewrite the campaign unless you explicitly ask to revise or update the draft story.");
+        }
 
         var campaignName = string.IsNullOrWhiteSpace(campaignNameRaw)
             ? (dndState?.ActiveCampaignName ?? "default")
@@ -2203,6 +2267,11 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             "5) Pass timeout changes -> dnd_route_passtimeout.\n" +
             "6) If no state mutation requested -> dnd_route_chat_reply.\n" +
             "7) If mutation intent is clear but missing required details -> dnd_route_clarify.\n" +
+            "Hard rules:\n" +
+            "- Use dnd_route_campaign_create ONLY when the user explicitly asks to create/start/begin a campaign.\n" +
+            "- If the request is about character/NPC/sheet/party/roster, never call dnd_route_campaign_create.\n" +
+            "- If the request is about character/NPC/sheet creation, never call dnd_route_draft_update.\n" +
+            "- Match response scope to request; do not trigger broad campaign rewrites for narrow sheet/party tasks.\n" +
             "Never call gptcli_dnd_* tools directly in this step.\n" +
             "Keep tool arguments minimal and explicit. For overwrite=true, only set when user explicitly asked to overwrite/replace.";
     }
@@ -5910,7 +5979,9 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             var sb = new StringBuilder();
             sb.AppendLine(RenderEncounterSnapshot(snap.ActiveEncounterState));
             sb.AppendLine();
-            sb.AppendLine(RenderNextRequest(DndTurnResult.BuildNextRequest(snap.ActiveEncounterState, campaign.RunnerState.ActiveEncounter?.PendingRolls ?? new List<DndPendingRoll>())));
+            sb.AppendLine(RenderNextRequest(
+                DndTurnResult.BuildNextRequest(snap.ActiveEncounterState, campaign.RunnerState.ActiveEncounter?.PendingRolls ?? new List<DndPendingRoll>()),
+                snap.ActiveEncounterState));
             return new GptCliExecutionResult(true, TrimToLimit(sb.ToString().Trim(), 3500), false);
         }
         finally
@@ -6221,7 +6292,9 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 sb.AppendLine();
                 sb.AppendLine(RenderEncounterSnapshot(snap.ActiveEncounterState));
                 sb.AppendLine();
-                sb.AppendLine(RenderNextRequest(DndTurnResult.BuildNextRequest(snap.ActiveEncounterState, campaign.RunnerState.ActiveEncounter?.PendingRolls ?? new List<DndPendingRoll>())));
+                sb.AppendLine(RenderNextRequest(
+                    DndTurnResult.BuildNextRequest(snap.ActiveEncounterState, campaign.RunnerState.ActiveEncounter?.PendingRolls ?? new List<DndPendingRoll>()),
+                    snap.ActiveEncounterState));
             }
             await SendChunkedAsync(message.Channel, TrimToLimit(sb.ToString().Trim(), 3500));
             return (true, false);
@@ -7888,7 +7961,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         if (res.EncounterResult?.State != null)
         {
             sb.AppendLine(RenderPartySummary(res.Campaign));
-            sb.AppendLine(RenderNextRequest(res.EncounterResult.NextRequest));
+            sb.AppendLine(RenderNextRequest(res.EncounterResult.NextRequest, res.EncounterResult.State));
         }
 
         return TrimToLimit(sb.ToString().Trim(), 3500);
@@ -7941,9 +8014,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             }
         }
 
-        lead = string.IsNullOrWhiteSpace(lead)
-            ? null
-            : TrimToLimit(lead.Replace("\r", " ").Replace("\n", " ").Trim(), settings.MaxLeadChars);
+        lead = SanitizeNarrationLead(lead, settings.MaxLeadChars);
 
         if (string.IsNullOrWhiteSpace(lead))
         {
@@ -7991,7 +8062,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         }
 
         var next = res.EncounterResult?.NextRequest;
-        var nextText = next == null ? string.Empty : RenderNextRequest(next);
+        var nextText = next == null ? string.Empty : RenderNextRequest(next, res.EncounterResult?.State);
         if (!string.IsNullOrWhiteSpace(nextText))
         {
             if (sb.Length > 0)
@@ -8087,6 +8158,19 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         }
 
         return Regex.Replace(message.Trim(), @"^\[[^\]]+\]\s*", string.Empty, RegexOptions.CultureInvariant);
+    }
+
+    private static string SanitizeNarrationLead(string lead, int maxChars)
+    {
+        if (string.IsNullOrWhiteSpace(lead))
+        {
+            return null;
+        }
+
+        var cleaned = lead.Replace("\r", " ").Replace("\n", " ").Trim();
+        // Remove machine-ish labels like "[encounter-start]" that some models prepend.
+        cleaned = Regex.Replace(cleaned, @"^(?:\[[^\]]+\]\s*)+", string.Empty, RegexOptions.CultureInvariant).Trim();
+        return string.IsNullOrWhiteSpace(cleaned) ? null : TrimToLimit(cleaned, maxChars);
     }
 
     private static string BuildDeterministicGameLead(DndCampaignResult res, string actionLabel, string emojiLevel)
@@ -8229,8 +8313,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 return null;
             }
 
-            lead = lead.Replace("\r", " ").Replace("\n", " ").Trim();
-            return TrimToLimit(lead, settings.MaxLeadChars);
+            return SanitizeNarrationLead(lead, settings.MaxLeadChars);
         }
         catch
         {
@@ -8246,7 +8329,9 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
     {
         var highlights = ExtractMechanicsHighlights(res);
         var next = res?.EncounterResult?.NextRequest;
-        var nextLine = next == null ? string.Empty : RenderNextRequest(next).Split('\n', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? string.Empty;
+        var nextLine = next == null
+            ? string.Empty
+            : RenderNextRequest(next, res?.EncounterResult?.State).Split('\n', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? string.Empty;
 
         var sb = new StringBuilder();
         sb.AppendLine("Write a GM combat lead line for Discord.");
@@ -8316,7 +8401,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         return TrimToLimit(string.Join("\n", lines), 1700);
     }
 
-    private static string RenderNextRequest(DndNextRequest next)
+    private static string RenderNextRequest(DndNextRequest next, DndEncounterSnapshot encounter = null)
     {
         if (next == null)
         {
@@ -8330,7 +8415,8 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 
         if (next.Kind == DndNextRequestKind.NeedAction)
         {
-            return $"Next: {next.CurrentActorId} to act. Describe the move naturally (attack, cast, or pass).";
+            var actor = RenderActorReference(next.CurrentActorId, encounter);
+            return $"Next: {actor} to act. Describe the move naturally (attack, cast, or pass).";
         }
 
         if (next.RequiredRolls == null || next.RequiredRolls.Count == 0)
@@ -8347,8 +8433,9 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             .Take(8)
             .Select(r =>
             {
-                var target = string.IsNullOrWhiteSpace(r.TargetId) ? string.Empty : $" vs {r.TargetId}";
-                return $"{r.RollId} ({r.Kind} for {r.ActorId}{target})";
+                var actor = RenderActorReference(r.ActorId, encounter);
+                var target = string.IsNullOrWhiteSpace(r.TargetId) ? string.Empty : $" vs {RenderActorReference(r.TargetId, encounter)}";
+                return $"{r.RollId} ({r.Kind} for {actor}{target})";
             })
             .ToList();
         if (rollParts.Count > 0)
@@ -8357,6 +8444,44 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         }
 
         return TrimToLimit(string.Join("\n", lines), 900);
+    }
+
+    private static string RenderActorReference(string actorId, DndEncounterSnapshot encounter)
+    {
+        if (string.IsNullOrWhiteSpace(actorId))
+        {
+            return "unknown";
+        }
+
+        var trimmed = actorId.Trim();
+        var name = ResolveActorDisplayName(encounter, trimmed);
+
+        if (IsPcActorId(trimmed))
+        {
+            var token = trimmed[2..].Trim();
+            if (ulong.TryParse(token, out var userId))
+            {
+                var mention = $"<@{userId}>";
+                if (!string.IsNullOrWhiteSpace(name) && !string.Equals(name, trimmed, StringComparison.OrdinalIgnoreCase))
+                {
+                    return $"{name} ({mention})";
+                }
+
+                return mention;
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(name) && !string.Equals(name, trimmed, StringComparison.OrdinalIgnoreCase))
+        {
+            return name;
+        }
+
+        if (string.Equals(trimmed, "default:default", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Boss";
+        }
+
+        return trimmed;
     }
 
     private static string BuildHelpText()
@@ -9449,14 +9574,15 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 
     private static string BuildCampaignStageOneSystemPrompt(bool strict)
         => strict
-            ? "You are a GM prep agent in DRAFT mode. Call tools only. Follow this exact order: 1) call builder_set_campaign_markdown exactly once, 2) call builder_add_encounter_templates with 3-8 encounters, 3) call builder_finalize_package. Do not call builder_set_campaign_markdown again after step 1 unless the tool explicitly returned an error. Keep campaignMarkdown compact and concise."
-            : "You are a GM prep agent in DRAFT mode. Use tools to draft campaign markdown and encounter templates. Call builder_set_campaign_markdown first, then builder_add_encounter_templates (3-8 encounters), then builder_finalize_package. Avoid repeated markdown tool calls. Keep campaignMarkdown compact.";
+            ? "You are a GM prep agent in DRAFT mode. Call tools only. Follow this order: 1) call builder_set_campaign_markdown exactly once, 2) call builder_add_encounter_templates in multiple small batches (max 2 encounters per call, target 3-4 encounters total), 3) call builder_finalize_package. Do not call builder_set_campaign_markdown again after step 1 unless the tool explicitly returned an error. Keep campaignMarkdown compact and concise."
+            : "You are a GM prep agent in DRAFT mode. Use tools to draft campaign markdown and encounter templates. Call builder_set_campaign_markdown first, then call builder_add_encounter_templates in small batches (max 2 encounters per call, target 3-4 total), then builder_finalize_package. Avoid repeated markdown tool calls. Keep campaignMarkdown compact.";
 
     private static string BuildCampaignStageOneUserPrompt(string campaignName, string prompt, string pcRosterContext)
     {
         var sb = new StringBuilder();
         sb.AppendLine("Stage 1 of 2: build campaign story + encounters only.");
-        sb.AppendLine("Use tools in order: set markdown once, add 3-8 encounter templates, finalize.");
+        sb.AppendLine("Use tools in order: set markdown once, add encounter templates in small batches, finalize.");
+        sb.AppendLine("For builder_add_encounter_templates: send at most 2 encounters per call, target 3-4 encounters total.");
         sb.AppendLine("Do not call builder_set_campaign_markdown repeatedly.");
         sb.AppendLine("Keep campaignMarkdown concise (target <= 4000 chars, compact bullets/headings).");
         sb.AppendLine("Do not create NPC/PC sheets in this stage.");
@@ -9471,6 +9597,78 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         sb.AppendLine("Prompt:");
         sb.AppendLine(prompt ?? string.Empty);
         return sb.ToString().Trim();
+    }
+
+    private static Dictionary<string, object> BuildEncounterTemplateToolParameters()
+    {
+        Dictionary<string, object> BuildStatsSchema()
+            => new(StringComparer.OrdinalIgnoreCase)
+            {
+                ["type"] = "object",
+                ["additionalProperties"] = false,
+                ["properties"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["str"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase) { ["type"] = "integer" },
+                    ["def"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase) { ["type"] = "integer" },
+                    ["dex"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase) { ["type"] = "integer" },
+                    ["spellPower"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase) { ["type"] = "integer" },
+                    ["luck"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase) { ["type"] = "integer" }
+                }
+            };
+
+        Dictionary<string, object> BuildActorSchema()
+            => new(StringComparer.OrdinalIgnoreCase)
+            {
+                ["type"] = "object",
+                ["additionalProperties"] = false,
+                ["properties"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["id"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase) { ["type"] = "string" },
+                    ["name"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase) { ["type"] = "string" },
+                    ["description"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase) { ["type"] = "string" },
+                    ["maxHp"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase) { ["type"] = "integer" },
+                    ["maxMp"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase) { ["type"] = "integer" },
+                    ["stats"] = BuildStatsSchema()
+                }
+            };
+
+        var encounterSchema = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["type"] = "object",
+            ["additionalProperties"] = false,
+            ["properties"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["templateId"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase) { ["type"] = "string" },
+                ["name"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase) { ["type"] = "string" },
+                ["scene"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase) { ["type"] = "string" },
+                ["rewards"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase) { ["type"] = "string" },
+                ["boss"] = BuildActorSchema(),
+                ["adds"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["type"] = "array",
+                    ["maxItems"] = 4,
+                    ["items"] = BuildActorSchema()
+                }
+            },
+            ["required"] = new[] { "name", "scene", "boss" }
+        };
+
+        return new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["type"] = "object",
+            ["additionalProperties"] = false,
+            ["properties"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["encounters"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["type"] = "array",
+                    ["minItems"] = 1,
+                    ["maxItems"] = 2,
+                    ["items"] = encounterSchema
+                }
+            },
+            ["required"] = new[] { "encounters" }
+        };
     }
 
     private static string BuildCampaignStageTwoSystemPrompt(bool strict)
@@ -9543,24 +9741,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 BuildResponsesFunctionTool(
                     "builder_add_encounter_templates",
                     "Add encounter template definitions.",
-                    new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
-                    {
-                        ["type"] = "object",
-                        ["additionalProperties"] = false,
-                        ["properties"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
-                        {
-                            ["encounters"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
-                            {
-                                ["type"] = "array",
-                                ["items"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
-                                {
-                                    ["type"] = "object",
-                                    ["additionalProperties"] = true
-                                }
-                            }
-                        },
-                        ["required"] = new[] { "encounters" }
-                    },
+                    BuildEncounterTemplateToolParameters(),
                     strict: false),
                 BuildResponsesFunctionTool(
                     "builder_finalize_package",
@@ -9619,8 +9800,22 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                         {
                             return JsonSerializer.Serialize(new { ok = false, error = $"Encounter parse failed: {ex.Message}" });
                         }
-                        stage1.Encounters.AddRange(parsed);
-                        return JsonSerializer.Serialize(new { ok = true, added = parsed.Count, total = stage1.Encounters.Count });
+                        if (parsed.Count == 0)
+                        {
+                            return JsonSerializer.Serialize(new { ok = false, error = "encounters array is empty." });
+                        }
+
+                        var accepted = parsed.Take(2).ToList();
+                        stage1.Encounters.AddRange(accepted);
+                        var dropped = Math.Max(0, parsed.Count - accepted.Count);
+                        return JsonSerializer.Serialize(new
+                        {
+                            ok = true,
+                            added = accepted.Count,
+                            dropped,
+                            total = stage1.Encounters.Count,
+                            hint = "Send up to 2 encounters per call; continue calling this tool until there are 3-4 total encounters, then finalize."
+                        });
                     }
                     case "builder_finalize_package":
                         stage1.Finalized = true;
@@ -9640,8 +9835,8 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 BuildCampaignStageOneUserPrompt(campaignName, prompt, pcRosterContext),
                 stage1Tools,
                 StageOneToolHandler,
-                () => stage1.Finalized || (!string.IsNullOrWhiteSpace(stage1.CampaignMarkdown) && stage1.Encounters.Count > 0),
-                maxOutputTokens: strict ? 2800 : 1600,
+                () => stage1.Finalized || (!string.IsNullOrWhiteSpace(stage1.CampaignMarkdown) && stage1.Encounters.Count >= 3),
+                maxOutputTokens: strict ? 9000 : 7000,
                 timeoutSeconds: CampaignCreateTimeoutSeconds,
                 ct: ct,
                 progress: progress);
@@ -9665,24 +9860,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                     BuildResponsesFunctionTool(
                         "builder_add_encounter_templates",
                         "Add encounter template definitions.",
-                        new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
-                        {
-                            ["type"] = "object",
-                            ["additionalProperties"] = false,
-                            ["properties"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
-                            {
-                                ["encounters"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
-                                {
-                                    ["type"] = "array",
-                                    ["items"] = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase)
-                                    {
-                                        ["type"] = "object",
-                                        ["additionalProperties"] = true
-                                    }
-                                }
-                            },
-                            ["required"] = new[] { "encounters" }
-                        },
+                        BuildEncounterTemplateToolParameters(),
                         strict: false),
                     BuildResponsesFunctionTool(
                         "builder_finalize_package",
@@ -9700,12 +9878,12 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                     requestId,
                     "campaign-stage1-recovery",
                     model,
-                    "You are finishing stage 1. Campaign markdown is already locked and cannot be changed. Call builder_add_encounter_templates with 3-8 encounters, then call builder_finalize_package.",
+                    "You are finishing stage 1. Campaign markdown is already locked and cannot be changed. Call builder_add_encounter_templates in small batches (max 2 encounters per call, target 3-4 total), then call builder_finalize_package.",
                     $"Campaign name: {campaignName}\n\nCampaign markdown (do not rewrite):\n{TrimToLimit(stage1.CampaignMarkdown, 1400)}\n\nOriginal prompt:\n{prompt ?? string.Empty}",
                     stage1RecoveryTools,
                     StageOneToolHandler,
-                    () => stage1.Finalized || stage1.Encounters.Count > 0,
-                    maxOutputTokens: 1400,
+                    () => stage1.Finalized || stage1.Encounters.Count >= 3,
+                    maxOutputTokens: 7000,
                     timeoutSeconds: CampaignCreateTimeoutSeconds,
                     ct: ct,
                     progress: progress);
@@ -9989,7 +10167,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 stage2Tools,
                 StageTwoToolHandler,
                 () => stage2.Finalized,
-                maxOutputTokens: strict ? 2200 : 1400,
+                maxOutputTokens: strict ? 8000 : 6000,
                 timeoutSeconds: CampaignCreateTimeoutSeconds,
                 ct: ct,
                 allowNoToolCallsTerminal: true,
@@ -10119,7 +10297,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 tools,
                 ToolHandler,
                 () => finalized || !string.IsNullOrWhiteSpace(updated),
-                maxOutputTokens: 1200,
+                maxOutputTokens: 4500,
                 timeoutSeconds: 45,
                 ct: ct,
                 progress: progress);
@@ -10258,7 +10436,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 tools,
                 ToolHandler,
                 () => acc.Finalized || acc.Sheet != null,
-                maxOutputTokens: 900,
+                maxOutputTokens: 3500,
                 timeoutSeconds: 45,
                 ct: ct,
                 progress: progress);
@@ -11854,7 +12032,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         {
             return new DraftStatusUpdate(
                 "character-gen-start",
-                "On it. I'm generating that character sheet now. Usually 10-30 seconds.",
+                "Got it. Creating that character now. Usually 10-30 seconds.",
                 Important: true);
         }
 
