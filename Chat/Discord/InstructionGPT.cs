@@ -295,11 +295,16 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
         {
             var duringShutdown =
                 _shutdownToken.IsCancellationRequested ||
-                Volatile.Read(ref _stopping) == 1 ||
-                ex is OperationCanceledException;
+                Volatile.Read(ref _stopping) == 1;
             if (duringShutdown)
             {
                 await Console.Out.WriteLineAsync("Gateway disconnected during shutdown.");
+                return;
+            }
+
+            if (ex is OperationCanceledException)
+            {
+                await Console.Out.WriteLineAsync("Gateway disconnected: task canceled while host is still running.");
                 return;
             }
 

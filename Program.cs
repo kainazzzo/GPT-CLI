@@ -1,5 +1,6 @@
 ﻿using System.Text;
 using System.Text.Json;
+using System.Runtime.InteropServices;
 using Discord;
 using Discord.WebSocket;
 using GPT.CLI.Embeddings;
@@ -18,8 +19,26 @@ namespace GPT.CLI;
 
 class Program
 {
+    private static readonly List<PosixSignalRegistration> HostSignalRegistrations = new();
+
     static async Task Main(string[] args)
     {
+        RegisterPosixSignal(HostSignalRegistrations, PosixSignal.SIGTERM, "SIGTERM");
+        RegisterPosixSignal(HostSignalRegistrations, PosixSignal.SIGINT, "SIGINT");
+        RegisterPosixSignal(HostSignalRegistrations, PosixSignal.SIGHUP, "SIGHUP");
+        RegisterPosixSignal(HostSignalRegistrations, PosixSignal.SIGQUIT, "SIGQUIT");
+        Console.CancelKeyPress += (_, e) =>
+        {
+            try
+            {
+                Console.WriteLine($"[host] CancelKeyPress received. specialKey={e.SpecialKey}");
+            }
+            catch
+            {
+                // Best effort only.
+            }
+        };
+
         AppDomain.CurrentDomain.UnhandledException += (_, e) =>
         {
             try
@@ -59,6 +78,7 @@ class Program
         };
 
         var (modeOverride, remainingArgs) = ParseModeOverride(args);
+        Console.WriteLine($"[host] startup pid={Environment.ProcessId} modeOverride={(modeOverride?.ToString() ?? "none")} args={remainingArgs.Length}");
 
         using var host = Host.CreateDefaultBuilder(remainingArgs)
             .ConfigureServices((context, services) =>
@@ -388,6 +408,44 @@ class Program
         }
 
         return response.Successful;
+    }
+
+
+    private static void RegisterPosixSignal(
+        ICollection<PosixSignalRegistration> registrations,
+        PosixSignal signal,
+        string label)
+    {
+        try
+        {
+            var registration = PosixSignalRegistration.Create(signal, _ =>
+            {
+                try
+                {
+                    Console.WriteLine($"[host] POSIX signal received: {label}");
+                }
+                catch
+                {
+                    // Best effort only.
+                }
+            });
+            registrations.Add(registration);
+        }
+        catch (PlatformNotSupportedException)
+        {
+            // Ignore on platforms without POSIX signal support.
+        }
+        catch (Exception ex)
+        {
+            try
+            {
+                Console.Error.WriteLine($"[host] failed to register POSIX signal {label}: {ex.GetType().Name} {ex.Message}");
+            }
+            catch
+            {
+                // Best effort only.
+            }
+        }
     }
 
 

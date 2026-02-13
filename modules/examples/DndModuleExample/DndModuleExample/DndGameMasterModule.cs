@@ -2030,6 +2030,8 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         TryGetStringArg(argsJson, "kind", out var kindRaw);
         TryGetStringArg(argsJson, "name", out var nameRaw);
         TryGetStringArg(argsJson, "concept", out var conceptRaw);
+        TryGetIntArg(argsJson, "count", out var countRaw);
+        var namesFromArgs = TryGetStringListArg(argsJson, "names");
 
         var kind = (kindRaw ?? string.Empty).Trim().ToLowerInvariant();
         var wantsNpc = kind is "npc";
@@ -2039,6 +2041,19 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         {
             wantsNpc = LooksLikeNpcCreateIntentFromText(strippedText);
             wantsPc = !wantsNpc;
+        }
+
+        var inferredCount = TryExtractSheetCreateCount(strippedText, wantsNpc);
+        var requestedCount = countRaw > 0 ? Math.Clamp(countRaw, 1, 6) : 0;
+        var targetCount = wantsNpc
+            ? Math.Clamp(requestedCount > 0 ? requestedCount : (inferredCount ?? 1), 1, 6)
+            : 1;
+
+        if (wantsPc && ((requestedCount > 1) || (inferredCount.HasValue && inferredCount.Value > 1)))
+        {
+            return new DraftIntentRouterDispatchResult(
+                true,
+                "I can create one PC sheet at a time. Ask once per PC, or use NPC generation for companions.");
         }
 
         var name = (nameRaw ?? string.Empty).Trim();
@@ -2052,25 +2067,92 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             }
         }
 
-        if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(concept))
+        var namesFromText = TryExtractSheetCreateNamesFromText(strippedText);
+        var requestedNames = namesFromArgs
+            .Concat(namesFromText)
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .Select(s => s.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (!string.IsNullOrWhiteSpace(name) &&
+            !requestedNames.Any(x => string.Equals(x, name, StringComparison.OrdinalIgnoreCase)))
+        {
+            requestedNames.Insert(0, name);
+        }
+
+        if (string.IsNullOrWhiteSpace(name) && requestedNames.Count > 0)
+        {
+            name = requestedNames[0];
+        }
+
+        if (string.IsNullOrWhiteSpace(concept))
         {
             var target = wantsNpc ? "NPC" : "character";
             return new DraftIntentRouterDispatchResult(
                 true,
-                $"I can generate that {target}. Include both `name` and `concept`.");
+                $"I can generate that {target}. Include a `concept` (and names if you want multiple NPCs).");
         }
 
         var execCtx = new GptCliExecutionContext(context, channelState, message.Channel, message.Author, null, message);
-        var execArgs = JsonSerializer.Serialize(new { name = name.Trim(), concept = concept.Trim() });
-        var res = wantsNpc
-            ? await ExecuteNpcCreateAsync(execCtx, execArgs, ct)
-            : await ExecuteCharacterCreateAsync(execCtx, execArgs, ct);
+        if (wantsNpc && targetCount > 1)
+        {
+            var batchNames = BuildNpcBatchNames(requestedNames, name, targetCount);
+            if (batchNames.Count == 0)
+            {
+                return new DraftIntentRouterDispatchResult(
+                    true,
+                    "I can generate multiple NPCs. Include at least one name or a base name plus concept.");
+            }
 
-        if (res is { Handled: true })
+            var created = new List<string>();
+            var errors = new List<string>();
+            foreach (var npcName in batchNames)
+            {
+                var execArgs = JsonSerializer.Serialize(new { name = npcName, concept = concept.Trim() });
+                var res = await ExecuteNpcCreateAsync(execCtx, execArgs, ct);
+                if (res is { Handled: true })
+                {
+                    var line = BuildNpcCreateCompactSummary(res.Response, npcName);
+                    created.Add(string.IsNullOrWhiteSpace(line) ? npcName : line);
+                    continue;
+                }
+
+                errors.Add($"failed to create `{npcName}`");
+            }
+
+            var lines = new List<string> { $"Created {created.Count}/{batchNames.Count} NPC sheets." };
+            if (created.Count > 0)
+            {
+                lines.AddRange(created.Select(x => $"- {x}"));
+            }
+            if (errors.Count > 0)
+            {
+                lines.Add("Some requests were ignored:");
+                lines.AddRange(errors.Take(8).Select(e => $"- {e}"));
+            }
+
+            return new DraftIntentRouterDispatchResult(true, string.Join("\n", lines));
+        }
+
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            var target = wantsNpc ? "NPC" : "character";
+            return new DraftIntentRouterDispatchResult(
+                true,
+                $"I can generate that {target}. Include a `name` and `concept`.");
+        }
+
+        var singleArgs = JsonSerializer.Serialize(new { name = name.Trim(), concept = concept.Trim() });
+        var single = wantsNpc
+            ? await ExecuteNpcCreateAsync(execCtx, singleArgs, ct)
+            : await ExecuteCharacterCreateAsync(execCtx, singleArgs, ct);
+
+        if (single is { Handled: true })
         {
             return new DraftIntentRouterDispatchResult(
                 true,
-                string.IsNullOrWhiteSpace(res.Response) ? "Sheet created." : res.Response.Trim());
+                string.IsNullOrWhiteSpace(single.Response) ? "Sheet created." : single.Response.Trim());
         }
 
         return new DraftIntentRouterDispatchResult(false, Error: "Sheet generation was not applied.");
@@ -2196,9 +2278,11 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                         Enum = new List<string> { "pc", "npc" }
                     },
                     ["name"] = new PropertyDefinition { Type = "string", Description = "Character name." },
-                    ["concept"] = new PropertyDefinition { Type = "string", Description = "Character concept." }
+                    ["concept"] = new PropertyDefinition { Type = "string", Description = "Character concept." },
+                    ["count"] = new PropertyDefinition { Type = "integer", Description = "For NPCs, number of sheets to create (1-6)." },
+                    ["names"] = new PropertyDefinition { Type = "string", Description = "Optional comma-separated names for batch NPC creation." }
                 },
-                new[] { "kind", "name", "concept" }),
+                new[] { "kind" }),
             BuildDraftIntentRouterTool(
                 RouteToolPassTimeout,
                 "Set auto-pass timeout for player turns.",
@@ -2272,6 +2356,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             "- If the request is about character/NPC/sheet/party/roster, never call dnd_route_campaign_create.\n" +
             "- If the request is about character/NPC/sheet creation, never call dnd_route_draft_update.\n" +
             "- Match response scope to request; do not trigger broad campaign rewrites for narrow sheet/party tasks.\n" +
+            "- For requests like \"create 3 NPCs\", call dnd_route_sheet_create with kind=npc and count set (and names when provided).\n" +
             "Never call gptcli_dnd_* tools directly in this step.\n" +
             "Keep tool arguments minimal and explicit. For overwrite=true, only set when user explicitly asked to overwrite/replace.";
     }
@@ -2780,6 +2865,135 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         name = string.IsNullOrWhiteSpace(name) ? null : TrimToLimit(name, 80);
         concept = string.IsNullOrWhiteSpace(concept) ? null : TrimToLimit(concept, 220);
         return !string.IsNullOrWhiteSpace(name) && !string.IsNullOrWhiteSpace(concept);
+    }
+
+    private static int? TryExtractSheetCreateCount(string text, bool wantsNpc)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return null;
+        }
+
+        var pattern = wantsNpc
+            ? @"\b(?<n>\d{1,2})\s*(?:npc|npcs|non-player\s*characters?)\b"
+            : @"\b(?<n>\d{1,2})\s*(?:pc|pcs|characters?)\b";
+        var match = Regex.Match(text, pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        if (!match.Success || !int.TryParse(match.Groups["n"].Value, out var parsed))
+        {
+            return null;
+        }
+
+        return Math.Clamp(parsed, 1, 6);
+    }
+
+    private static List<string> TryExtractSheetCreateNamesFromText(string text)
+    {
+        var names = new List<string>();
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return names;
+        }
+
+        var match = Regex.Match(
+            text,
+            @"\bnamed?\b\s+(?<names>[^;\n]{1,220})",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        if (!match.Success)
+        {
+            return names;
+        }
+
+        var segment = (match.Groups["names"].Value ?? string.Empty).Trim();
+        if (segment.Length == 0)
+        {
+            return names;
+        }
+
+        segment = Regex.Replace(segment, @"\bconcept\s*[:=].*$", string.Empty, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant).Trim();
+        var rawTokens = Regex.Split(segment, @"\s*(?:,| and | & )\s*", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Select(x => x.Trim().Trim('"', '\'', '`'))
+            .Where(x => x.Length > 0)
+            .Select(x => TrimToLimit(x, 80))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        names.AddRange(rawTokens);
+        return names;
+    }
+
+    private static List<string> BuildNpcBatchNames(List<string> requestedNames, string fallbackBaseName, int count)
+    {
+        var wanted = Math.Clamp(count, 1, 6);
+        var result = new List<string>();
+        foreach (var n in (requestedNames ?? new List<string>()))
+        {
+            var cleaned = (n ?? string.Empty).Trim();
+            if (cleaned.Length == 0)
+            {
+                continue;
+            }
+
+            if (result.Any(x => string.Equals(x, cleaned, StringComparison.OrdinalIgnoreCase)))
+            {
+                continue;
+            }
+
+            result.Add(TrimToLimit(cleaned, 80));
+            if (result.Count >= wanted)
+            {
+                return result;
+            }
+        }
+
+        var baseName = string.IsNullOrWhiteSpace(fallbackBaseName)
+            ? (result.Count > 0 ? result[0] : "NPC")
+            : fallbackBaseName.Trim();
+        baseName = TrimToLimit(baseName, 70);
+
+        var index = 1;
+        while (result.Count < wanted)
+        {
+            var candidate = $"{baseName} {index}";
+            if (!result.Any(x => string.Equals(x, candidate, StringComparison.OrdinalIgnoreCase)))
+            {
+                result.Add(candidate);
+            }
+            index++;
+        }
+
+        return result;
+    }
+
+    private static string BuildNpcCreateCompactSummary(string response, string fallbackName)
+    {
+        if (!string.IsNullOrWhiteSpace(response))
+        {
+            var firstLine = response
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+                .Select(x => (x ?? string.Empty).Trim())
+                .FirstOrDefault(x => x.Length > 0) ?? string.Empty;
+            var match = Regex.Match(
+                firstLine,
+                @"NPC:\s*\*\*(?<name>[^*`]+)\*\*\s*\(`(?<id>[^`]+)`\)",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            if (match.Success)
+            {
+                var id = (match.Groups["id"]?.Value ?? string.Empty).Trim();
+                var name = (match.Groups["name"]?.Value ?? string.Empty).Trim();
+                if (!string.IsNullOrWhiteSpace(id) && !string.IsNullOrWhiteSpace(name))
+                {
+                    return $"{id} | {name}";
+                }
+            }
+
+            if (firstLine.Length > 0)
+            {
+                return TrimToLimit(firstLine, 180);
+            }
+        }
+
+        return string.IsNullOrWhiteSpace(fallbackName) ? "NPC created" : TrimToLimit(fallbackName.Trim(), 80);
     }
 
     private async Task<bool> TryHandleDeterministicDraftSheetGenerationFromMessageAsync(
@@ -7321,7 +7535,8 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 {
                     var a = snap.ActiveEncounterState.Actors.TryGetValue(id, out var st) ? st : null;
                     var total = a?.InitiativeTotal.HasValue == true ? a.InitiativeTotal.Value.ToString() : "?";
-                    return $"{a?.Name ?? id}={total}";
+                    var actor = RenderActorReference(id, snap.ActiveEncounterState);
+                    return $"{actor}={total}";
                 }));
                 try { await SendChunkedAsync(discordChannel, TrimToLimit(line, DiscordMessageLimit)); } catch { }
                 continue;
@@ -8170,6 +8385,12 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         var cleaned = lead.Replace("\r", " ").Replace("\n", " ").Trim();
         // Remove machine-ish labels like "[encounter-start]" that some models prepend.
         cleaned = Regex.Replace(cleaned, @"^(?:\[[^\]]+\]\s*)+", string.Empty, RegexOptions.CultureInvariant).Trim();
+        // Also remove bare action tags like "encounter-start - " at the beginning.
+        cleaned = Regex.Replace(
+            cleaned,
+            @"^(?:[a-z]+(?:-[a-z]+)+\s*(?:[:\-–—]\s*)+)+",
+            string.Empty,
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant).Trim();
         return string.IsNullOrWhiteSpace(cleaned) ? null : TrimToLimit(cleaned, maxChars);
     }
 
@@ -8339,6 +8560,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         sb.AppendLine($"Emoji density: {NormalizeGameNarrationEmojiLevel(emojiLevel)} (2-5 emojis when possible).");
         sb.AppendLine("Rules:");
         sb.AppendLine("- Do not invent new mechanics, dice values, or damage.");
+        sb.AppendLine("- Do not prefix with tags/labels like [encounter-start], encounter-start, or action headers.");
         sb.AppendLine("- Keep urgency, pressure, and table energy high.");
         sb.AppendLine("- Keep it to one short paragraph.");
         if (!string.IsNullOrWhiteSpace(actionLabel))
@@ -8481,7 +8703,31 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             return "Boss";
         }
 
+        if (IsNpcActorId(trimmed))
+        {
+            var slug = trimmed[4..].Trim();
+            var humanized = HumanizeSlug(slug);
+            return string.IsNullOrWhiteSpace(humanized) ? "NPC" : humanized;
+        }
+
         return trimmed;
+    }
+
+    private static string HumanizeSlug(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        var spaced = Regex.Replace(value.Trim(), @"[-_]+", " ");
+        spaced = Regex.Replace(spaced, @"\s+", " ").Trim();
+        if (spaced.Length == 0)
+        {
+            return string.Empty;
+        }
+
+        return CultureInfo.InvariantCulture.TextInfo.ToTitleCase(spaced.ToLowerInvariant());
     }
 
     private static string BuildHelpText()
