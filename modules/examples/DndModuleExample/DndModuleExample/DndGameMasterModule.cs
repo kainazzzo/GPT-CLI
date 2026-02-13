@@ -42,6 +42,9 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
     private const string RouteToolPassTimeout = "dnd_route_passtimeout";
     private const string RouteToolChatReply = "dnd_route_chat_reply";
     private const string RouteToolClarify = "dnd_route_clarify";
+    private const string GameNarrationModeLlm = "llm";
+    private const string GameNarrationModeDeterministic = "deterministic";
+    private const string GameNarrationModeOff = "off";
 
     private static readonly HttpClient ResponsesHttpClient = new();
 
@@ -152,7 +155,8 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 "Sub-Prime Directive (GAME / Play):\n" +
                 "- Game mode is live play: narrate scenes, run encounters, track turns, and respond as GM.\n" +
                 "- The user may describe actions in natural language; your job is to call the relevant `gptcli_dnd_*` functions for mechanics/state (encounters, rolls, attacks/casts, status, timeouts).\n" +
-                "- Prefer Discord-friendly formatting for readability: bold beats, short paragraphs, bullet options, and occasional emojis.\n" +
+                "- Do not require `!` commands for gameplay; plain language like \"I attack the boss\" should work.\n" +
+                "- Prefer Discord-friendly formatting for readability: bold beats, short paragraphs, and occasional emojis.\n" +
                 "- Keep responses short, in-character, and always drive toward the next playable decision.\n" +
                 "When To Engage (triggers):\n" +
                 "- start/begin, encounter, attack/cast, roll/initiative, turn/pass, targets, status\n")
@@ -915,6 +919,23 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 return;
             }
 
+            var naturalHandled = false;
+            var lockHandle = _channelLocks.GetOrAdd(message.Channel.Id, _ => new SemaphoreSlim(1, 1));
+            await lockHandle.WaitAsync(cancellationToken);
+            try
+            {
+                EnsureTickLoopRunning(message.Channel.Id);
+                naturalHandled = await TryHandleNaturalGameActionAsync(context, channelState, message, dndState, cancellationToken);
+            }
+            finally
+            {
+                lockHandle.Release();
+            }
+            if (naturalHandled)
+            {
+                return;
+            }
+
             var handled = await TryHandleAutoRoutedMessageAsync(context, channelState, message, dndState, cancellationToken);
             Console.WriteLine($"[dnd] auto-route: handled={handled} mode=game (channel={message.Channel?.Id})");
             if (handled)
@@ -951,7 +972,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 
                 // Hybrid input: when tagged, allow a tiny action-router to convert the message into a single deterministic action.
                 // If it doesn't match a combat action, fall back to campaign-aware chat below.
-                var handled = await TryHandleTaggedNaturalActionAsync(context, channelState, message, dndState, cancellationToken);
+                var handled = await TryHandleNaturalGameActionAsync(context, channelState, message, dndState, cancellationToken);
                 if (handled)
                 {
                     return;
@@ -1135,6 +1156,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                     "You are the D&D game master assistant operating in GAME mode.\n" +
                     "Game mode is live play. Treat every user message as in-game gameplay or roleplay.\n" +
                     "The user may mention any available DnD capability; your job is to call the appropriate `gptcli_dnd_*` functions to carry out mechanics/state changes when needed.\n" +
+                    "Never require `!` commands for combat actions; plain language should be enough.\n" +
                     "Do not call `gptcli_dnd_mode` unless the user explicitly asks to change modes.\n" +
                     "Important: if the user asks to change modes while in GAME mode, instruct them to use the slash command `/gptcli dnd mode value:draft` (or `off`). Do NOT call `gptcli_dnd_mode` from natural language.\n" +
                     "Party roster is provided in context under \"Party roster (actors)\".\n" +
@@ -1145,8 +1167,8 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                     "Style: short, in-character, vivid. No meta/explanations.\n" +
                     "Formatting: use Discord markdown for readability: **bold** for scene beats, *italics* for tone, `code` for mechanical snippets.\n" +
                     "Use emojis sparingly (1-3) to signal beats/roles (e.g. 🎲 ⚔️ 🧙 🛡️ 🧠 🧭).\n" +
-                    "When presenting choices, use bullet points and keep them actionable.\n" +
-                    "Always end with a playable prompt (a question or 2-4 bullet options).\n",
+                    "Use bullet points only when the user explicitly asks for options/lists.\n" +
+                    "End with a short playable prompt only when the encounter is waiting on player input.\n",
                 _ =>
                     "You are the D&D game master assistant.\n" +
                     "If the user is asking to perform a DnD slash command, call the appropriate tool(s).\n" +
@@ -2883,6 +2905,43 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
     private static int GetDraftIntentRouterTimeoutSeconds(DiscordModuleContext context)
         => Math.Clamp(ReadIntConfiguration(context, "Discord:Modules:Dnd:Draft:IntentRouterTimeoutSeconds", defaultValue: 20), 8, 60);
 
+    private static bool IsGameNarrationEnabled(DiscordModuleContext context)
+        => ReadBooleanConfiguration(context, "Discord:Modules:Dnd:GameNarration:Enabled", defaultValue: true);
+
+    private static string GetGameNarrationMode(DiscordModuleContext context)
+        => NormalizeGameNarrationMode(ReadStringConfiguration(context, "Discord:Modules:Dnd:GameNarration:Mode", GameNarrationModeLlm));
+
+    private static string GetGameNarrationEmojiLevel(DiscordModuleContext context)
+        => NormalizeGameNarrationEmojiLevel(ReadStringConfiguration(context, "Discord:Modules:Dnd:GameNarration:EmojiLevel", "medium"));
+
+    private static int GetGameNarrationTimeoutSeconds(DiscordModuleContext context)
+        => Math.Clamp(ReadIntConfiguration(context, "Discord:Modules:Dnd:GameNarration:TimeoutSeconds", defaultValue: 8), 3, 30);
+
+    private static int GetGameNarrationMaxLeadChars(DiscordModuleContext context)
+        => Math.Clamp(ReadIntConfiguration(context, "Discord:Modules:Dnd:GameNarration:MaxLeadChars", defaultValue: 500), 120, 1200);
+
+    private static string NormalizeGameNarrationMode(string value)
+    {
+        var v = (value ?? string.Empty).Trim().ToLowerInvariant();
+        return v switch
+        {
+            "off" or "none" or "disabled" => GameNarrationModeOff,
+            "deterministic" or "template" or "templates" => GameNarrationModeDeterministic,
+            _ => GameNarrationModeLlm
+        };
+    }
+
+    private static string NormalizeGameNarrationEmojiLevel(string value)
+    {
+        var v = (value ?? string.Empty).Trim().ToLowerInvariant();
+        return v switch
+        {
+            "low" => "low",
+            "high" => "high",
+            _ => "medium"
+        };
+    }
+
     private static bool ReadBooleanConfiguration(DiscordModuleContext context, string key, bool defaultValue)
     {
         var raw = context?.Configuration?[key];
@@ -2919,6 +2978,12 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         }
 
         return int.TryParse(raw.Trim(), out var parsed) ? parsed : defaultValue;
+    }
+
+    private static string ReadStringConfiguration(DiscordModuleContext context, string key, string defaultValue)
+    {
+        var raw = context?.Configuration?[key];
+        return string.IsNullOrWhiteSpace(raw) ? defaultValue : raw.Trim();
     }
 
     private static string BuildDraftConversationalFallback(string userText)
@@ -5806,7 +5871,8 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             var res = runner.StartEncounter(templateId);
             await PersistRunnerAsync(ctx.ChannelState, st.ActiveCampaignName, campaign, runner, ct);
 
-            var text = RenderTurnResult(res);
+            var legacyText = RenderTurnResult(res);
+            var text = await FormatGameTurnOutputAsync(ctx.Context, ctx.ChannelState, res, legacyText, "encounter-start", ct);
             return new GptCliExecutionResult(true, text, true);
         }
         finally
@@ -5911,7 +5977,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             EnsureTickLoopRunning(ctx.Channel.Id);
 
             var actorId = ToActorId(ctx.User.Id);
-            var r = await RunEncounterActionAsync(ctx.ChannelState, st, ctx.Channel, async runner =>
+            var r = await RunEncounterActionAsync(ctx.Context, ctx.ChannelState, st, ctx.Channel, async runner =>
             {
                 var targetId = ResolveTargetActorId(await GetActiveEncounterSnapshotAsync(ctx.ChannelState, st.ActiveCampaignName, ct), target, out var err);
                 if (string.IsNullOrWhiteSpace(targetId))
@@ -5921,7 +5987,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 
                 var res = runner.Attack(actorId, targetId);
                 return (res, RenderTurnResult(res));
-            }, postToChannel: false, ct: ct);
+            }, actionLabel: "attack", postToChannel: false, ct: ct);
 
             return new GptCliExecutionResult(true, r.responseText, r.stateChanged);
         }
@@ -5958,7 +6024,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             EnsureTickLoopRunning(ctx.Channel.Id);
 
             var actorId = ToActorId(ctx.User.Id);
-            var r = await RunEncounterActionAsync(ctx.ChannelState, st, ctx.Channel, async runner =>
+            var r = await RunEncounterActionAsync(ctx.Context, ctx.ChannelState, st, ctx.Channel, async runner =>
             {
                 var targetId = ResolveTargetActorId(await GetActiveEncounterSnapshotAsync(ctx.ChannelState, st.ActiveCampaignName, ct), target, out var err);
                 if (string.IsNullOrWhiteSpace(targetId))
@@ -5968,7 +6034,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 
                 var res = runner.CastSpell(actorId, targetId);
                 return (res, RenderTurnResult(res));
-            }, postToChannel: false, ct: ct);
+            }, actionLabel: "cast", postToChannel: false, ct: ct);
 
             return new GptCliExecutionResult(true, r.responseText, r.stateChanged);
         }
@@ -5999,11 +6065,11 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             EnsureTickLoopRunning(ctx.Channel.Id);
 
             var actorId = ToActorId(ctx.User.Id);
-            var r = await RunEncounterActionAsync(ctx.ChannelState, st, ctx.Channel, runner =>
+            var r = await RunEncounterActionAsync(ctx.Context, ctx.ChannelState, st, ctx.Channel, runner =>
             {
                 var res = runner.Pass(actorId);
                 return Task.FromResult((res, RenderTurnResult(res)));
-            }, postToChannel: false, ct: ct);
+            }, actionLabel: "pass", postToChannel: false, ct: ct);
 
             return new GptCliExecutionResult(true, r.responseText, r.stateChanged);
         }
@@ -6033,11 +6099,11 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 
             EnsureTickLoopRunning(ctx.Channel.Id);
 
-            var r = await RunEncounterActionAsync(ctx.ChannelState, st, ctx.Channel, runner =>
+            var r = await RunEncounterActionAsync(ctx.Context, ctx.ChannelState, st, ctx.Channel, runner =>
             {
                 var res = runner.RollAll();
                 return Task.FromResult((res, RenderTurnResult(res)));
-            }, postToChannel: false, ct: ct);
+            }, actionLabel: "rollall", postToChannel: false, ct: ct);
 
             return new GptCliExecutionResult(true, r.responseText, r.stateChanged);
         }
@@ -6185,11 +6251,11 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 
         if (string.Equals(content, "!rollall", StringComparison.OrdinalIgnoreCase))
         {
-            var r = await RunEncounterActionAsync(channelState, dndState, message.Channel, async runner =>
+            var r = await RunEncounterActionAsync(context, channelState, dndState, message.Channel, async runner =>
             {
                 var res = runner.RollAll();
                 return (res, RenderTurnResult(res));
-            }, postToChannel: true, ct: ct);
+            }, actionLabel: "rollall", postToChannel: true, ct: ct);
             return (r.handled, r.stateChanged);
         }
 
@@ -6199,16 +6265,16 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             if (string.Equals(tail, "initiative", StringComparison.OrdinalIgnoreCase))
             {
                 var actorId = ToActorId(message.Author.Id);
-                var r = await RunEncounterActionAsync(channelState, dndState, message.Channel, async runner =>
+                var r = await RunEncounterActionAsync(context, channelState, dndState, message.Channel, async runner =>
                 {
                     var res = runner.RollInitiative(actorId);
                     return (res, RenderTurnResult(res));
-                }, postToChannel: true, ct: ct);
+                }, actionLabel: "initiative", postToChannel: true, ct: ct);
                 return (r.handled, r.stateChanged);
             }
 
             var rollId = tail.Trim();
-            var rr = await RunEncounterActionAsync(channelState, dndState, message.Channel, async runner =>
+            var rr = await RunEncounterActionAsync(context, channelState, dndState, message.Channel, async runner =>
             {
                 var campaign = await LoadCampaignAsync(channelState, dndState.ActiveCampaignName, ct);
                 var pending = campaign?.RunnerState?.ActiveEncounter?.PendingRolls ?? new List<DndPendingRoll>();
@@ -6229,7 +6295,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 };
 
                 return (res, RenderTurnResult(res));
-            }, postToChannel: true, ct: ct);
+            }, actionLabel: "roll", postToChannel: true, ct: ct);
             return (rr.handled, rr.stateChanged);
         }
 
@@ -6243,7 +6309,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             }
 
             var actorId = ToActorId(message.Author.Id);
-            var r = await RunEncounterActionAsync(channelState, dndState, message.Channel, async runner =>
+            var r = await RunEncounterActionAsync(context, channelState, dndState, message.Channel, async runner =>
             {
                 var targetId = ResolveTargetActorId(await GetActiveEncounterSnapshotAsync(channelState, dndState.ActiveCampaignName, ct), tail, out var err);
                 if (string.IsNullOrWhiteSpace(targetId))
@@ -6253,7 +6319,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 
                 var res = runner.Attack(actorId, targetId);
                 return (res, RenderTurnResult(res));
-            }, postToChannel: true, ct: ct);
+            }, actionLabel: "attack", postToChannel: true, ct: ct);
             return (r.handled, r.stateChanged);
         }
 
@@ -6267,7 +6333,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             }
 
             var actorId = ToActorId(message.Author.Id);
-            var r = await RunEncounterActionAsync(channelState, dndState, message.Channel, async runner =>
+            var r = await RunEncounterActionAsync(context, channelState, dndState, message.Channel, async runner =>
             {
                 var targetId = ResolveTargetActorId(await GetActiveEncounterSnapshotAsync(channelState, dndState.ActiveCampaignName, ct), tail, out var err);
                 if (string.IsNullOrWhiteSpace(targetId))
@@ -6277,31 +6343,74 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 
                 var res = runner.CastSpell(actorId, targetId);
                 return (res, RenderTurnResult(res));
-            }, postToChannel: true, ct: ct);
+            }, actionLabel: "cast", postToChannel: true, ct: ct);
             return (r.handled, r.stateChanged);
         }
 
         if (string.Equals(content, "!pass", StringComparison.OrdinalIgnoreCase))
         {
             var actorId = ToActorId(message.Author.Id);
-            var r = await RunEncounterActionAsync(channelState, dndState, message.Channel, async runner =>
+            var r = await RunEncounterActionAsync(context, channelState, dndState, message.Channel, async runner =>
             {
                 var res = runner.Pass(actorId);
                 return (res, RenderTurnResult(res));
-            }, postToChannel: true, ct: ct);
+            }, actionLabel: "pass", postToChannel: true, ct: ct);
             return (r.handled, r.stateChanged);
         }
 
         return (false, false);
     }
 
-    private async Task<bool> TryHandleTaggedNaturalActionAsync(
+    private enum NaturalGameActionKind
+    {
+        None = 0,
+        Attack = 1,
+        Cast = 2,
+        Pass = 3,
+        RollAll = 4,
+        RollInitiative = 5,
+        RollById = 6
+    }
+
+    private sealed class NaturalGameIntent
+    {
+        public NaturalGameActionKind Action { get; init; }
+        public bool LooksMechanical { get; init; }
+        public bool AmbiguousActionType { get; init; }
+        public string TargetActorId { get; init; }
+        public string RollId { get; init; }
+        public List<string> CandidateTargetIds { get; init; } = new();
+    }
+
+    private async Task<bool> TryHandleNaturalGameActionAsync(
         DiscordModuleContext context,
         InstructionGPT.ChannelState channelState,
         SocketMessage message,
         DndLiteChannelState dndState,
         CancellationToken ct)
     {
+        if (context == null || channelState == null || message == null || dndState == null)
+        {
+            return false;
+        }
+
+        if (!string.Equals(NormalizeMode(dndState.Mode), ModeGame, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var raw = StripBotMentions(message.Content ?? string.Empty, context.Client.CurrentUser.Id);
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return false;
+        }
+
+        var text = raw.Trim();
+        if (text.StartsWith("!", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
         var campaign = await LoadCampaignAsync(channelState, dndState.ActiveCampaignName, ct);
         if (campaign?.RunnerState == null)
         {
@@ -6310,58 +6419,381 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 
         var runner = RestoreCampaignRunner(channelState.ChannelId, campaign.RunnerState);
         var snap = runner.GetState();
-        if (snap.ActiveEncounterState == null || snap.ActiveEncounterState.IsCompleted)
+        var encounter = snap?.ActiveEncounterState;
+        if (encounter == null || encounter.IsCompleted)
         {
             return false;
         }
 
         var pending = campaign.RunnerState.ActiveEncounter?.PendingRolls ?? new List<DndPendingRoll>();
-        var next = DndTurnResult.BuildNextRequest(snap.ActiveEncounterState, pending);
-        if (next.Kind != DndNextRequestKind.NeedAction)
+        var next = DndTurnResult.BuildNextRequest(encounter, pending);
+        if (next == null || next.Kind == DndNextRequestKind.Completed)
+        {
+            return false;
+        }
+
+        var intent = ParseNaturalGameIntent(text, encounter);
+        if (intent == null || !intent.LooksMechanical)
         {
             return false;
         }
 
         var actorId = ToActorId(message.Author.Id);
-        if (!string.Equals(snap.ActiveEncounterState.CurrentActorId, actorId, StringComparison.OrdinalIgnoreCase))
+        var currentActorId = next.CurrentActorId ?? encounter.CurrentActorId ?? string.Empty;
+        var currentActorName = ResolveActorDisplayName(encounter, currentActorId);
+        var authorMention = $"<@{message.Author.Id}>";
+
+        if (next.Kind == DndNextRequestKind.NeedInitiativeRolls)
+        {
+            if (intent.Action == NaturalGameActionKind.RollAll)
+            {
+                var (handled, _) = await TryHandleBangCommandAsync(context, channelState, message, dndState, "!rollall", ct);
+                return handled;
+            }
+
+            if (intent.Action == NaturalGameActionKind.RollById && !string.IsNullOrWhiteSpace(intent.RollId))
+            {
+                var (handled, _) = await TryHandleBangCommandAsync(context, channelState, message, dndState, $"!roll {intent.RollId}", ct);
+                return handled;
+            }
+
+            if (intent.Action == NaturalGameActionKind.RollInitiative)
+            {
+                var (handled, _) = await TryHandleBangCommandAsync(context, channelState, message, dndState, "!roll initiative", ct);
+                return handled;
+            }
+
+            await message.Channel.SendMessageAsync(
+                $"{authorMention} Initiative is still pending. Say you want to roll initiative (or ask me to resolve all pending initiative rolls).");
+            return true;
+        }
+
+        if (next.Kind == DndNextRequestKind.NeedRolls)
+        {
+            if (intent.Action == NaturalGameActionKind.RollAll)
+            {
+                var (handled, _) = await TryHandleBangCommandAsync(context, channelState, message, dndState, "!rollall", ct);
+                return handled;
+            }
+
+            if (intent.Action == NaturalGameActionKind.RollById && !string.IsNullOrWhiteSpace(intent.RollId))
+            {
+                var (handled, _) = await TryHandleBangCommandAsync(context, channelState, message, dndState, $"!roll {intent.RollId}", ct);
+                return handled;
+            }
+
+            await message.Channel.SendMessageAsync(
+                $"{authorMention} There are pending rolls to resolve first. Ask for a specific pending roll ID or ask me to resolve all pending rolls.");
+            return true;
+        }
+
+        if (next.Kind != DndNextRequestKind.NeedAction)
         {
             return false;
         }
 
-        var decision = await RouteTaggedActionAsync(context, channelState, message, snap.ActiveEncounterState, ct);
-        if (decision == null)
+        if (!string.Equals(currentActorId, actorId, StringComparison.OrdinalIgnoreCase))
         {
-            return false;
-        }
-
-        if (string.Equals(decision.ToolName, "dnd_rollall", StringComparison.OrdinalIgnoreCase))
-        {
-            await TryHandleBangCommandAsync(context, channelState, message, dndState, "!rollall", ct);
-            return true;
-        }
-        if (string.Equals(decision.ToolName, "dnd_pass", StringComparison.OrdinalIgnoreCase))
-        {
-            await TryHandleBangCommandAsync(context, channelState, message, dndState, "!pass", ct);
-            return true;
-        }
-        if (string.Equals(decision.ToolName, "dnd_attack", StringComparison.OrdinalIgnoreCase))
-        {
-            if (TryGetStringArg(decision.ArgumentsJson, "target", out var target) && !string.IsNullOrWhiteSpace(target))
-            {
-                await TryHandleBangCommandAsync(context, channelState, message, dndState, $"!attack {target}", ct);
-            }
-            return true;
-        }
-        if (string.Equals(decision.ToolName, "dnd_cast", StringComparison.OrdinalIgnoreCase))
-        {
-            if (TryGetStringArg(decision.ArgumentsJson, "target", out var target) && !string.IsNullOrWhiteSpace(target))
-            {
-                await TryHandleBangCommandAsync(context, channelState, message, dndState, $"!cast {target}", ct);
-            }
+            await message.Channel.SendMessageAsync(
+                $"{authorMention} It's {currentActorName}'s turn right now. Once their turn resolves, I'll map your action.");
             return true;
         }
 
-        return false;
+        if (intent.AmbiguousActionType)
+        {
+            await message.Channel.SendMessageAsync(
+                $"{authorMention} I need one clarification: do you want to attack or cast this turn?");
+            return true;
+        }
+
+        if (intent.Action == NaturalGameActionKind.Pass)
+        {
+            var (handled, _) = await TryHandleBangCommandAsync(context, channelState, message, dndState, "!pass", ct);
+            return handled;
+        }
+
+        if (intent.Action == NaturalGameActionKind.RollAll ||
+            intent.Action == NaturalGameActionKind.RollById ||
+            intent.Action == NaturalGameActionKind.RollInitiative)
+        {
+            await message.Channel.SendMessageAsync(
+                $"{authorMention} No roll is pending for your turn right now. Choose an action: attack, cast, or pass.");
+            return true;
+        }
+
+        if (intent.Action is NaturalGameActionKind.Attack or NaturalGameActionKind.Cast)
+        {
+            if (intent.CandidateTargetIds.Count > 1)
+            {
+                await message.Channel.SendMessageAsync(
+                    $"{authorMention} Target is ambiguous. Pick one enemy: {BuildEnemyChoiceLine(encounter, intent.CandidateTargetIds)}.");
+                return true;
+            }
+
+            if (string.IsNullOrWhiteSpace(intent.TargetActorId))
+            {
+                await message.Channel.SendMessageAsync(
+                    $"{authorMention} Who are you targeting? Living enemies: {BuildEnemyChoiceLine(encounter)}.");
+                return true;
+            }
+
+            var cmd = intent.Action == NaturalGameActionKind.Attack
+                ? $"!attack {intent.TargetActorId}"
+                : $"!cast {intent.TargetActorId}";
+            var (handled, _) = await TryHandleBangCommandAsync(context, channelState, message, dndState, cmd, ct);
+            return handled;
+        }
+
+        await message.Channel.SendMessageAsync(
+            $"{authorMention} Tell me your action directly and I'll run it: attack, cast, or pass.");
+        return true;
+    }
+
+    private static NaturalGameIntent ParseNaturalGameIntent(string text, DndEncounterSnapshot encounter)
+    {
+        var t = (text ?? string.Empty).Trim();
+        if (t.Length == 0)
+        {
+            return new NaturalGameIntent { Action = NaturalGameActionKind.None, LooksMechanical = false };
+        }
+
+        var lower = t.ToLowerInvariant();
+        var rollAll = Regex.IsMatch(lower, @"\broll\s*all\b|\brollall\b|\bresolve\s+all\s+rolls?\b", RegexOptions.CultureInvariant);
+        var rollId = TryExtractRollId(lower);
+        var rollWord = Regex.IsMatch(lower, @"\broll(?:ing)?\b", RegexOptions.CultureInvariant);
+        var initiative = Regex.IsMatch(lower, @"\binitiative\b|\binit\b", RegexOptions.CultureInvariant) && (rollWord || lower.StartsWith("init", StringComparison.OrdinalIgnoreCase));
+        var pass = Regex.IsMatch(lower, @"\b(pass|skip|wait|delay|forfeit)\b", RegexOptions.CultureInvariant) ||
+                   lower.Contains("end turn", StringComparison.OrdinalIgnoreCase) ||
+                   lower.Contains("do nothing", StringComparison.OrdinalIgnoreCase);
+        var attack = Regex.IsMatch(lower, @"\b(attack|strike|swing|stab|slash|shoot|hit)\b", RegexOptions.CultureInvariant);
+        var cast = Regex.IsMatch(lower, @"\b(cast|spell|cantrip|firebolt|magic missile|eldritch|hex)\b", RegexOptions.CultureInvariant);
+
+        var looksMechanical = rollAll || rollWord || !string.IsNullOrWhiteSpace(rollId) || initiative || pass || attack || cast;
+        if (!looksMechanical)
+        {
+            return new NaturalGameIntent { Action = NaturalGameActionKind.None, LooksMechanical = false };
+        }
+
+        if (rollAll)
+        {
+            return new NaturalGameIntent { Action = NaturalGameActionKind.RollAll, LooksMechanical = true };
+        }
+
+        if (!string.IsNullOrWhiteSpace(rollId))
+        {
+            return new NaturalGameIntent { Action = NaturalGameActionKind.RollById, LooksMechanical = true, RollId = rollId };
+        }
+
+        if (initiative)
+        {
+            return new NaturalGameIntent { Action = NaturalGameActionKind.RollInitiative, LooksMechanical = true };
+        }
+
+        if (pass && !attack && !cast)
+        {
+            return new NaturalGameIntent { Action = NaturalGameActionKind.Pass, LooksMechanical = true };
+        }
+
+        if (attack && cast)
+        {
+            return new NaturalGameIntent { Action = NaturalGameActionKind.None, LooksMechanical = true, AmbiguousActionType = true };
+        }
+
+        if (!attack && !cast)
+        {
+            return new NaturalGameIntent { Action = NaturalGameActionKind.None, LooksMechanical = true };
+        }
+
+        var action = attack ? NaturalGameActionKind.Attack : NaturalGameActionKind.Cast;
+        var matchedEnemies = FindNaturalEnemyMatches(encounter, t);
+        if (matchedEnemies.Count == 1)
+        {
+            return new NaturalGameIntent
+            {
+                Action = action,
+                LooksMechanical = true,
+                TargetActorId = matchedEnemies[0].ActorId
+            };
+        }
+
+        if (matchedEnemies.Count > 1)
+        {
+            return new NaturalGameIntent
+            {
+                Action = action,
+                LooksMechanical = true,
+                CandidateTargetIds = matchedEnemies.Select(e => e.ActorId).Distinct(StringComparer.OrdinalIgnoreCase).ToList()
+            };
+        }
+
+        var extracted = TryExtractNaturalTargetPhrase(t);
+        var resolvedTarget = TryResolveNaturalTarget(encounter, extracted);
+
+        if (string.IsNullOrWhiteSpace(resolvedTarget))
+        {
+            var living = encounter?.Actors?.Values?
+                .Where(a => a != null && a.IsAlive && a.Side == DndSide.Enemy)
+                .OrderBy(a => a.IsBoss ? 0 : 1)
+                .ThenBy(a => a.Name, StringComparer.OrdinalIgnoreCase)
+                .ToList() ?? new List<DndActorSnapshot>();
+            if (living.Count == 1)
+            {
+                resolvedTarget = living[0].ActorId;
+            }
+            else if (living.Count > 1)
+            {
+                return new NaturalGameIntent
+                {
+                    Action = action,
+                    LooksMechanical = true,
+                    CandidateTargetIds = living.Select(a => a.ActorId).ToList()
+                };
+            }
+        }
+
+        return new NaturalGameIntent
+        {
+            Action = action,
+            LooksMechanical = true,
+            TargetActorId = resolvedTarget
+        };
+    }
+
+    private static string TryExtractRollId(string text)
+    {
+        var match = Regex.Match(text ?? string.Empty, @"\br\d{3,}\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        return match.Success ? match.Value.Trim() : null;
+    }
+
+    private static List<DndActorSnapshot> FindNaturalEnemyMatches(DndEncounterSnapshot encounter, string text)
+    {
+        var hay = $" {NormalizePhrase(text)} ";
+        if (string.IsNullOrWhiteSpace(hay))
+        {
+            return new List<DndActorSnapshot>();
+        }
+
+        return encounter?.Actors?.Values?
+            .Where(a => a != null && a.IsAlive && a.Side == DndSide.Enemy)
+            .Where(a =>
+            {
+                var actorToken = NormalizePhrase(a.ActorId);
+                if (!string.IsNullOrWhiteSpace(actorToken) && hay.Contains($" {actorToken} ", StringComparison.Ordinal))
+                {
+                    return true;
+                }
+
+                var nameToken = NormalizePhrase(a.Name);
+                return !string.IsNullOrWhiteSpace(nameToken) && hay.Contains($" {nameToken} ", StringComparison.Ordinal);
+            })
+            .DistinctBy(a => a.ActorId, StringComparer.OrdinalIgnoreCase)
+            .ToList()
+            ?? new List<DndActorSnapshot>();
+    }
+
+    private static string TryExtractNaturalTargetPhrase(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return null;
+        }
+
+        var prepositionMatch = Regex.Match(
+            text,
+            @"\b(?:at|against|on|into|toward(?:s)?|target(?:ing)?|vs\.?)\s+(?<target>[^,\.\!\?\;\n]+)",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        if (prepositionMatch.Success)
+        {
+            var target = prepositionMatch.Groups["target"].Value?.Trim();
+            if (!string.IsNullOrWhiteSpace(target))
+            {
+                return target;
+            }
+        }
+
+        var actionMatch = Regex.Match(
+            text,
+            @"\b(?:attack|cast|strike|swing|stab|shoot|hit)\b\s+(?<target>[^,\.\!\?\;\n]+)",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        if (actionMatch.Success)
+        {
+            var target = actionMatch.Groups["target"].Value?.Trim();
+            if (!string.IsNullOrWhiteSpace(target))
+            {
+                return target;
+            }
+        }
+
+        return null;
+    }
+
+    private static string TryResolveNaturalTarget(DndEncounterSnapshot encounter, string targetPhrase)
+    {
+        if (encounter == null || string.IsNullOrWhiteSpace(targetPhrase))
+        {
+            return null;
+        }
+
+        var target = targetPhrase.Trim().Trim('"', '\'', '`');
+        target = Regex.Replace(target, @"^(?:the|a|an)\s+", string.Empty, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant).Trim();
+        if (target.Length == 0)
+        {
+            return null;
+        }
+
+        var direct = ResolveTargetActorId(encounter, target, out _);
+        if (!string.IsNullOrWhiteSpace(direct))
+        {
+            return direct;
+        }
+
+        var matches = FindNaturalEnemyMatches(encounter, target);
+        return matches.Count == 1 ? matches[0].ActorId : null;
+    }
+
+    private static string BuildEnemyChoiceLine(DndEncounterSnapshot encounter, IEnumerable<string> preferredActorIds = null)
+    {
+        var preferred = preferredActorIds?
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var enemies = encounter?.Actors?.Values?
+            .Where(a => a != null && a.IsAlive && a.Side == DndSide.Enemy)
+            .Where(a => preferred == null || preferred.Count == 0 || preferred.Contains(a.ActorId))
+            .OrderBy(a => a.IsBoss ? 0 : 1)
+            .ThenBy(a => a.Name, StringComparer.OrdinalIgnoreCase)
+            .Take(6)
+            .Select(a => $"{a.Name} ({a.ActorId})")
+            .ToList() ?? new List<string>();
+
+        return enemies.Count == 0 ? "no living enemies listed" : string.Join(", ", enemies);
+    }
+
+    private static string ResolveActorDisplayName(DndEncounterSnapshot encounter, string actorId)
+    {
+        if (encounter?.Actors != null &&
+            !string.IsNullOrWhiteSpace(actorId) &&
+            encounter.Actors.TryGetValue(actorId, out var actor) &&
+            actor != null &&
+            !string.IsNullOrWhiteSpace(actor.Name))
+        {
+            return actor.Name.Trim();
+        }
+
+        return string.IsNullOrWhiteSpace(actorId) ? "unknown actor" : actorId.Trim();
+    }
+
+    private static string NormalizePhrase(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        var compact = Regex.Replace(value.Trim().ToLowerInvariant(), @"[^a-z0-9]+", " ");
+        compact = Regex.Replace(compact, @"\s+", " ").Trim();
+        return compact;
     }
 
     private async Task<bool> TryHandleTaggedCampaignChatAsync(
@@ -6508,150 +6940,13 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         return true;
     }
 
-    private sealed class NaturalDecision
-    {
-        public string ToolName { get; set; }
-        public string ArgumentsJson { get; set; }
-    }
-
-    private async Task<NaturalDecision> RouteTaggedActionAsync(
-        DiscordModuleContext context,
-        InstructionGPT.ChannelState channelState,
-        SocketMessage message,
-        DndEncounterSnapshot encounter,
-        CancellationToken ct)
-    {
-        try
-        {
-            var livingEnemies = encounter.Actors.Values
-                .Where(a => a != null && a.Side == DndSide.Enemy && a.IsAlive)
-                .Select(a => $"{a.ActorId}:{a.Name} (HP {a.Hp}/{a.MaxHp})")
-                .ToList();
-
-            var system =
-                "You are a deterministic combat action router.\n" +
-                "Only call a tool if the user is clearly attempting an in-combat action.\n" +
-                "If it is roleplay or table talk, do not call tools.\n" +
-                "Never invent outcomes; mechanics are handled by code.\n" +
-                "When calling dnd_attack or dnd_cast, target must match a living enemy id or name from the provided list.\n";
-
-            var user = new StringBuilder();
-            user.AppendLine("Living enemies:");
-            user.AppendLine(livingEnemies.Count == 0 ? "- (none)" : string.Join("\n", livingEnemies.Select(s => $"- {s}")));
-            user.AppendLine("Message:");
-            user.AppendLine(StripBotMentions(message.Content ?? string.Empty, context.Client.CurrentUser.Id));
-
-            var tools = BuildRouterTools();
-            var request = new ChatCompletionCreateRequest
-            {
-                Model = ResolveModel(context, channelState),
-                Temperature = 0,
-                MaxCompletionTokens = 140,
-                ParallelToolCalls = false,
-                Messages = new List<ChatMessage>
-                {
-                    new(ChatCompletionRole.System, system),
-                    new(ChatCompletionRole.User, user.ToString())
-                },
-                Tools = tools,
-                ToolChoice = new ToolChoice { Type = "auto" }
-            };
-
-            using var typing = DiscordTyping.Begin(message.Channel);
-            var response = await context.OpenAILogic.CreateChatCompletionAsync(request);
-            if (!response.Successful)
-            {
-                return null;
-            }
-
-            var msg = response.Choices.FirstOrDefault()?.Message;
-            if (msg == null)
-            {
-                return null;
-            }
-
-            var toolCalls = msg.ToolCalls;
-            if ((toolCalls == null || toolCalls.Count == 0) && msg.FunctionCall != null)
-            {
-                toolCalls = new List<ToolCall> { new() { Type = "function", FunctionCall = msg.FunctionCall } };
-            }
-            var first = toolCalls?.FirstOrDefault()?.FunctionCall;
-            if (first == null || string.IsNullOrWhiteSpace(first.Name))
-            {
-                return null;
-            }
-
-            return new NaturalDecision
-            {
-                ToolName = first.Name.Trim(),
-                ArgumentsJson = string.IsNullOrWhiteSpace(first.Arguments) ? "{}" : first.Arguments
-            };
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    private static List<ToolDefinition> BuildRouterTools()
-    {
-        static ToolDefinition Fn(string name, string description, Dictionary<string, PropertyDefinition> props, List<string> required)
-        {
-            return new ToolDefinition
-            {
-                Type = "function",
-                Function = new FunctionDefinition
-                {
-                    Name = name,
-                    Description = description,
-                    Strict = false,
-                    Parameters = new PropertyDefinition
-                    {
-                        Type = "object",
-                        AdditionalProperties = false,
-                        Properties = props ?? new Dictionary<string, PropertyDefinition>(),
-                        Required = required ?? new List<string>()
-                    }
-                }
-            };
-        }
-
-        return new List<ToolDefinition>
-        {
-            Fn(
-                "dnd_attack",
-                "Make a basic attack against a specific living enemy.",
-                new Dictionary<string, PropertyDefinition>(StringComparer.OrdinalIgnoreCase)
-                {
-                    ["target"] = new PropertyDefinition { Type = "string", Description = "Enemy id or enemy name" }
-                },
-                new List<string> { "target" }),
-            Fn(
-                "dnd_cast",
-                "Cast a basic spell against a specific living enemy.",
-                new Dictionary<string, PropertyDefinition>(StringComparer.OrdinalIgnoreCase)
-                {
-                    ["target"] = new PropertyDefinition { Type = "string", Description = "Enemy id or enemy name" }
-                },
-                new List<string> { "target" }),
-            Fn(
-                "dnd_pass",
-                "Pass your turn.",
-                new Dictionary<string, PropertyDefinition>(),
-                new List<string>()),
-            Fn(
-                "dnd_rollall",
-                "Roll all pending rolls (initiative/attacks/damage).",
-                new Dictionary<string, PropertyDefinition>(),
-                new List<string>())
-        };
-    }
-
     private async Task<(bool handled, bool stateChanged, string responseText)> RunEncounterActionAsync(
+        DiscordModuleContext context,
         InstructionGPT.ChannelState channelState,
         DndLiteChannelState dndState,
         IMessageChannel discordChannel,
         Func<DndCampaignRunner, Task<(DndCampaignResult result, string responseText)>> action,
+        string actionLabel,
         bool postToChannel,
         CancellationToken ct)
     {
@@ -6689,11 +6984,12 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         }
 
         await PersistRunnerAsync(channelState, dndState.ActiveCampaignName, campaign, runner, ct);
+        var finalResponse = await FormatGameTurnOutputAsync(context, channelState, res, responseText, actionLabel, ct);
         if (postToChannel)
         {
-            await SendChunkedAsync(discordChannel, responseText);
+            await SendChunkedAsync(discordChannel, finalResponse);
         }
-        return (true, true, responseText);
+        return (true, true, finalResponse);
     }
 
     private async Task PersistRunnerAsync(
@@ -6976,7 +7272,8 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 
                 var res = runner.RollAll();
                 await PersistRunnerAsync(channelState, dndState.ActiveCampaignName, campaign, runner, ct);
-                var text = RenderTurnResult(res);
+                var legacyText = RenderTurnResult(res);
+                var text = await FormatGameTurnOutputAsync(_moduleContext, channelState, res, legacyText, "autoroll", ct);
                 try { await SendChunkedAsync(discordChannel, text); } catch { }
                 continue;
             }
@@ -6986,13 +7283,21 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             {
                 if (isNpc && dndState.Live.NpcAutoplayEnabled)
                 {
-                    var (npcRes, npcText) = await RunNpcAutoplayStepAsync(channelState, dndState, campaign, runner, currentActorId, ct);
+                    var (npcRes, npcFlavor, npcLegacyText) = await RunNpcAutoplayStepAsync(channelState, dndState, campaign, runner, currentActorId, ct);
                     if (npcRes == null)
                     {
                         break;
                     }
 
                     await PersistRunnerAsync(channelState, dndState.ActiveCampaignName, campaign, runner, ct);
+                    var npcText = await FormatGameTurnOutputAsync(
+                        _moduleContext,
+                        channelState,
+                        npcRes,
+                        npcLegacyText,
+                        "npc-autoplay",
+                        ct,
+                        forcedLead: npcFlavor);
                     try { await SendChunkedAsync(discordChannel, npcText); } catch { }
                     continue;
                 }
@@ -7001,7 +7306,15 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 {
                     var res = runner.Pass(currentActorId);
                     await PersistRunnerAsync(channelState, dndState.ActiveCampaignName, campaign, runner, ct);
-                    var text = "Player timed out; auto-pass.\n" + RenderTurnResult(res);
+                    var legacyText = RenderTurnResult(res);
+                    var text = await FormatGameTurnOutputAsync(
+                        _moduleContext,
+                        channelState,
+                        res,
+                        legacyText,
+                        "auto-pass",
+                        ct,
+                        forcedLead: "⏱️ **Turn timer hits zero.** Auto-pass kicks in and the fight keeps moving.");
                     try { await SendChunkedAsync(discordChannel, TrimToLimit(text, 3500)); } catch { }
                     continue;
                 }
@@ -7018,7 +7331,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         }
     }
 
-    private async Task<(DndCampaignResult result, string text)> RunNpcAutoplayStepAsync(
+    private async Task<(DndCampaignResult result, string flavorLine, string legacyText)> RunNpcAutoplayStepAsync(
         InstructionGPT.ChannelState channelState,
         DndLiteChannelState dndState,
         DndLiteCampaignDocument campaign,
@@ -7030,14 +7343,14 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         var enc = snap.ActiveEncounterState;
         if (enc?.Actors == null || !enc.Actors.TryGetValue(npcActorId, out var npc) || npc == null || !npc.IsAlive)
         {
-            return (null, "NPC not found/alive.");
+            return (null, null, "NPC not found/alive.");
         }
 
         var target = ChooseNpcTarget(enc);
         if (target == null)
         {
             var res0 = runner.Pass(npcActorId);
-            return (res0, RenderTurnResult(res0));
+            return (res0, null, RenderTurnResult(res0));
         }
 
         var shouldCast = npc.Mp >= DndRuleset.Default.SpellMpCost &&
@@ -7053,7 +7366,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             res = runner.Attack(npcActorId, target.ActorId);
         }
 
-        var sb = new StringBuilder();
+        string flavorLine = null;
         if (dndState.Live.NpcFlavorEnabled)
         {
             var npcProfile = await LoadNpcProfileAsync(channelState, npcActorId, ct);
@@ -7062,13 +7375,12 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 var flavor = await GenerateNpcFlavorLineAsync(_moduleContext, channelState, campaign, npcProfile, enc, target, ct);
                 if (!string.IsNullOrWhiteSpace(flavor))
                 {
-                    sb.AppendLine(flavor.Trim());
+                    flavorLine = flavor.Trim();
                 }
             }
         }
 
-        sb.AppendLine(RenderTurnResult(res));
-        return (res, TrimToLimit(sb.ToString().Trim(), 3500));
+        return (res, flavorLine, RenderTurnResult(res));
     }
 
     private static DndActorSnapshot ChooseNpcTarget(DndEncounterSnapshot enc)
@@ -7546,7 +7858,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             return null;
         }
 
-        error = $"Target \"{wanted}\" not found. Use `!targets`.";
+        error = $"Target \"{wanted}\" not found. Ask for targets or name a listed enemy.";
         return null;
     }
 
@@ -7580,6 +7892,387 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         }
 
         return TrimToLimit(sb.ToString().Trim(), 3500);
+    }
+
+    private static GameNarrationSettings ResolveGameNarrationSettings(DiscordModuleContext context)
+    {
+        var enabled = IsGameNarrationEnabled(context);
+        var mode = GetGameNarrationMode(context);
+        var emojiLevel = GetGameNarrationEmojiLevel(context);
+        var timeoutSeconds = GetGameNarrationTimeoutSeconds(context);
+        var maxLeadChars = GetGameNarrationMaxLeadChars(context);
+        return new GameNarrationSettings(enabled, mode, emojiLevel, timeoutSeconds, maxLeadChars);
+    }
+
+    private async Task<string> FormatGameTurnOutputAsync(
+        DiscordModuleContext context,
+        InstructionGPT.ChannelState channelState,
+        DndCampaignResult res,
+        string fallbackText,
+        string actionLabel,
+        CancellationToken ct,
+        string forcedLead = null)
+    {
+        context ??= _moduleContext;
+        var settings = ResolveGameNarrationSettings(context);
+
+        var mechanics = RenderCompactMechanics(res);
+        if (string.IsNullOrWhiteSpace(mechanics))
+        {
+            mechanics = TrimToLimit((fallbackText ?? (res?.Error ?? "error")).Trim(), 2600);
+        }
+
+        if (!settings.Enabled || string.Equals(settings.Mode, GameNarrationModeOff, StringComparison.OrdinalIgnoreCase))
+        {
+            return TrimToLimit(mechanics, 3500);
+        }
+
+        var lead = string.IsNullOrWhiteSpace(forcedLead) ? null : forcedLead.Trim();
+        if (string.IsNullOrWhiteSpace(lead))
+        {
+            if (string.Equals(settings.Mode, GameNarrationModeLlm, StringComparison.OrdinalIgnoreCase))
+            {
+                lead = await GenerateGameFlavorLeadAsync(context, channelState, res, actionLabel, settings, ct);
+            }
+
+            if (string.IsNullOrWhiteSpace(lead))
+            {
+                lead = BuildDeterministicGameLead(res, actionLabel, settings.EmojiLevel);
+            }
+        }
+
+        lead = string.IsNullOrWhiteSpace(lead)
+            ? null
+            : TrimToLimit(lead.Replace("\r", " ").Replace("\n", " ").Trim(), settings.MaxLeadChars);
+
+        if (string.IsNullOrWhiteSpace(lead))
+        {
+            return TrimToLimit(mechanics, 3500);
+        }
+
+        var sb = new StringBuilder();
+        sb.AppendLine(lead);
+        sb.AppendLine();
+        sb.AppendLine("**Mechanics**");
+        sb.AppendLine(mechanics);
+        return TrimToLimit(sb.ToString().Trim(), 3500);
+    }
+
+    private static string RenderCompactMechanics(DndCampaignResult res)
+    {
+        if (res == null)
+        {
+            return string.Empty;
+        }
+
+        if (!res.Ok)
+        {
+            var err = string.IsNullOrWhiteSpace(res.Error) ? "Action failed." : res.Error.Trim();
+            return $"❌ {TrimToLimit(err, 800)}";
+        }
+
+        var sb = new StringBuilder();
+        var highlights = ExtractMechanicsHighlights(res).Take(4).ToList();
+        if (highlights.Count > 0)
+        {
+            foreach (var line in highlights)
+            {
+                sb.AppendLine($"{PickMechanicsEmoji(line)} {line}");
+            }
+        }
+
+        if (res.Campaign != null)
+        {
+            if (sb.Length > 0)
+            {
+                sb.AppendLine();
+            }
+            sb.AppendLine($"📊 {RenderPartySummary(res.Campaign)}");
+        }
+
+        var next = res.EncounterResult?.NextRequest;
+        var nextText = next == null ? string.Empty : RenderNextRequest(next);
+        if (!string.IsNullOrWhiteSpace(nextText))
+        {
+            if (sb.Length > 0)
+            {
+                sb.AppendLine();
+            }
+
+            var lines = nextText.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            if (lines.Length > 0)
+            {
+                sb.AppendLine($"🧭 {lines[0].Trim()}");
+                foreach (var line in lines.Skip(1).Take(8))
+                {
+                    sb.AppendLine($"🧾 {line.Trim()}");
+                }
+            }
+        }
+
+        return TrimToLimit(sb.ToString().Trim(), 2400);
+    }
+
+    private static List<string> ExtractMechanicsHighlights(DndCampaignResult res)
+    {
+        var entries = (res?.NewCampaignLedgerEntries ?? Array.Empty<DndCampaignLedgerEntry>())
+            .Where(e => e != null && !string.IsNullOrWhiteSpace(e.Message))
+            .Select(e => StripEncounterPrefix(e.Message))
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .Select(s => s.Trim())
+            .ToList();
+
+        if (entries.Count == 0)
+        {
+            return new List<string>();
+        }
+
+        var filtered = entries
+            .Where(line => !line.StartsWith("Round ", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (filtered.Count == 0)
+        {
+            filtered = entries;
+        }
+
+        return filtered
+            .TakeLast(4)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private static string PickMechanicsEmoji(string line)
+    {
+        var l = (line ?? string.Empty).Trim();
+        if (l.Contains("=> HIT", StringComparison.OrdinalIgnoreCase) || l.Contains("declares Attack", StringComparison.OrdinalIgnoreCase))
+        {
+            return "⚔️";
+        }
+        if (l.Contains("=> MISS", StringComparison.OrdinalIgnoreCase))
+        {
+            return "🛡️";
+        }
+        if (l.Contains("deals", StringComparison.OrdinalIgnoreCase) || l.Contains("damage", StringComparison.OrdinalIgnoreCase))
+        {
+            return "💥";
+        }
+        if (l.Contains("needs", StringComparison.OrdinalIgnoreCase) || l.Contains("roll", StringComparison.OrdinalIgnoreCase))
+        {
+            return "🎲";
+        }
+        if (l.Contains("spends", StringComparison.OrdinalIgnoreCase) || l.Contains("MP", StringComparison.OrdinalIgnoreCase))
+        {
+            return "🪄";
+        }
+        if (l.Contains("Encounter completed: victory", StringComparison.OrdinalIgnoreCase))
+        {
+            return "🏆";
+        }
+        if (l.Contains("Encounter completed: defeat", StringComparison.OrdinalIgnoreCase))
+        {
+            return "💀";
+        }
+        if (l.StartsWith("Turn:", StringComparison.OrdinalIgnoreCase))
+        {
+            return "🧭";
+        }
+        return "🧩";
+    }
+
+    private static string StripEncounterPrefix(string message)
+    {
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            return string.Empty;
+        }
+
+        return Regex.Replace(message.Trim(), @"^\[[^\]]+\]\s*", string.Empty, RegexOptions.CultureInvariant);
+    }
+
+    private static string BuildDeterministicGameLead(DndCampaignResult res, string actionLabel, string emojiLevel)
+    {
+        var level = NormalizeGameNarrationEmojiLevel(emojiLevel);
+        var combatEmoji = level switch
+        {
+            "low" => "⚔️",
+            "high" => "⚔️🔥🎲",
+            _ => "⚔️🎲"
+        };
+        var victoryEmoji = level switch
+        {
+            "low" => "🏆",
+            "high" => "🏆🔥✨",
+            _ => "🏆✨"
+        };
+        var dangerEmoji = level switch
+        {
+            "low" => "⚠️",
+            "high" => "⚠️💀",
+            _ => "⚠️🛡️"
+        };
+
+        if (res == null)
+        {
+            return $"{dangerEmoji} **Hold pressure.** Reset your footing and call the next move.";
+        }
+
+        if (!res.Ok)
+        {
+            var err = string.IsNullOrWhiteSpace(res.Error) ? "action failed" : res.Error.Trim();
+            return $"{dangerEmoji} **That action stalls.** {TrimToLimit(err, 180)}";
+        }
+
+        var next = res.EncounterResult?.NextRequest;
+        var highlights = ExtractMechanicsHighlights(res);
+        var beat = highlights.LastOrDefault();
+        if (!string.IsNullOrWhiteSpace(beat))
+        {
+            beat = TrimToLimit(beat, 180);
+        }
+
+        if (next?.Kind == DndNextRequestKind.Completed)
+        {
+            var won = (beat ?? string.Empty).Contains("victory", StringComparison.OrdinalIgnoreCase);
+            if (won)
+            {
+                return $"{victoryEmoji} **Boss down.** You broke their line and owned the finish.";
+            }
+            return $"{dangerEmoji} **The encounter closes.** Regroup fast and decide your next push.";
+        }
+
+        if (next?.Kind == DndNextRequestKind.NeedRolls || next?.Kind == DndNextRequestKind.NeedInitiativeRolls)
+        {
+            var line = string.IsNullOrWhiteSpace(beat) ? "Dice are up." : beat;
+            return $"🎲 **Pressure moment.** {line}";
+        }
+
+        if (next?.Kind == DndNextRequestKind.NeedAction)
+        {
+            var line = string.IsNullOrWhiteSpace(beat) ? "Your window is open." : beat;
+            return $"{combatEmoji} **Stay sharp.** {line}";
+        }
+
+        if (!string.IsNullOrWhiteSpace(actionLabel))
+        {
+            return $"{combatEmoji} **{actionLabel.Trim()} resolved.** Keep momentum and call the next beat.";
+        }
+
+        return $"{combatEmoji} **Combat pressure stays high.** Keep your line and drive the turn.";
+    }
+
+    private async Task<string> GenerateGameFlavorLeadAsync(
+        DiscordModuleContext context,
+        InstructionGPT.ChannelState channelState,
+        DndCampaignResult res,
+        string actionLabel,
+        GameNarrationSettings settings,
+        CancellationToken ct)
+    {
+        if (context == null || channelState == null || settings == null)
+        {
+            return null;
+        }
+
+        var model = ResolveModel(context, channelState);
+        if (string.IsNullOrWhiteSpace(model))
+        {
+            return null;
+        }
+
+        var request = new ChatCompletionCreateRequest
+        {
+            Model = model,
+            Temperature = 0.7f,
+            MaxCompletionTokens = 180,
+            Messages = new List<ChatMessage>
+            {
+                new(ChatCompletionRole.System,
+                    "You are a cinematic tabletop GM narrator. " +
+                    "Return strict JSON only with key exactly: lead. " +
+                    "lead must be one short paragraph, vivid, in-the-moment, no code fences."),
+                new(ChatCompletionRole.User, BuildGameFlavorPrompt(res, actionLabel, settings.EmojiLevel, settings.MaxLeadChars))
+            }
+        };
+
+        try
+        {
+            var responseTask = context.OpenAILogic.CreateChatCompletionAsync(request);
+            var timeoutTask = Task.Delay(TimeSpan.FromSeconds(settings.TimeoutSeconds), ct);
+            var done = await Task.WhenAny(responseTask, timeoutTask);
+            if (done != responseTask)
+            {
+                return null;
+            }
+
+            var response = await responseTask;
+            if (!response.Successful)
+            {
+                return null;
+            }
+
+            var content = ExtractChatMessageText(response.Choices?.FirstOrDefault()?.Message)?.Trim();
+            if (string.IsNullOrWhiteSpace(content))
+            {
+                return null;
+            }
+
+            var json = ExtractJsonObject(content);
+            if (string.IsNullOrWhiteSpace(json))
+            {
+                return null;
+            }
+
+            var parsed = JsonSerializer.Deserialize<GameFlavorResponseDto>(json, _jsonOptions);
+            var lead = parsed?.Lead?.Trim();
+            if (string.IsNullOrWhiteSpace(lead))
+            {
+                return null;
+            }
+
+            lead = lead.Replace("\r", " ").Replace("\n", " ").Trim();
+            return TrimToLimit(lead, settings.MaxLeadChars);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static string BuildGameFlavorPrompt(
+        DndCampaignResult res,
+        string actionLabel,
+        string emojiLevel,
+        int maxLeadChars)
+    {
+        var highlights = ExtractMechanicsHighlights(res);
+        var next = res?.EncounterResult?.NextRequest;
+        var nextLine = next == null ? string.Empty : RenderNextRequest(next).Split('\n', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? string.Empty;
+
+        var sb = new StringBuilder();
+        sb.AppendLine("Write a GM combat lead line for Discord.");
+        sb.AppendLine($"Character limit: {Math.Clamp(maxLeadChars, 120, 1200)}");
+        sb.AppendLine($"Emoji density: {NormalizeGameNarrationEmojiLevel(emojiLevel)} (2-5 emojis when possible).");
+        sb.AppendLine("Rules:");
+        sb.AppendLine("- Do not invent new mechanics, dice values, or damage.");
+        sb.AppendLine("- Keep urgency, pressure, and table energy high.");
+        sb.AppendLine("- Keep it to one short paragraph.");
+        if (!string.IsNullOrWhiteSpace(actionLabel))
+        {
+            sb.AppendLine($"Action label: {actionLabel}");
+        }
+        if (highlights.Count > 0)
+        {
+            sb.AppendLine("Mechanical highlights:");
+            foreach (var line in highlights.TakeLast(4))
+            {
+                sb.AppendLine($"- {line}");
+            }
+        }
+        if (!string.IsNullOrWhiteSpace(nextLine))
+        {
+            sb.AppendLine($"Next prompt summary: {nextLine}");
+        }
+        return sb.ToString().Trim();
     }
 
     private static string RenderPartySummary(DndCampaignSnapshot snap)
@@ -7637,7 +8330,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 
         if (next.Kind == DndNextRequestKind.NeedAction)
         {
-            return $"Next: {next.CurrentActorId} to act. Use `!attack <target>` or `!cast <target>` or `!pass`.";
+            return $"Next: {next.CurrentActorId} to act. Describe the move naturally (attack, cast, or pass).";
         }
 
         if (next.RequiredRolls == null || next.RequiredRolls.Count == 0)
@@ -7647,12 +8340,20 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 
         var lines = new List<string>();
         lines.Add(next.Kind == DndNextRequestKind.NeedInitiativeRolls
-            ? "Next: initiative rolls pending. Players: `!roll initiative` (or GM: `!rollall`)."
-            : "Next: rolls pending. Use `!roll <rollId>` (or `!rollall`).");
+            ? "Next: initiative rolls are pending. Ask to roll initiative (or resolve all pending initiative rolls)."
+            : "Next: rolls are pending before the turn can continue. Ask to resolve a specific roll ID (or all pending rolls).");
 
-        foreach (var r in next.RequiredRolls.Take(8))
+        var rollParts = next.RequiredRolls
+            .Take(8)
+            .Select(r =>
+            {
+                var target = string.IsNullOrWhiteSpace(r.TargetId) ? string.Empty : $" vs {r.TargetId}";
+                return $"{r.RollId} ({r.Kind} for {r.ActorId}{target})";
+            })
+            .ToList();
+        if (rollParts.Count > 0)
         {
-            lines.Add($"- {r.RollId} {r.Kind} actor={r.ActorId} target={r.TargetId}");
+            lines.Add("Pending roll IDs: " + string.Join(", ", rollParts));
         }
 
         return TrimToLimit(string.Join("\n", lines), 900);
@@ -7662,6 +8363,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
     {
         return
             "DND simplified gameplay (game mode)\n" +
+            "- Natural play: say actions in plain language (for example: \"I attack Boss\", \"I cast at Boss\", \"I pass\")\n" +
             "- `!state` (party + encounter summary)\n" +
             "- `!targets` (list enemies)\n" +
             "- `!attack <target>`\n" +
@@ -7671,7 +8373,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             "- `!roll <rollId>`\n" +
             "- `!rollall`\n" +
             "- `!ledger [n]`\n\n" +
-            "Hybrid: mention the bot to attempt routing your message into one of the above actions (only on your turn, when no rolls are pending).";
+            "Bang commands are still available, but plain-language actions are preferred.";
     }
 
     private static string BuildCampaignSummary(DndLiteCampaignDocument doc)
@@ -7923,6 +8625,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
     private sealed record ResponsesToolCall(string CallId, string Name, string ArgumentsJson, string Status, bool IsIncomplete);
     private sealed record ResponsesApiResult(bool Successful, string Error, int HttpMs, string ResponseId, string OutputText, List<ResponsesToolCall> ToolCalls, string RawJson);
     private sealed record ResponsesLoopResult(bool Successful, string Error, int HttpMs, string OutputText, int Rounds);
+    private sealed record GameNarrationSettings(bool Enabled, string Mode, string EmojiLevel, int TimeoutSeconds, int MaxLeadChars);
 
     private sealed class CampaignStageOneAccumulator
     {
@@ -11493,5 +12196,10 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
     private sealed class NpcFlavorResponseDto
     {
         public string Line { get; set; }
+    }
+
+    private sealed class GameFlavorResponseDto
+    {
+        public string Lead { get; set; }
     }
 }
