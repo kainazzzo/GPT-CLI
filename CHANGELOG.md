@@ -2,6 +2,47 @@
 
 Notable user-facing changes. Entries are ordered newest-first.
 
+## 2026-02-13
+
+### Discord integration and module-flow expansion
+
+- Expanded Discord module integration plumbing and command flow across core/chat modules.
+- Updated module contracts/pipeline wiring (`IFeatureModule`, `FeatureModuleBase`, `DiscordModulePipeline`) and command mapping behavior.
+- Refined Discord chat/runtime state handling and OpenAI parameter mapping touchpoints used by modules.
+- Updated example modules (DND/Casino/Poll) to align with the expanded module flow.
+
+Files:
+- `Chat/Discord/Commands/GptCliFunction.cs`
+- `Chat/Discord/InstructionGPT.cs`
+- `Chat/Discord/Modules/DiscordModulePipeline.cs`
+- `Chat/Discord/Modules/FeatureModuleBase.cs`
+- `Chat/Discord/Modules/IFeatureModule.cs`
+- `Chat/Discord/Modules/InfobotModule.cs`
+- `Chat/InstructionChatBot.cs`
+- `OpenAILogic.cs`
+- `ParameterMapping.cs`
+- `Program.cs`
+- `modules/examples/CasinoModuleExample/CasinoModuleExample/CasinoGameModule.cs`
+- `modules/examples/DndModuleExample/DndModuleExample/DndGameMasterModule.cs`
+- `modules/examples/PollModuleExample/PollModuleExample/PollModule.cs`
+
+### DnD draft mode: deterministic state handling + leaner LLM usage
+
+- Added a stricter delineation between state management and LLM generation in draft mode:
+  - deterministic handlers now process state edits first (party changes, confirmations, pass-timeout parsing, and clarifications),
+  - LLM chat fallback is conversation-only (no tool calls) when applicable.
+- Added pending draft action execution path for confirmations (`confirm`/`cancel`) across campaign create overwrite, draft updates, and risky party edits.
+- Reduced draft chat token pressure:
+  - compact chat-only context profile (smaller history window and reduced prompt size),
+  - smaller campaign excerpt inclusion for draft auto-route context,
+  - token-limit failure fallback to a deterministic conversational reply.
+- Stopped leaking tool narration/JSON into user-facing draft replies by sanitizing model narration in tool-response paths.
+- Kept Discord progress updates sparse and conversational (phase-based, throttled status updates).
+- Reduced sheet-generation campaign context payload so character/NPC generation does not require large draft context.
+
+Files:
+- `modules/examples/DndModuleExample/DndModuleExample/DndGameMasterModule.cs`
+
 ## 2026-02-11
 
 ### DnD module: prep generation moved to Responses API agent loop
