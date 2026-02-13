@@ -31,6 +31,17 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
     private const int MaxCampaignChars = 24000;
     private const int CampaignCreateTimeoutSeconds = 60;
     private const int ResponsesLoopMaxRounds = 4;
+    private const int DraftPendingActionTtlMinutes = 5;
+    private const string PendingActionCampaignCreate = "campaign-create";
+    private const string PendingActionDraftUpdate = "draft-update";
+    private const string PendingActionPartyEdit = "party-edit";
+    private const string RouteToolCampaignCreate = "dnd_route_campaign_create";
+    private const string RouteToolDraftUpdate = "dnd_route_draft_update";
+    private const string RouteToolPartyEdit = "dnd_route_party_edit";
+    private const string RouteToolSheetCreate = "dnd_route_sheet_create";
+    private const string RouteToolPassTimeout = "dnd_route_passtimeout";
+    private const string RouteToolChatReply = "dnd_route_chat_reply";
+    private const string RouteToolClarify = "dnd_route_clarify";
 
     private static readonly HttpClient ResponsesHttpClient = new();
 
@@ -45,6 +56,19 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
     }
 
     private sealed record DndLogPolicy(DndLogLevel ConsoleMinLevel, DndLogLevel DiscordMinLevel);
+    private sealed record DraftStatusUpdate(string Key, string Message, bool Important);
+    private sealed record DraftIntentRouterDispatchResult(bool Handled, string Reply = null, string Error = null);
+
+    private sealed class DraftPartyEditIntent
+    {
+        public bool WantsAdd { get; set; }
+        public bool WantsRemove { get; set; }
+        public List<ulong> MentionedUserIds { get; set; } = new();
+        public List<string> NpcActorIds { get; set; } = new();
+        public bool IsAmbiguous => WantsAdd && WantsRemove;
+        public int TargetCount => (MentionedUserIds?.Count ?? 0) + (NpcActorIds?.Count ?? 0);
+        public bool HasTargets => TargetCount > 0;
+    }
 
     private static readonly Regex BotMentionRegexTemplate =
         new(@"<@!?(?<id>\d+)>", RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -54,6 +78,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
     private readonly ConcurrentDictionary<ulong, RandomDiceRoller> _diceByChannel = new();
     private readonly ConcurrentDictionary<ulong, CancellationTokenSource> _tickCtsByChannel = new();
     private readonly ConcurrentDictionary<ulong, Task> _tickTasksByChannel = new();
+    private readonly ConcurrentDictionary<ulong, (DateTime SentUtc, string Key)> _lastStatusUpdateByChannel = new();
 
     // Used by background tick loops (no message context).
     private DiscordModuleContext _moduleContext;
@@ -113,8 +138,8 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 BuildModulePreambleMessage(
                     "Sub-Prime Directive (DRAFT / GM Prep):\n" +
                     "- Draft mode is the preparatory phase a GM would normally do before play: define premise/tone, write hooks, outline scenes, sketch key NPCs, pick encounters, and set up the party.\n" +
-                    "- Treat natural-language requests as instructions to build/update persistent draft state (campaign draft, party roster, character sheets, encounter templates).\n" +
-                    "- The user may mention any available DnD capability; your job is to call the relevant `gptcli_dnd_*` functions to create/update what they asked for.\n" +
+                    "- Default to conversational GM collaboration first: brainstorm, refine, and ask concise follow-up questions.\n" +
+                    "- Only call `gptcli_dnd_*` functions when the user clearly asks for a persistent state change.\n" +
                     "- Do not finalize/save the campaign into the catalog until game mode.\n" +
                     "When To Engage (triggers):\n" +
                     "- new campaign, rewrite/update draft, add/remove party members, create/show NPC/PC sheets, list encounters/campaigns, set pass timeout\n")
@@ -555,15 +580,62 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                     try { await context.Host.SaveCachedChannelStateAsync(message.Channel.Id); } catch { }
                 }
 
-                // First: handle pending overwrite confirmations, if any.
-                if (await TryHandlePendingCampaignOverwriteAsync(context, channelState, message, dndState, cancellationToken))
+                // First: handle pending draft confirmations, if any.
+                if (await TryHandlePendingDraftActionAsync(context, channelState, message, dndState, cancellationToken))
                 {
                     return;
                 }
 
-                // Deterministic campaign creation: avoid LLM tool-choice ambiguity for "new campaign ..." messages.
-                // This makes "describe a new campaign" reliably persist to the JSON draft storage.
                 var stripped = StripBotMentions(content, context.Client.CurrentUser.Id);
+                var intentRouterEnabled = IsDraftIntentRouterEnabled(context);
+                if (intentRouterEnabled)
+                {
+                    var routed = await TryHandleDraftIntentRouterAsync(
+                        context,
+                        channelState,
+                        message,
+                        dndState,
+                        stripped,
+                        cancellationToken);
+                    if (routed)
+                    {
+                        return;
+                    }
+
+                    if (!IsDraftIntentRouterLegacyFallbackEnabled(context))
+                    {
+                        Console.WriteLine($"[dnd] draft-route: router unhandled and legacy fallback disabled (channel={message.Channel?.Id})");
+                        var fallbackHandled = await TryHandleAutoRoutedMessageAsync(
+                            context,
+                            channelState,
+                            message,
+                            dndState,
+                            cancellationToken,
+                            allowToolCalls: false);
+                        if (fallbackHandled)
+                        {
+                            return;
+                        }
+
+                        var fallback = BuildDraftConversationalFallback(stripped);
+                        try { await message.Channel.SendMessageAsync($"<@{message.Author.Id}> {fallback}"); } catch { }
+                        return;
+                    }
+
+                    Console.WriteLine($"[dnd] draft-route: router unhandled, using legacy fallback (channel={message.Channel?.Id})");
+                }
+
+                var partyIntent = AnalyzeDraftPartyEditIntent(context, message, stripped);
+                var chatFirstEnabled = IsDraftChatFirstEnabled(context);
+                var confirmRiskyEditsEnabled = IsDraftConfirmRiskyEditsEnabled(context);
+                var conversationOnly = chatFirstEnabled && !LooksLikeExplicitDraftMutationIntent(stripped, partyIntent);
+
+                Console.WriteLine(
+                    $"[dnd] draft-route: chatFirst={chatFirstEnabled} confirmRisky={confirmRiskyEditsEnabled} conversationOnly={conversationOnly} " +
+                    $"partyTargets={partyIntent.TargetCount} wantsAdd={partyIntent.WantsAdd} wantsRemove={partyIntent.WantsRemove} " +
+                    $"(channel={message.Channel?.Id})");
+
+                // Deterministic campaign creation: avoid LLM tool-choice ambiguity for explicit campaign create requests.
                 if (TryDetectCampaignCreateIntent(stripped, out var extractedCampaignName, out var wantsOverwrite))
                 {
                     var reqId = Guid.NewGuid().ToString("n")[..8];
@@ -581,14 +653,19 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                     if (exists && !wantsOverwrite)
                     {
                         Console.WriteLine($"[dnd] draft-create[{reqId}]: draft exists; requesting confirmation path={existingPath}");
-                        dndState.PendingCampaignCreate = new PendingCampaignCreateRequest
-                        {
-                            CampaignName = extractedCampaignName,
-                            Prompt = stripped,
-                            RequestedUtc = DateTime.UtcNow,
-                            ExpiresUtc = DateTime.UtcNow.AddMinutes(5)
-                        };
-                        await SaveStateAsync(channelState, dndState, cancellationToken);
+                        await SetPendingDraftActionAsync(
+                            channelState,
+                            dndState,
+                            new PendingDraftActionRequest
+                            {
+                                ActionType = PendingActionCampaignCreate,
+                                ArgumentsJson = JsonSerializer.Serialize(new { name = extractedCampaignName, prompt = stripped }),
+                                RequestedByUserId = message.Author.Id,
+                                RequestedUtc = DateTime.UtcNow,
+                                ExpiresUtc = DateTime.UtcNow.AddMinutes(DraftPendingActionTtlMinutes),
+                                Summary = $"overwrite draft campaign \"{extractedCampaignName}\""
+                            },
+                            cancellationToken);
 
                         try
                         {
@@ -643,10 +720,81 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                     }
                 }
 
+                // Confirm destructive or bulk party changes before writing state.
+                if (confirmRiskyEditsEnabled && IsRiskyDraftPartyEdit(partyIntent))
+                {
+                    var op = partyIntent.WantsRemove ? "remove" : "add";
+                    var argsJson = JsonSerializer.Serialize(new
+                    {
+                        add = partyIntent.WantsAdd,
+                        remove = partyIntent.WantsRemove,
+                        userIds = partyIntent.MentionedUserIds,
+                        npcIds = partyIntent.NpcActorIds
+                    });
+                    await SetPendingDraftActionAsync(
+                        channelState,
+                        dndState,
+                        new PendingDraftActionRequest
+                        {
+                            ActionType = PendingActionPartyEdit,
+                            ArgumentsJson = argsJson,
+                            RequestedByUserId = message.Author.Id,
+                            RequestedUtc = DateTime.UtcNow,
+                            ExpiresUtc = DateTime.UtcNow.AddMinutes(DraftPendingActionTtlMinutes),
+                            Summary = $"{op} {partyIntent.TargetCount} party member(s)"
+                        },
+                        cancellationToken);
+                    try
+                    {
+                        await message.Channel.SendMessageAsync(
+                            $"<@{message.Author.Id}> This will {op} {partyIntent.TargetCount} party member(s). Reply `confirm` to apply, or `cancel`.");
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[dnd] send failed (party confirm prompt): {ex.GetType().Name} {ex.Message}");
+                    }
+                    return;
+                }
+
                 // Draft mode: high-confidence deterministic party edits (mentions + npc: ids).
                 if (await TryHandleDeterministicDraftPartyEditsAsync(context, channelState, message, dndState, stripped, cancellationToken))
                 {
                     return;
+                }
+
+                // Confirm broad story rewrites before writing state in chat-first mode.
+                if (confirmRiskyEditsEnabled && LooksLikeDraftUpdateIntent(stripped))
+                {
+                    var activeCampaign = dndState.ActiveCampaignName ?? "default";
+                    var draftPath = ResolveDraftCampaignPath(channelState, activeCampaign);
+                    var draftExists = false;
+                    try { draftExists = File.Exists(draftPath); } catch { draftExists = false; }
+                    if (draftExists)
+                    {
+                        await SetPendingDraftActionAsync(
+                            channelState,
+                            dndState,
+                            new PendingDraftActionRequest
+                            {
+                                ActionType = PendingActionDraftUpdate,
+                                ArgumentsJson = JsonSerializer.Serialize(new { name = activeCampaign, prompt = stripped }),
+                                RequestedByUserId = message.Author.Id,
+                                RequestedUtc = DateTime.UtcNow,
+                                ExpiresUtc = DateTime.UtcNow.AddMinutes(DraftPendingActionTtlMinutes),
+                                Summary = $"rewrite draft campaign \"{activeCampaign}\""
+                            },
+                            cancellationToken);
+                        try
+                        {
+                            await message.Channel.SendMessageAsync(
+                                $"<@{message.Author.Id}> I can update the draft story now. Reply `confirm` to apply it, or `cancel`.");
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"[dnd] send failed (draft update confirm prompt): {ex.GetType().Name} {ex.Message}");
+                        }
+                        return;
+                    }
                 }
 
                 // Draft mode: high-confidence deterministic story edits ("rewrite/change/update..." etc).
@@ -655,18 +803,56 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                     return;
                 }
 
-                var handled = await TryHandleAutoRoutedMessageAsync(context, channelState, message, dndState, cancellationToken);
-                Console.WriteLine($"[dnd] auto-route: handled={handled} mode=draft (channel={message.Channel?.Id})");
+                // Stateful draft operations should stay deterministic (no general LLM state manager).
+                if (!conversationOnly)
+                {
+                    if (await TryHandleDeterministicDraftSheetGenerationFromMessageAsync(
+                            context, channelState, message, dndState, stripped, cancellationToken))
+                    {
+                        return;
+                    }
+
+                    if (await TryHandleDeterministicDraftPassTimeoutFromMessageAsync(
+                            context, channelState, message, dndState, stripped, cancellationToken))
+                    {
+                        return;
+                    }
+
+                    if (TryBuildDraftStateClarification(stripped, partyIntent, out var clarification))
+                    {
+                        try { await message.Channel.SendMessageAsync($"<@{message.Author.Id}> {clarification}"); } catch { }
+                        return;
+                    }
+
+                    try
+                    {
+                        await message.Channel.SendMessageAsync(
+                            $"<@{message.Author.Id}> I can apply draft state changes directly, but I need explicit details. " +
+                            "For party edits, mention users and/or use `npc:...` ids. For other actions, use `/gptcli dnd ...`.");
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[dnd] send failed (draft deterministic hint): {ex.GetType().Name} {ex.Message}");
+                    }
+                    return;
+                }
+
+                // Conversational-only draft chat (no tool calls).
+                var handled = await TryHandleAutoRoutedMessageAsync(
+                    context,
+                    channelState,
+                    message,
+                    dndState,
+                    cancellationToken,
+                    allowToolCalls: false);
+                Console.WriteLine($"[dnd] auto-route: handled={handled} mode=draft conversationOnly=true (channel={message.Channel?.Id})");
                 if (handled)
                 {
                     return;
                 }
 
-                // Avoid silent failures in draft mode; if auto-routing can't respond, tell the user.
-                try
-                {
-                    await message.Channel.SendMessageAsync($"<@{message.Author.Id}> Sorry, I couldn't process that draft message. Try again in a moment.");
-                }
+                var draftFallback = BuildDraftConversationalFallback(stripped);
+                try { await message.Channel.SendMessageAsync($"<@{message.Author.Id}> {draftFallback}"); }
                 catch (Exception ex)
                 {
                     Console.WriteLine($"[dnd] send failed (draft fallback): {ex.GetType().Name} {ex.Message}");
@@ -797,7 +983,8 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         InstructionGPT.ChannelState channelState,
         SocketMessage message,
         DndLiteChannelState dndState,
-        CancellationToken ct)
+        CancellationToken ct,
+        bool allowToolCalls = true)
     {
         if (context == null || channelState == null || message == null)
         {
@@ -819,21 +1006,24 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         // Offer only this module's DnD tools to avoid cross-module surprises,
         // and filter the toolset by mode (draft != game toolset).
         var mode = NormalizeMode(dndState?.Mode);
+        var compactDraftChatOnly = string.Equals(mode, ModeDraft, StringComparison.OrdinalIgnoreCase) && !allowToolCalls;
         // In GAME mode, mode changes must be done via slash command to avoid accidental in-character triggers.
         var allowModeTool = !string.Equals(mode, ModeGame, StringComparison.OrdinalIgnoreCase) && LooksLikeModeChangeIntent(text);
-        var functions = GetGptCliFunctions(context)
-            .Where(f => f?.ExecuteAsync != null &&
-                        !string.IsNullOrWhiteSpace(f.ToolName) &&
-                        f.ToolName.StartsWith("gptcli_dnd_", StringComparison.OrdinalIgnoreCase) &&
-                        IsDndToolAllowedForMode(f.ToolName, mode) &&
-                        (allowModeTool || !string.Equals(f.ToolName, "gptcli_dnd_mode", StringComparison.OrdinalIgnoreCase)))
-            .ToList();
-        if (functions.Count == 0)
+        var functions = allowToolCalls
+            ? GetGptCliFunctions(context)
+                .Where(f => f?.ExecuteAsync != null &&
+                            !string.IsNullOrWhiteSpace(f.ToolName) &&
+                            f.ToolName.StartsWith("gptcli_dnd_", StringComparison.OrdinalIgnoreCase) &&
+                            IsDndToolAllowedForMode(f.ToolName, mode) &&
+                            (allowModeTool || !string.Equals(f.ToolName, "gptcli_dnd_mode", StringComparison.OrdinalIgnoreCase)))
+                .ToList()
+            : new List<GptCliFunction>();
+        if (allowToolCalls && functions.Count == 0)
         {
             return false;
         }
 
-        var tools = functions.Select(f => f.ToToolDefinition()).ToList();
+        var tools = allowToolCalls ? functions.Select(f => f.ToToolDefinition()).ToList() : new List<ToolDefinition>();
         var byName = functions
             .Where(f => !string.IsNullOrWhiteSpace(f.ToolName))
             .GroupBy(f => f.ToolName, StringComparer.OrdinalIgnoreCase)
@@ -845,15 +1035,18 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         userCtx.AppendLine($"DnD mode: {mode}");
         userCtx.AppendLine($"Active campaign: {activeCampaign}");
 
-        // Include party roster in-context so the model can reliably map "remove Kain" -> npc:... without
-        // needing a multi-turn tool loop (tool calls are single-pass).
-        try
+        if (!compactDraftChatOnly)
         {
-            await AppendPartyRosterContextAsync(userCtx, channelState, mode, activeCampaign, ct);
-        }
-        catch
-        {
-            // ignore
+            // Include party roster in-context so the model can reliably map "remove Kain" -> npc:... without
+            // needing a multi-turn tool loop (tool calls are single-pass).
+            try
+            {
+                await AppendPartyRosterContextAsync(userCtx, channelState, mode, activeCampaign, ct);
+            }
+            catch
+            {
+                // ignore
+            }
         }
 
         if (string.Equals(mode, ModeGame, StringComparison.OrdinalIgnoreCase))
@@ -894,12 +1087,12 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             var draft = await LoadDraftCampaignAsync(channelState, activeCampaign, ct);
             if (draft != null)
             {
-                if (!string.IsNullOrWhiteSpace(draft.CampaignMarkdown))
+                if (!compactDraftChatOnly && !string.IsNullOrWhiteSpace(draft.CampaignMarkdown))
                 {
                     userCtx.AppendLine("Existing draft campaign markdown (excerpt):");
-                    userCtx.AppendLine(TrimToLimit(draft.CampaignMarkdown, 1200));
+                    userCtx.AppendLine(TrimToLimit(draft.CampaignMarkdown, 500));
                 }
-                if (draft.EncounterTemplates is { Count: > 0 })
+                if (!compactDraftChatOnly && draft.EncounterTemplates is { Count: > 0 })
                 {
                     userCtx.AppendLine("Encounter templates (ids):");
                     userCtx.AppendLine(string.Join(", ",
@@ -919,21 +1112,25 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             var system = mode switch
             {
                 ModeDraft =>
-                    "You are the D&D game master assistant operating in DRAFT mode.\n" +
-                    "Draft mode is GM prep: build the campaign premise/tone, hooks, scenes, NPCs, encounter templates, and party composition.\n" +
-                    "The user may mention any available DnD capability; your job is to call the appropriate `gptcli_dnd_*` functions to create/update the requested state.\n" +
-                    "Do not call `gptcli_dnd_mode` unless the user explicitly asks to change modes.\n" +
-                    "If the user is describing a new campaign (name + premise/party), you must call `gptcli_dnd_campaigncreate`.\n" +
-                    "If the user asks to change/rewrite/update the existing draft story, you must call `gptcli_dnd_draftupdate`.\n" +
-                    "Party roster is provided in context under \"Party roster (actors)\".\n" +
-                    "If the user asks to add/remove party members:\n" +
-                    "- PCs: use `gptcli_dnd_partyaddpc` / `gptcli_dnd_partyremovepc`.\n" +
-                    "- NPCs: use `gptcli_dnd_partyremovenpc` (or `gptcli_dnd_npcremove`).\n" +
-                    "If the user asks to change the auto-pass / player turn timeout / pass timeout, call `gptcli_dnd_passtimeout`.\n" +
-                    "If the user specifies party members: create NPCs via tools; for PCs, only create a sheet for the author unless you have an explicit Discord user reference.\n" +
-                    "In DRAFT mode, do not finalize/save campaigns to the catalog. Build drafts only; finalization happens when entering game mode or via campaignfinalize.\n" +
-                    "If the message should persist state (create/overwrite a draft, set active campaign, add/remove party members, list campaigns/encounters), call the appropriate tool(s) even if the user did not say \"run a command\".\n" +
-                    "If the message is only discussion/brainstorming with no persistent change requested, respond as GM: concise, actionable, and incorporate the draft statement.\n",
+                    compactDraftChatOnly
+                        ? "You are the D&D draft copilot in conversation-only mode.\n" +
+                          "No tool calls. Give a concise response (1-3 sentences) and one actionable follow-up question.\n" +
+                          "Do not output JSON or mention internal commands.\n"
+                        : "You are the D&D game master assistant operating in DRAFT mode.\n" +
+                          "Draft mode is GM prep: build the campaign premise/tone, hooks, scenes, NPCs, encounter templates, and party composition.\n" +
+                          "Default to conversational collaboration first: brief, practical, and co-design oriented.\n" +
+                          "Call `gptcli_dnd_*` tools only when the user explicitly asks for a persistent state change or command-like action.\n" +
+                          "If intent is ambiguous, ask one short clarifying question instead of mutating state.\n" +
+                          "Do not call `gptcli_dnd_mode` unless the user explicitly asks to change modes.\n" +
+                          "Party roster is provided in context under \"Party roster (actors)\".\n" +
+                          "If the user asks to add/remove party members:\n" +
+                          "- PCs: use `gptcli_dnd_partyaddpc` / `gptcli_dnd_partyremovepc`.\n" +
+                          "- NPCs: use `gptcli_dnd_partyremovenpc` (or `gptcli_dnd_npcremove`).\n" +
+                          "If the user asks to change the auto-pass / player turn timeout / pass timeout, call `gptcli_dnd_passtimeout`.\n" +
+                          "If the user specifies party members: create NPCs via tools; for PCs, only create a sheet for the author unless you have an explicit Discord user reference.\n" +
+                          "In DRAFT mode, do not finalize/save campaigns to the catalog. Build drafts only; finalization happens when entering game mode or via campaignfinalize.\n" +
+                          "If the message is discussion/brainstorming, respond as a GM collaborator with concrete suggestions.\n" +
+                          "When responding in draft mode, end with one actionable follow-up question unless the user asked for direct execution only.\n",
                 ModeGame =>
                     "You are the D&D game master assistant operating in GAME mode.\n" +
                     "Game mode is live play. Treat every user message as in-game gameplay or roleplay.\n" +
@@ -960,21 +1157,28 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         {
             Model = ResolveModel(context, channelState),
             Temperature = string.Equals(mode, ModeDraft, StringComparison.OrdinalIgnoreCase) ? 0.3f : 0.2f,
-            MaxCompletionTokens = string.Equals(mode, ModeGame, StringComparison.OrdinalIgnoreCase) ? 350 : 700,
-            ParallelToolCalls = false,
+            MaxCompletionTokens = string.Equals(mode, ModeGame, StringComparison.OrdinalIgnoreCase)
+                ? 350
+                : (compactDraftChatOnly ? 260 : 700),
             Messages = new List<ChatMessage>
             {
                 new(ChatCompletionRole.System, system)
-            },
-            Tools = tools,
-            ToolChoice = new ToolChoice { Type = "auto" }
+            }
         };
+        if (allowToolCalls && tools.Count > 0)
+        {
+            request.ParallelToolCalls = false;
+            request.Tools = tools;
+            request.ToolChoice = new ToolChoice { Type = "auto" };
+        }
 
         // Add recent conversation history so followups like "no I meant X" can be resolved in context.
         // Only include user/assistant roles to keep the prompt small and avoid unrelated system noise.
         try
         {
-            var history = SnapshotRecentUserAssistantHistory(channelState, maxMessages: 14, maxChars: 6000);
+            var historyMaxMessages = compactDraftChatOnly ? 4 : 14;
+            var historyMaxChars = compactDraftChatOnly ? 1200 : 6000;
+            var history = SnapshotRecentUserAssistantHistory(channelState, maxMessages: historyMaxMessages, maxChars: historyMaxChars);
             if (history.Count > 0)
             {
                 foreach (var h in history)
@@ -1003,7 +1207,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                     .ToList();
 
                 Console.WriteLine(
-                    $"[dnd] auto-route: llm request mode={mode} model={request.Model} tools={tools.Count} campaign={activeCampaign} channel={message.Channel?.Id} toolNames=[{string.Join(", ", toolNames)}]");
+                    $"[dnd] auto-route: llm request mode={mode} model={request.Model} tools={(allowToolCalls ? tools.Count : 0)} allowToolCalls={allowToolCalls} campaign={activeCampaign} channel={message.Channel?.Id} toolNames=[{string.Join(", ", toolNames)}]");
                 Console.WriteLine($"[dnd] auto-route: system={system}");
                 Console.WriteLine($"[dnd] auto-route: userCtx={userCtx.ToString().Trim()}");
                 try
@@ -1050,6 +1254,18 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         if (!response.Successful)
         {
             Console.WriteLine($"[dnd] auto-route: llm response failed: {response.Error?.Code} {response.Error?.Message}");
+            if (string.Equals(mode, ModeDraft, StringComparison.OrdinalIgnoreCase) &&
+                (!allowToolCalls || compactDraftChatOnly) &&
+                IsTokenLimitError(response.Error?.Message))
+            {
+                var fallback = $"<@{message.Author.Id}> {BuildDraftConversationalFallback(text)}";
+                try { await SendChunkedAsync(message.Channel, fallback); } catch { }
+                if (TryRecordAssistantReply(channelState, fallback))
+                {
+                    try { await context.Host.SaveCachedChannelStateAsync(message.Channel.Id); } catch { }
+                }
+                return true;
+            }
             return false;
         }
 
@@ -1079,6 +1295,10 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         if ((toolCalls == null || toolCalls.Count == 0) && msg.FunctionCall != null)
         {
             toolCalls = new List<ToolCall> { new() { Type = "function", FunctionCall = msg.FunctionCall } };
+        }
+        if (!allowToolCalls)
+        {
+            toolCalls = null;
         }
 
         if (toolCalls is { Count: > 0 })
@@ -1124,7 +1344,22 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             }
 
             var replyLines = new List<string>();
-            if (applied.Count == 1)
+            if (string.Equals(mode, ModeDraft, StringComparison.OrdinalIgnoreCase))
+            {
+                var gmLead = !string.IsNullOrWhiteSpace(msgText)
+                    ? SanitizeDraftToolNarration(msgText)
+                    : "Updated the draft based on your request.";
+                gmLead = string.IsNullOrWhiteSpace(gmLead)
+                    ? "Updated the draft based on your request."
+                    : TrimToLimit(gmLead.Trim(), 700);
+                replyLines.Add($"<@{message.Author.Id}> {gmLead}");
+                if (applied.Count > 0)
+                {
+                    replyLines.Add("Applied:");
+                    replyLines.AddRange(applied.Select(line => $"- {line}"));
+                }
+            }
+            else if (applied.Count == 1)
             {
                 // For gameplay output (often multi-line), avoid wrapping it in a bullet list.
                 replyLines.Add($"<@{message.Author.Id}>");
@@ -1142,8 +1377,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 replyLines.AddRange(errors.Take(8).Select(err => $"- {err}"));
             }
 
-            // In draft mode, allow the model to include a short GM note alongside the tool calls (e.g. next steps).
-            if (string.Equals(mode, ModeDraft, StringComparison.OrdinalIgnoreCase) &&
+            if (!string.Equals(mode, ModeDraft, StringComparison.OrdinalIgnoreCase) &&
                 !string.IsNullOrWhiteSpace(msgText))
             {
                 replyLines.Add(string.Empty);
@@ -1165,6 +1399,19 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         var content = msgText;
         if (string.IsNullOrWhiteSpace(content))
         {
+            if (string.Equals(mode, ModeDraft, StringComparison.OrdinalIgnoreCase))
+            {
+                var fallbackText = BuildDraftConversationalFallback(text);
+                var fallbackReply = $"<@{message.Author.Id}> {fallbackText}";
+                Console.WriteLine($"[dnd] auto-route: empty draft completion; using fallback reply len={fallbackReply.Length}");
+                try { await SendChunkedAsync(message.Channel, fallbackReply); }
+                catch (Exception ex) { Console.WriteLine($"[dnd] send failed (draft fallback reply): {ex.GetType().Name} {ex.Message}"); }
+                if (TryRecordAssistantReply(channelState, fallbackReply))
+                {
+                    try { await context.Host.SaveCachedChannelStateAsync(message.Channel.Id); } catch { }
+                }
+                return true;
+            }
             return false;
         }
 
@@ -1177,6 +1424,765 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             try { await context.Host.SaveCachedChannelStateAsync(message.Channel.Id); } catch { }
         }
         return true;
+    }
+
+    private async Task<bool> TryHandleDraftIntentRouterAsync(
+        DiscordModuleContext context,
+        InstructionGPT.ChannelState channelState,
+        SocketMessage message,
+        DndLiteChannelState dndState,
+        string strippedText,
+        CancellationToken ct)
+    {
+        if (context == null || channelState == null || message == null || dndState == null)
+        {
+            return false;
+        }
+
+        if (!string.Equals(NormalizeMode(dndState.Mode), ModeDraft, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(strippedText))
+        {
+            return false;
+        }
+
+        var activeCampaign = dndState.ActiveCampaignName ?? "default";
+        var timeoutSeconds = GetDraftIntentRouterTimeoutSeconds(context);
+
+        var userCtx = new StringBuilder();
+        userCtx.AppendLine("DND draft intent router");
+        userCtx.AppendLine($"Active campaign: {activeCampaign}");
+        try
+        {
+            await AppendPartyRosterContextAsync(userCtx, channelState, ModeDraft, activeCampaign, ct);
+        }
+        catch
+        {
+            // ignore
+        }
+
+        try
+        {
+            var draft = await LoadDraftCampaignAsync(channelState, activeCampaign, ct);
+            if (draft != null && !string.IsNullOrWhiteSpace(draft.CampaignMarkdown))
+            {
+                userCtx.AppendLine("Existing draft excerpt:");
+                userCtx.AppendLine(TrimToLimit(draft.CampaignMarkdown, 500));
+            }
+        }
+        catch
+        {
+            // ignore
+        }
+
+        userCtx.AppendLine("User message:");
+        userCtx.AppendLine(strippedText.Trim());
+
+        var request = new ChatCompletionCreateRequest
+        {
+            Model = ResolveModel(context, channelState),
+            Temperature = 0.1f,
+            MaxCompletionTokens = 360,
+            ParallelToolCalls = false,
+            ToolChoice = new ToolChoice { Type = "auto" },
+            Tools = BuildDraftIntentRouterTools(),
+            Messages = new List<ChatMessage>
+            {
+                new(ChatCompletionRole.System, BuildDraftIntentRouterSystemPrompt())
+            }
+        };
+
+        try
+        {
+            var history = SnapshotRecentUserAssistantHistory(channelState, maxMessages: 8, maxChars: 2200);
+            if (history.Count > 0)
+            {
+                foreach (var h in history)
+                {
+                    request.Messages.Add(h);
+                }
+            }
+        }
+        catch
+        {
+            // ignore
+        }
+
+        request.Messages.Add(new ChatMessage(ChatCompletionRole.User, userCtx.ToString().Trim()));
+
+        ChatCompletionCreateResponse response;
+        try
+        {
+            Console.WriteLine(
+                $"[dnd] draft-router: llm request model={request.Model} campaign={activeCampaign} channel={message.Channel?.Id} timeout={timeoutSeconds}s");
+            using var typing = DiscordTyping.Begin(message.Channel);
+            var responseTask = context.OpenAILogic.CreateChatCompletionAsync(request);
+            var timeoutTask = Task.Delay(TimeSpan.FromSeconds(timeoutSeconds), ct);
+            var done = await Task.WhenAny(responseTask, timeoutTask);
+            if (done != responseTask)
+            {
+                Console.WriteLine($"[dnd] draft-router: timed out after {timeoutSeconds}s");
+                return false;
+            }
+
+            response = await responseTask;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[dnd] draft-router: llm call failed: {ex.GetType().Name} {ex.Message}");
+            return false;
+        }
+
+        if (!response.Successful)
+        {
+            Console.WriteLine($"[dnd] draft-router: llm response failed: {response.Error?.Code} {response.Error?.Message}");
+            return false;
+        }
+
+        var msg = response.Choices?.FirstOrDefault()?.Message;
+        if (msg == null)
+        {
+            Console.WriteLine("[dnd] draft-router: no message in response");
+            return false;
+        }
+
+        var msgText = ExtractChatMessageText(msg);
+        var toolCalls = msg.ToolCalls;
+        if ((toolCalls == null || toolCalls.Count == 0) && msg.FunctionCall != null)
+        {
+            toolCalls = new List<ToolCall> { new() { Type = "function", FunctionCall = msg.FunctionCall } };
+        }
+
+        if (toolCalls is not { Count: > 0 })
+        {
+            if (string.IsNullOrWhiteSpace(msgText))
+            {
+                return false;
+            }
+
+            var reply = $"<@{message.Author.Id}> {TrimToLimit(msgText.Trim(), 1400)}";
+            try { await SendChunkedAsync(message.Channel, reply); } catch { return false; }
+            if (TryRecordAssistantReply(channelState, reply))
+            {
+                try { await context.Host.SaveCachedChannelStateAsync(message.Channel.Id); } catch { }
+            }
+            return true;
+        }
+
+        var replies = new List<string>();
+        var errors = new List<string>();
+
+        foreach (var call in toolCalls)
+        {
+            var fn = call?.FunctionCall;
+            if (fn == null || string.IsNullOrWhiteSpace(fn.Name))
+            {
+                continue;
+            }
+
+            var argsJson = string.IsNullOrWhiteSpace(fn.Arguments) ? "{}" : fn.Arguments;
+            Console.WriteLine($"[dnd] draft-router: toolcall name={fn.Name.Trim()} args={argsJson}");
+            DraftIntentRouterDispatchResult dispatch;
+            try
+            {
+                dispatch = await DispatchDraftIntentRouterToolAsync(
+                    context,
+                    channelState,
+                    message,
+                    dndState,
+                    fn.Name.Trim(),
+                    argsJson,
+                    strippedText,
+                    ct);
+            }
+            catch (Exception ex)
+            {
+                errors.Add($"Tool '{fn.Name}' failed: {ex.GetType().Name} {ex.Message}");
+                continue;
+            }
+
+            if (!dispatch.Handled)
+            {
+                continue;
+            }
+
+            if (!string.IsNullOrWhiteSpace(dispatch.Reply))
+            {
+                replies.Add(dispatch.Reply.Trim());
+            }
+
+            if (!string.IsNullOrWhiteSpace(dispatch.Error))
+            {
+                errors.Add(dispatch.Error.Trim());
+            }
+        }
+
+        if (replies.Count == 0 && errors.Count == 0)
+        {
+            if (string.IsNullOrWhiteSpace(msgText))
+            {
+                return false;
+            }
+
+            var fallbackReply = $"<@{message.Author.Id}> {TrimToLimit(msgText.Trim(), 1200)}";
+            try { await SendChunkedAsync(message.Channel, fallbackReply); } catch { return false; }
+            if (TryRecordAssistantReply(channelState, fallbackReply))
+            {
+                try { await context.Host.SaveCachedChannelStateAsync(message.Channel.Id); } catch { }
+            }
+            return true;
+        }
+
+        var replyLines = new List<string> { $"<@{message.Author.Id}>" };
+        foreach (var r in replies)
+        {
+            if (replyLines.Count > 1)
+            {
+                replyLines.Add(string.Empty);
+            }
+            replyLines.Add(r);
+        }
+        if (errors.Count > 0)
+        {
+            if (replyLines.Count > 1)
+            {
+                replyLines.Add(string.Empty);
+            }
+            replyLines.Add("Some requests were ignored:");
+            replyLines.AddRange(errors.Take(8).Select(e => $"- {e}"));
+        }
+
+        var finalReply = TrimToLimit(string.Join("\n", replyLines).Trim(), 3500);
+        try { await SendChunkedAsync(message.Channel, finalReply); } catch { return false; }
+        if (TryRecordAssistantReply(channelState, finalReply))
+        {
+            try { await context.Host.SaveCachedChannelStateAsync(message.Channel.Id); } catch { }
+        }
+
+        return true;
+    }
+
+    private async Task<DraftIntentRouterDispatchResult> DispatchDraftIntentRouterToolAsync(
+        DiscordModuleContext context,
+        InstructionGPT.ChannelState channelState,
+        SocketMessage message,
+        DndLiteChannelState dndState,
+        string toolName,
+        string argsJson,
+        string strippedText,
+        CancellationToken ct)
+    {
+        return toolName switch
+        {
+            RouteToolCampaignCreate => await HandleDraftRouteCampaignCreateAsync(context, channelState, message, dndState, argsJson, strippedText, ct),
+            RouteToolDraftUpdate => await HandleDraftRouteDraftUpdateAsync(context, channelState, message, dndState, argsJson, strippedText, ct),
+            RouteToolPartyEdit => await HandleDraftRoutePartyEditAsync(context, channelState, message, dndState, argsJson, strippedText, ct),
+            RouteToolSheetCreate => await HandleDraftRouteSheetCreateAsync(context, channelState, message, dndState, argsJson, strippedText, ct),
+            RouteToolPassTimeout => await HandleDraftRoutePassTimeoutAsync(context, channelState, message, dndState, argsJson, strippedText, ct),
+            RouteToolChatReply => HandleDraftRouteChatReply(argsJson, strippedText),
+            RouteToolClarify => HandleDraftRouteClarify(argsJson),
+            _ => new DraftIntentRouterDispatchResult(false, Error: $"Unknown route tool '{toolName}'.")
+        };
+    }
+
+    private async Task<DraftIntentRouterDispatchResult> HandleDraftRouteCampaignCreateAsync(
+        DiscordModuleContext context,
+        InstructionGPT.ChannelState channelState,
+        SocketMessage message,
+        DndLiteChannelState dndState,
+        string argsJson,
+        string strippedText,
+        CancellationToken ct)
+    {
+        TryGetStringArg(argsJson, "name", out var campaignNameRaw);
+        TryGetStringArg(argsJson, "prompt", out var promptRaw);
+        TryGetBoolArg(argsJson, "overwrite", out var overwrite);
+
+        if (string.IsNullOrWhiteSpace(campaignNameRaw) &&
+            TryDetectCampaignCreateIntent(strippedText, out var detectedName, out var detectedOverwrite))
+        {
+            campaignNameRaw = detectedName;
+            overwrite = overwrite || detectedOverwrite;
+        }
+
+        var campaignName = string.IsNullOrWhiteSpace(campaignNameRaw)
+            ? (dndState?.ActiveCampaignName ?? "default")
+            : campaignNameRaw.Trim();
+        var prompt = string.IsNullOrWhiteSpace(promptRaw) ? strippedText?.Trim() : promptRaw.Trim();
+        if (string.IsNullOrWhiteSpace(prompt))
+        {
+            return new DraftIntentRouterDispatchResult(true, "Tell me the campaign premise and vibe, and I can generate it.");
+        }
+
+        var existingPath = ResolveDraftCampaignPath(channelState, campaignName);
+        var exists = false;
+        try { exists = File.Exists(existingPath); } catch { exists = false; }
+
+        if (exists && !overwrite)
+        {
+            await SetPendingDraftActionAsync(
+                channelState,
+                dndState,
+                new PendingDraftActionRequest
+                {
+                    ActionType = PendingActionCampaignCreate,
+                    ArgumentsJson = JsonSerializer.Serialize(new { name = campaignName, prompt }),
+                    RequestedByUserId = message.Author.Id,
+                    RequestedUtc = DateTime.UtcNow,
+                    ExpiresUtc = DateTime.UtcNow.AddMinutes(DraftPendingActionTtlMinutes),
+                    Summary = $"overwrite draft campaign \"{campaignName}\""
+                },
+                ct);
+            return new DraftIntentRouterDispatchResult(
+                true,
+                $"Draft \"{campaignName}\" already exists. Reply `confirm overwrite` to replace it, or `cancel`.");
+        }
+
+        var execCtx = new GptCliExecutionContext(context, channelState, message.Channel, message.Author, null, message);
+        var execArgs = JsonSerializer.Serialize(new { name = campaignName, prompt });
+        var res = await ExecuteCampaignCreateAsync(execCtx, execArgs, ct);
+        if (res is { Handled: true })
+        {
+            return new DraftIntentRouterDispatchResult(
+                true,
+                string.IsNullOrWhiteSpace(res.Response) ? $"Campaign \"{campaignName}\" created." : res.Response.Trim());
+        }
+
+        return new DraftIntentRouterDispatchResult(false, Error: "Campaign creation was not applied.");
+    }
+
+    private async Task<DraftIntentRouterDispatchResult> HandleDraftRouteDraftUpdateAsync(
+        DiscordModuleContext context,
+        InstructionGPT.ChannelState channelState,
+        SocketMessage message,
+        DndLiteChannelState dndState,
+        string argsJson,
+        string strippedText,
+        CancellationToken ct)
+    {
+        TryGetStringArg(argsJson, "name", out var campaignNameRaw);
+        TryGetStringArg(argsJson, "prompt", out var promptRaw);
+
+        var campaignName = string.IsNullOrWhiteSpace(campaignNameRaw)
+            ? (dndState?.ActiveCampaignName ?? "default")
+            : campaignNameRaw.Trim();
+        var prompt = string.IsNullOrWhiteSpace(promptRaw) ? strippedText?.Trim() : promptRaw.Trim();
+        if (string.IsNullOrWhiteSpace(prompt))
+        {
+            return new DraftIntentRouterDispatchResult(true, "Tell me exactly what to change in the draft and I’ll apply it.");
+        }
+
+        var draftPath = ResolveDraftCampaignPath(channelState, campaignName);
+        var exists = false;
+        try { exists = File.Exists(draftPath); } catch { exists = false; }
+        if (!exists)
+        {
+            return new DraftIntentRouterDispatchResult(
+                true,
+                $"No draft found for \"{campaignName}\". Ask me to create a new campaign first.");
+        }
+
+        if (IsDraftConfirmRiskyEditsEnabled(context) && LooksLikeDraftUpdateIntent(strippedText))
+        {
+            await SetPendingDraftActionAsync(
+                channelState,
+                dndState,
+                new PendingDraftActionRequest
+                {
+                    ActionType = PendingActionDraftUpdate,
+                    ArgumentsJson = JsonSerializer.Serialize(new { name = campaignName, prompt }),
+                    RequestedByUserId = message.Author.Id,
+                    RequestedUtc = DateTime.UtcNow,
+                    ExpiresUtc = DateTime.UtcNow.AddMinutes(DraftPendingActionTtlMinutes),
+                    Summary = $"rewrite draft campaign \"{campaignName}\""
+                },
+                ct);
+            return new DraftIntentRouterDispatchResult(
+                true,
+                "I can update the draft story now. Reply `confirm` to apply it, or `cancel`.");
+        }
+
+        var execCtx = new GptCliExecutionContext(context, channelState, message.Channel, message.Author, null, message);
+        var execArgs = JsonSerializer.Serialize(new { name = campaignName, prompt });
+        var res = await ExecuteDraftUpdateAsync(execCtx, execArgs, ct);
+        if (res is { Handled: true })
+        {
+            return new DraftIntentRouterDispatchResult(
+                true,
+                string.IsNullOrWhiteSpace(res.Response) ? $"Updated draft \"{campaignName}\"." : res.Response.Trim());
+        }
+
+        return new DraftIntentRouterDispatchResult(false, Error: "Draft update was not applied.");
+    }
+
+    private async Task<DraftIntentRouterDispatchResult> HandleDraftRoutePartyEditAsync(
+        DiscordModuleContext context,
+        InstructionGPT.ChannelState channelState,
+        SocketMessage message,
+        DndLiteChannelState dndState,
+        string argsJson,
+        string strippedText,
+        CancellationToken ct)
+    {
+        TryGetStringArg(argsJson, "operation", out var opRaw);
+        var op = (opRaw ?? string.Empty).Trim().ToLowerInvariant();
+        var wantsAdd = op is "add" or "include" or "invite";
+        var wantsRemove = op is "remove" or "drop" or "kick";
+        if (!wantsAdd && !wantsRemove)
+        {
+            return new DraftIntentRouterDispatchResult(
+                true,
+                "For party edits, specify whether to add or remove members.");
+        }
+
+        var userIds = TryGetUlongListArg(argsJson, "pc_user_ids");
+        var npcIds = TryGetStringListArg(argsJson, "npc_actor_ids");
+        if (userIds.Count == 0 && npcIds.Count == 0)
+        {
+            var inferred = AnalyzeDraftPartyEditIntent(context, message, strippedText);
+            if (inferred.MentionedUserIds.Count > 0)
+            {
+                userIds.AddRange(inferred.MentionedUserIds);
+            }
+            if (inferred.NpcActorIds.Count > 0)
+            {
+                npcIds.AddRange(inferred.NpcActorIds);
+            }
+        }
+
+        userIds = userIds.Where(x => x != 0).Distinct().ToList();
+        npcIds = npcIds
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .Select(s => s.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (userIds.Count == 0 && npcIds.Count == 0)
+        {
+            return new DraftIntentRouterDispatchResult(
+                true,
+                "Tag PC users (`@user`) and/or include NPC ids like `npc:roland` so I can update the party.");
+        }
+
+        var intent = new DraftPartyEditIntent
+        {
+            WantsAdd = wantsAdd,
+            WantsRemove = wantsRemove,
+            MentionedUserIds = userIds,
+            NpcActorIds = npcIds
+        };
+
+        if (IsDraftConfirmRiskyEditsEnabled(context) && IsRiskyDraftPartyEdit(intent))
+        {
+            var opLabel = wantsRemove ? "remove" : "add";
+            var pendingArgs = JsonSerializer.Serialize(new
+            {
+                add = wantsAdd,
+                remove = wantsRemove,
+                userIds,
+                npcIds
+            });
+            await SetPendingDraftActionAsync(
+                channelState,
+                dndState,
+                new PendingDraftActionRequest
+                {
+                    ActionType = PendingActionPartyEdit,
+                    ArgumentsJson = pendingArgs,
+                    RequestedByUserId = message.Author.Id,
+                    RequestedUtc = DateTime.UtcNow,
+                    ExpiresUtc = DateTime.UtcNow.AddMinutes(DraftPendingActionTtlMinutes),
+                    Summary = $"{opLabel} {intent.TargetCount} party member(s)"
+                },
+                ct);
+            return new DraftIntentRouterDispatchResult(
+                true,
+                $"This will {opLabel} {intent.TargetCount} party member(s). Reply `confirm` to apply, or `cancel`.");
+        }
+
+        var (applied, errors) = await ExecuteDraftPartyEditCoreAsync(
+            context,
+            channelState,
+            message,
+            wantsAdd,
+            userIds,
+            npcIds,
+            ct);
+
+        if (applied.Count == 0 && errors.Count == 0)
+        {
+            return new DraftIntentRouterDispatchResult(true, "No party changes were applied.");
+        }
+
+        var lines = new List<string> { "Updated the draft party roster." };
+        if (applied.Count > 0)
+        {
+            lines.Add("Applied:");
+            lines.AddRange(applied.Select(x => $"- {x}"));
+        }
+        if (errors.Count > 0)
+        {
+            lines.Add("Some requests were ignored:");
+            lines.AddRange(errors.Take(8).Select(e => $"- {e}"));
+        }
+
+        return new DraftIntentRouterDispatchResult(true, string.Join("\n", lines));
+    }
+
+    private async Task<DraftIntentRouterDispatchResult> HandleDraftRouteSheetCreateAsync(
+        DiscordModuleContext context,
+        InstructionGPT.ChannelState channelState,
+        SocketMessage message,
+        DndLiteChannelState dndState,
+        string argsJson,
+        string strippedText,
+        CancellationToken ct)
+    {
+        TryGetStringArg(argsJson, "kind", out var kindRaw);
+        TryGetStringArg(argsJson, "name", out var nameRaw);
+        TryGetStringArg(argsJson, "concept", out var conceptRaw);
+
+        var kind = (kindRaw ?? string.Empty).Trim().ToLowerInvariant();
+        var wantsNpc = kind is "npc";
+        var wantsPc = kind is "pc" or "character";
+
+        if (!wantsNpc && !wantsPc)
+        {
+            wantsNpc = LooksLikeNpcCreateIntentFromText(strippedText);
+            wantsPc = !wantsNpc;
+        }
+
+        var name = (nameRaw ?? string.Empty).Trim();
+        var concept = (conceptRaw ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(concept))
+        {
+            if (TryExtractNameConceptForSheetCreate(strippedText, out var inferredName, out var inferredConcept))
+            {
+                name = string.IsNullOrWhiteSpace(name) ? inferredName : name;
+                concept = string.IsNullOrWhiteSpace(concept) ? inferredConcept : concept;
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(concept))
+        {
+            var target = wantsNpc ? "NPC" : "character";
+            return new DraftIntentRouterDispatchResult(
+                true,
+                $"I can generate that {target}. Include both `name` and `concept`.");
+        }
+
+        var execCtx = new GptCliExecutionContext(context, channelState, message.Channel, message.Author, null, message);
+        var execArgs = JsonSerializer.Serialize(new { name = name.Trim(), concept = concept.Trim() });
+        var res = wantsNpc
+            ? await ExecuteNpcCreateAsync(execCtx, execArgs, ct)
+            : await ExecuteCharacterCreateAsync(execCtx, execArgs, ct);
+
+        if (res is { Handled: true })
+        {
+            return new DraftIntentRouterDispatchResult(
+                true,
+                string.IsNullOrWhiteSpace(res.Response) ? "Sheet created." : res.Response.Trim());
+        }
+
+        return new DraftIntentRouterDispatchResult(false, Error: "Sheet generation was not applied.");
+    }
+
+    private async Task<DraftIntentRouterDispatchResult> HandleDraftRoutePassTimeoutAsync(
+        DiscordModuleContext context,
+        InstructionGPT.ChannelState channelState,
+        SocketMessage message,
+        DndLiteChannelState dndState,
+        string argsJson,
+        string strippedText,
+        CancellationToken ct)
+    {
+        int? seconds = null;
+        int? minutes = null;
+
+        if (TryGetIntArg(argsJson, "seconds", out var parsedSeconds) && parsedSeconds > 0)
+        {
+            seconds = Math.Clamp(parsedSeconds, 5, 3600);
+        }
+        if (TryGetIntArg(argsJson, "minutes", out var parsedMinutes) && parsedMinutes > 0)
+        {
+            minutes = Math.Clamp(parsedMinutes, 1, 60);
+        }
+
+        if (!seconds.HasValue && !minutes.HasValue)
+        {
+            if (TryExtractPassTimeoutArgs(strippedText, out var inferredSeconds, out var inferredMinutes))
+            {
+                seconds = inferredSeconds;
+                minutes = inferredMinutes;
+            }
+        }
+
+        if (!seconds.HasValue && !minutes.HasValue)
+        {
+            return new DraftIntentRouterDispatchResult(
+                true,
+                "Tell me the exact timeout, for example `pass timeout 20 minutes` or `pass timeout 90 seconds`.");
+        }
+
+        var execCtx = new GptCliExecutionContext(context, channelState, message.Channel, message.Author, null, message);
+        var execArgs = seconds.HasValue
+            ? JsonSerializer.Serialize(new { seconds = seconds.Value })
+            : JsonSerializer.Serialize(new { minutes = minutes.GetValueOrDefault(30) });
+        var res = await ExecutePassTimeoutAsync(execCtx, execArgs, ct);
+        if (res is { Handled: true })
+        {
+            return new DraftIntentRouterDispatchResult(
+                true,
+                string.IsNullOrWhiteSpace(res.Response) ? "Pass timeout updated." : res.Response.Trim());
+        }
+
+        return new DraftIntentRouterDispatchResult(false, Error: "Pass timeout update was not applied.");
+    }
+
+    private static DraftIntentRouterDispatchResult HandleDraftRouteChatReply(string argsJson, string strippedText)
+    {
+        TryGetStringArg(argsJson, "reply", out var replyRaw);
+        var reply = string.IsNullOrWhiteSpace(replyRaw)
+            ? BuildDraftConversationalFallback(strippedText)
+            : replyRaw.Trim();
+        return new DraftIntentRouterDispatchResult(true, TrimToLimit(reply, 1300));
+    }
+
+    private static DraftIntentRouterDispatchResult HandleDraftRouteClarify(string argsJson)
+    {
+        TryGetStringArg(argsJson, "question", out var questionRaw);
+        var question = string.IsNullOrWhiteSpace(questionRaw)
+            ? "Can you clarify exactly what you want me to change?"
+            : questionRaw.Trim();
+        return new DraftIntentRouterDispatchResult(true, TrimToLimit(question, 600));
+    }
+
+    private static List<ToolDefinition> BuildDraftIntentRouterTools()
+    {
+        var tools = new List<ToolDefinition>
+        {
+            BuildDraftIntentRouterTool(
+                RouteToolCampaignCreate,
+                "Create a new draft campaign package from the user's message. Use for new/start/create campaign requests.",
+                new Dictionary<string, PropertyDefinition>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["name"] = new PropertyDefinition { Type = "string", Description = "Campaign name (optional)." },
+                    ["prompt"] = new PropertyDefinition { Type = "string", Description = "Campaign generation prompt." },
+                    ["overwrite"] = new PropertyDefinition { Type = "boolean", Description = "True only when the user explicitly asked to overwrite an existing draft." }
+                },
+                new[] { "prompt" }),
+            BuildDraftIntentRouterTool(
+                RouteToolDraftUpdate,
+                "Update/rewrite an existing draft campaign from a modification prompt.",
+                new Dictionary<string, PropertyDefinition>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["name"] = new PropertyDefinition { Type = "string", Description = "Campaign name (optional)." },
+                    ["prompt"] = new PropertyDefinition { Type = "string", Description = "Modification prompt describing what to change." }
+                },
+                new[] { "prompt" }),
+            BuildDraftIntentRouterTool(
+                RouteToolPartyEdit,
+                "Add/remove party members in the draft roster.",
+                new Dictionary<string, PropertyDefinition>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["operation"] = new PropertyDefinition
+                    {
+                        Type = "string",
+                        Description = "Edit operation.",
+                        Enum = new List<string> { "add", "remove" }
+                    },
+                    ["pc_user_ids"] = new PropertyDefinition { Type = "string", Description = "Comma-separated Discord user ids (optional)." },
+                    ["npc_actor_ids"] = new PropertyDefinition { Type = "string", Description = "Comma-separated npc: ids (optional)." }
+                },
+                new[] { "operation" }),
+            BuildDraftIntentRouterTool(
+                RouteToolSheetCreate,
+                "Create a character/NPC sheet in draft mode.",
+                new Dictionary<string, PropertyDefinition>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["kind"] = new PropertyDefinition
+                    {
+                        Type = "string",
+                        Description = "Sheet kind.",
+                        Enum = new List<string> { "pc", "npc" }
+                    },
+                    ["name"] = new PropertyDefinition { Type = "string", Description = "Character name." },
+                    ["concept"] = new PropertyDefinition { Type = "string", Description = "Character concept." }
+                },
+                new[] { "kind", "name", "concept" }),
+            BuildDraftIntentRouterTool(
+                RouteToolPassTimeout,
+                "Set auto-pass timeout for player turns.",
+                new Dictionary<string, PropertyDefinition>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["minutes"] = new PropertyDefinition { Type = "integer", Description = "Timeout in minutes." },
+                    ["seconds"] = new PropertyDefinition { Type = "integer", Description = "Timeout in seconds." }
+                }),
+            BuildDraftIntentRouterTool(
+                RouteToolChatReply,
+                "Send a conversational draft collaboration response with no state mutation.",
+                new Dictionary<string, PropertyDefinition>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["reply"] = new PropertyDefinition { Type = "string", Description = "Concise collaborative reply to the user." }
+                },
+                new[] { "reply" }),
+            BuildDraftIntentRouterTool(
+                RouteToolClarify,
+                "Ask one concise clarifying question before taking any state action.",
+                new Dictionary<string, PropertyDefinition>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["question"] = new PropertyDefinition { Type = "string", Description = "Clarifying question for the user." }
+                },
+                new[] { "question" })
+        };
+
+        return tools;
+    }
+
+    private static ToolDefinition BuildDraftIntentRouterTool(
+        string name,
+        string description,
+        Dictionary<string, PropertyDefinition> properties,
+        IReadOnlyList<string> required = null)
+    {
+        return new ToolDefinition
+        {
+            Type = "function",
+            Function = new FunctionDefinition
+            {
+                Name = name,
+                Description = description,
+                Strict = false,
+                Parameters = new PropertyDefinition
+                {
+                    Type = "object",
+                    AdditionalProperties = false,
+                    Properties = properties ?? new Dictionary<string, PropertyDefinition>(StringComparer.OrdinalIgnoreCase),
+                    Required = required?.ToList() ?? new List<string>()
+                }
+            }
+        };
+    }
+
+    private static string BuildDraftIntentRouterSystemPrompt()
+    {
+        return
+            "You route DND DRAFT user intent to transition tools.\n" +
+            "Choose the single best transition tool for the user message.\n" +
+            "Use tools only; do not answer in plain text unless no tool applies.\n" +
+            "Priorities:\n" +
+            "1) Campaign creation/start requests -> dnd_route_campaign_create.\n" +
+            "2) Rewrite/update existing draft story -> dnd_route_draft_update.\n" +
+            "3) Add/remove party members -> dnd_route_party_edit.\n" +
+            "4) Create sheets -> dnd_route_sheet_create.\n" +
+            "5) Pass timeout changes -> dnd_route_passtimeout.\n" +
+            "6) If no state mutation requested -> dnd_route_chat_reply.\n" +
+            "7) If mutation intent is clear but missing required details -> dnd_route_clarify.\n" +
+            "Never call gptcli_dnd_* tools directly in this step.\n" +
+            "Keep tool arguments minimal and explicit. For overwrite=true, only set when user explicitly asked to overwrite/replace.";
     }
 
     private static bool IsDndToolAllowedForMode(string toolName, string mode)
@@ -1277,12 +2283,20 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             lower.Contains("reset it", StringComparison.OrdinalIgnoreCase) ||
             lower.Contains("start over", StringComparison.OrdinalIgnoreCase);
 
-        // Intent heuristics: keep it simple and explicit.
+        // Intent heuristics: require explicit create/start wording so phrases like
+        // "add NPC named X to the campaign" don't trigger campaigncreate.
         var looksLikeCreate =
             lower.Contains("new campaign", StringComparison.OrdinalIgnoreCase) ||
             lower.Contains("create a campaign", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("create campaign", StringComparison.OrdinalIgnoreCase) ||
             lower.Contains("start a campaign", StringComparison.OrdinalIgnoreCase) ||
-            (lower.Contains("campaign", StringComparison.OrdinalIgnoreCase) && lower.Contains("named", StringComparison.OrdinalIgnoreCase));
+            lower.Contains("start campaign", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("begin a campaign", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("begin campaign", StringComparison.OrdinalIgnoreCase) ||
+            Regex.IsMatch(
+                t,
+                @"\b(create|start|begin|build|generate|make)\b[^\n]{0,40}\bcampaign\b",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
 
         if (!looksLikeCreate)
         {
@@ -1292,12 +2306,12 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         // Extract quoted name first.
         // Examples:
         // - new campaign named "Sour Patch Kids"
-        // - campaign named 'Sour Patch Kids'
-        var m = Regex.Match(t, @"\bcampaign\b[^\n]{0,80}?\bnamed\b\s*(?:(?:""(?<q>[^""]{1,120})"")|(?:'(?<q>[^']{1,120})'))",
+        // - create campaign called 'Sour Patch Kids'
+        var m = Regex.Match(t, @"\bcampaign\b[^\n]{0,80}?\b(?:named|called)\b\s*(?:(?:""(?<q>[^""]{1,120})"")|(?:'(?<q>[^']{1,120})'))",
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
         if (!m.Success)
         {
-            m = Regex.Match(t, @"\bnew\s+campaign\b[^\n]{0,80}?\bnamed\b\s*(?:(?:""(?<q>[^""]{1,120})"")|(?:'(?<q>[^']{1,120})'))",
+            m = Regex.Match(t, @"\b(?:new|create|start|begin|build|generate|make)\b[^\n]{0,40}\bcampaign\b[^\n]{0,80}?\b(?:named|called)\b\s*(?:(?:""(?<q>[^""]{1,120})"")|(?:'(?<q>[^']{1,120})'))",
                 RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
         }
 
@@ -1311,8 +2325,8 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             }
         }
 
-        // Unquoted fallback: take a short tail after "campaign named".
-        m = Regex.Match(t, @"\bcampaign\b[^\n]{0,80}?\bnamed\b\s*(?<u>[^.\n,!]{1,120})",
+        // Unquoted fallback: take a short tail after "campaign named/called".
+        m = Regex.Match(t, @"\bcampaign\b[^\n]{0,80}?\b(?:named|called)\b\s*(?<u>[^.\n,!]{1,120})",
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
         if (m.Success)
         {
@@ -1346,7 +2360,34 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             return false;
         }
 
-        // High-signal edit verbs.
+        var hasDraftSubject =
+            lower.Contains("campaign", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("draft", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("story", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("hook", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("scene", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("lore", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("setting", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("premise", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("encounter", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("template", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("quest", StringComparison.OrdinalIgnoreCase);
+
+        var hasPartyOrSheetSubject =
+            lower.Contains("party", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("npc", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("character", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("player", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("roster", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("sheet", StringComparison.OrdinalIgnoreCase);
+
+        // Keep deterministic draft rewrites conservative; party/sheet messages should route elsewhere.
+        if (hasPartyOrSheetSubject && !hasDraftSubject)
+        {
+            return false;
+        }
+
+        // High-signal edit verbs. Require draft/story context for deterministic rewrite.
         if (lower.Contains("rewrite", StringComparison.OrdinalIgnoreCase) ||
             lower.Contains("revise", StringComparison.OrdinalIgnoreCase) ||
             lower.Contains("retcon", StringComparison.OrdinalIgnoreCase) ||
@@ -1355,16 +2396,16 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             lower.Contains("modify", StringComparison.OrdinalIgnoreCase) ||
             lower.Contains("replace", StringComparison.OrdinalIgnoreCase))
         {
-            return true;
+            return hasDraftSubject;
         }
 
-        // Start-of-message imperative edits are usually meant to apply to the current draft.
+        // Start-of-message imperative edits are only deterministic when clearly about story/draft content.
         if (lower.StartsWith("add ", StringComparison.OrdinalIgnoreCase) ||
             lower.StartsWith("remove ", StringComparison.OrdinalIgnoreCase) ||
             lower.StartsWith("make ", StringComparison.OrdinalIgnoreCase) ||
             lower.StartsWith("swap ", StringComparison.OrdinalIgnoreCase))
         {
-            return true;
+            return hasDraftSubject;
         }
 
         return false;
@@ -1414,6 +2455,555 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                l.Contains("kick", StringComparison.OrdinalIgnoreCase) ||
                l.Contains("drop", StringComparison.OrdinalIgnoreCase) ||
                l.Contains("exclude", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static DraftPartyEditIntent AnalyzeDraftPartyEditIntent(
+        DiscordModuleContext context,
+        SocketMessage message,
+        string strippedText)
+    {
+        var intent = new DraftPartyEditIntent();
+        if (context == null || message == null || string.IsNullOrWhiteSpace(strippedText))
+        {
+            return intent;
+        }
+
+        var botId = context.Client?.CurrentUser?.Id ?? 0;
+        intent.MentionedUserIds = message.MentionedUsers
+            .Where(u => u != null && u.Id != 0 && u.Id != botId)
+            .Select(u => u.Id)
+            .Distinct()
+            .ToList();
+        intent.NpcActorIds = ExtractNpcActorIds(strippedText);
+        intent.WantsAdd = LooksLikePartyAdd(strippedText);
+        intent.WantsRemove = LooksLikePartyRemove(strippedText);
+        return intent;
+    }
+
+    private static bool IsRiskyDraftPartyEdit(DraftPartyEditIntent intent)
+    {
+        if (intent == null || !intent.HasTargets || intent.IsAmbiguous || (!intent.WantsAdd && !intent.WantsRemove))
+        {
+            return false;
+        }
+
+        if (intent.WantsRemove)
+        {
+            return true;
+        }
+
+        // Bulk edits are easy to misread in natural language; require confirmation.
+        return intent.TargetCount > 2;
+    }
+
+    private static bool LooksLikePassTimeoutIntent(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        var lower = text.Trim().ToLowerInvariant();
+        return lower.Contains("pass timeout", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("auto-pass", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("autopass", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("turn timeout", StringComparison.OrdinalIgnoreCase) ||
+               (lower.Contains("timeout", StringComparison.OrdinalIgnoreCase) &&
+                lower.Contains("pass", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool TryExtractPassTimeoutArgs(string text, out int? seconds, out int? minutes)
+    {
+        seconds = null;
+        minutes = null;
+        if (!LooksLikePassTimeoutIntent(text))
+        {
+            return false;
+        }
+
+        var secMatch = Regex.Match(
+            text ?? string.Empty,
+            @"\b(?<n>\d{1,4})\s*(sec|secs|second|seconds|s)\b",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        if (secMatch.Success && int.TryParse(secMatch.Groups["n"].Value, out var sec))
+        {
+            seconds = Math.Clamp(sec, 5, 3600);
+            return true;
+        }
+
+        var minMatch = Regex.Match(
+            text ?? string.Empty,
+            @"\b(?<n>\d{1,3})\s*(min|mins|minute|minutes|m)\b",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        if (minMatch.Success && int.TryParse(minMatch.Groups["n"].Value, out var min))
+        {
+            minutes = Math.Clamp(min, 1, 60);
+            return true;
+        }
+
+        // Fallback: if user gave only a bare number with pass-timeout wording, interpret as minutes.
+        var bareNumber = Regex.Match(
+            text ?? string.Empty,
+            @"\b(?<n>\d{1,3})\b",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        if (bareNumber.Success && int.TryParse(bareNumber.Groups["n"].Value, out var bare))
+        {
+            minutes = Math.Clamp(bare, 1, 60);
+            return true;
+        }
+
+        return false;
+    }
+
+    private async Task<bool> TryHandleDeterministicDraftPassTimeoutFromMessageAsync(
+        DiscordModuleContext context,
+        InstructionGPT.ChannelState channelState,
+        SocketMessage message,
+        DndLiteChannelState dndState,
+        string strippedText,
+        CancellationToken ct)
+    {
+        if (context == null || channelState == null || message == null || dndState == null)
+        {
+            return false;
+        }
+
+        if (!string.Equals(NormalizeMode(dndState.Mode), ModeDraft, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (!TryExtractPassTimeoutArgs(strippedText, out var seconds, out var minutes))
+        {
+            return false;
+        }
+
+        var argsJson = seconds.HasValue
+            ? JsonSerializer.Serialize(new { seconds = seconds.Value })
+            : JsonSerializer.Serialize(new { minutes = minutes.GetValueOrDefault(30) });
+
+        var execCtx = new GptCliExecutionContext(context, channelState, message.Channel, message.Author, null, message);
+        try
+        {
+            var res = await ExecutePassTimeoutAsync(execCtx, argsJson, ct);
+            if (res is { Handled: true } && !string.IsNullOrWhiteSpace(res.Response))
+            {
+                var reply = $"<@{message.Author.Id}> {res.Response.Trim()}";
+                await SendChunkedAsync(message.Channel, reply);
+                if (TryRecordAssistantReply(channelState, reply))
+                {
+                    try { await context.Host.SaveCachedChannelStateAsync(message.Channel.Id); } catch { }
+                }
+                return true;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[dnd] deterministic passtimeout failed: {ex.GetType().Name} {ex.Message}");
+        }
+
+        return false;
+    }
+
+    private static bool LooksLikeCharacterCreateIntent(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        var lower = text.Trim().ToLowerInvariant();
+        return lower.Contains("create character", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("make character", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("new character", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("charactercreate", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool LooksLikeNpcCreateIntentFromText(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        var lower = text.Trim().ToLowerInvariant();
+        return lower.Contains("create npc", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("make npc", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("new npc", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("npccreate", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool TryExtractNameConceptForSheetCreate(string text, out string name, out string concept)
+    {
+        name = null;
+        concept = null;
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        var t = text.Trim();
+
+        var nameMatch = Regex.Match(
+            t,
+            @"\bname\s*[:=]\s*(?:(?:""(?<v>[^""]{1,80})"")|(?:'(?<v>[^']{1,80})')|(?<v>[^,\n;]{1,80}))",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        if (nameMatch.Success)
+        {
+            name = (nameMatch.Groups["v"]?.Value ?? string.Empty).Trim();
+        }
+
+        var conceptMatch = Regex.Match(
+            t,
+            @"\bconcept\s*[:=]\s*(?<v>[^;\n]{2,220})",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        if (conceptMatch.Success)
+        {
+            concept = (conceptMatch.Groups["v"]?.Value ?? string.Empty).Trim().TrimEnd('.', '!', '?');
+        }
+
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            var namedMatch = Regex.Match(
+                t,
+                @"\b(?:character|npc)\b[^\n]{0,30}?\bnamed\b\s*(?:(?:""(?<n>[^""]{1,80})"")|(?:'(?<n>[^']{1,80})')|(?<n>[^,\n;]{1,80}))",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            if (namedMatch.Success)
+            {
+                name = (namedMatch.Groups["n"]?.Value ?? string.Empty).Trim();
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(concept))
+        {
+            var withConcept = Regex.Match(
+                t,
+                @"\b(?:character|npc)\b[^\n]{0,120}?[,:-]\s*(?<c>[^;\n]{3,220})",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            if (withConcept.Success)
+            {
+                concept = (withConcept.Groups["c"]?.Value ?? string.Empty).Trim().TrimEnd('.', '!', '?');
+            }
+        }
+
+        name = string.IsNullOrWhiteSpace(name) ? null : TrimToLimit(name, 80);
+        concept = string.IsNullOrWhiteSpace(concept) ? null : TrimToLimit(concept, 220);
+        return !string.IsNullOrWhiteSpace(name) && !string.IsNullOrWhiteSpace(concept);
+    }
+
+    private async Task<bool> TryHandleDeterministicDraftSheetGenerationFromMessageAsync(
+        DiscordModuleContext context,
+        InstructionGPT.ChannelState channelState,
+        SocketMessage message,
+        DndLiteChannelState dndState,
+        string strippedText,
+        CancellationToken ct)
+    {
+        if (context == null || channelState == null || message == null || dndState == null)
+        {
+            return false;
+        }
+
+        if (!string.Equals(NormalizeMode(dndState.Mode), ModeDraft, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var wantsCharacter = LooksLikeCharacterCreateIntent(strippedText);
+        var wantsNpc = LooksLikeNpcCreateIntentFromText(strippedText);
+        if (!wantsCharacter && !wantsNpc)
+        {
+            return false;
+        }
+
+        if (!TryExtractNameConceptForSheetCreate(strippedText, out var name, out var concept))
+        {
+            var target = wantsCharacter ? "character" : "NPC";
+            try
+            {
+                await message.Channel.SendMessageAsync(
+                    $"<@{message.Author.Id}> I can generate that {target} now. Please include both `name` and `concept` (for example: `create {target} name: Roland concept: Gunslinger haunted by ka`).");
+            }
+            catch
+            {
+                // ignore
+            }
+            return true;
+        }
+
+        var argsJson = JsonSerializer.Serialize(new { name, concept });
+        var execCtx = new GptCliExecutionContext(context, channelState, message.Channel, message.Author, null, message);
+        try
+        {
+            var res = wantsCharacter
+                ? await ExecuteCharacterCreateAsync(execCtx, argsJson, ct)
+                : await ExecuteNpcCreateAsync(execCtx, argsJson, ct);
+            if (res is { Handled: true } && !string.IsNullOrWhiteSpace(res.Response))
+            {
+                var reply = $"<@{message.Author.Id}>\n{res.Response.Trim()}";
+                await SendChunkedAsync(message.Channel, reply);
+                if (TryRecordAssistantReply(channelState, reply))
+                {
+                    try { await context.Host.SaveCachedChannelStateAsync(message.Channel.Id); } catch { }
+                }
+                return true;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[dnd] deterministic sheet generation failed: {ex.GetType().Name} {ex.Message}");
+        }
+
+        return true;
+    }
+
+    private static bool TryBuildDraftStateClarification(
+        string strippedText,
+        DraftPartyEditIntent partyIntent,
+        out string clarification)
+    {
+        clarification = null;
+        var text = strippedText?.Trim() ?? string.Empty;
+        if (text.Length == 0)
+        {
+            return false;
+        }
+
+        if (LooksLikePassTimeoutIntent(text) &&
+            !TryExtractPassTimeoutArgs(text, out _, out _))
+        {
+            clarification = "I can set that now. Tell me the exact value, for example `pass timeout 20 minutes` or `pass timeout 90 seconds`.";
+            return true;
+        }
+
+        var lower = text.ToLowerInvariant();
+        var partyWords =
+            lower.Contains("party", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("companion", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("companions", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("pc", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("npc", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("roster", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("character", StringComparison.OrdinalIgnoreCase);
+        var editWords =
+            lower.Contains("swap", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("replace", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("add", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("remove", StringComparison.OrdinalIgnoreCase);
+
+        if (partyWords && editWords && (partyIntent == null || !partyIntent.HasTargets))
+        {
+            clarification =
+                "I can do that directly. Please tag the PC user (`@user`) and include NPC ids like `npc:roland` so I can apply the swap without guessing.";
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool LooksLikeExplicitDraftMutationIntent(string text, DraftPartyEditIntent partyIntent)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        if (TryDetectCampaignCreateIntent(text, out _, out _))
+        {
+            return true;
+        }
+
+        if (LooksLikeDraftUpdateIntent(text))
+        {
+            return true;
+        }
+
+        if (partyIntent is { HasTargets: true } &&
+            !partyIntent.IsAmbiguous &&
+            (partyIntent.WantsAdd || partyIntent.WantsRemove))
+        {
+            return true;
+        }
+
+        var lower = text.Trim().ToLowerInvariant();
+        var partyWords =
+            lower.Contains("party", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("companion", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("companions", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("pc", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("npc", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("roster", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("character", StringComparison.OrdinalIgnoreCase);
+        var editWords =
+            lower.Contains("swap", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("replace", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("add", StringComparison.OrdinalIgnoreCase) ||
+            lower.Contains("remove", StringComparison.OrdinalIgnoreCase);
+        if (partyWords && editWords)
+        {
+            return true;
+        }
+
+        if (LooksLikePassTimeoutIntent(text))
+        {
+            return true;
+        }
+
+        return lower.Contains("/gptcli", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("campaignlist", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("encounterlist", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("campaignstart", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("partyshow", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("npccreate", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("npclist", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("npcshow", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("charactercreate", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("charactershow", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("list campaigns", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("list encounters", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("set active campaign", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("create npc", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("show npc", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("create character", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("show character", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsDraftChatFirstEnabled(DiscordModuleContext context)
+        => ReadBooleanConfiguration(context, "Discord:Modules:Dnd:Draft:ChatFirst", defaultValue: true);
+
+    private static bool IsDraftConfirmRiskyEditsEnabled(DiscordModuleContext context)
+        => ReadBooleanConfiguration(context, "Discord:Modules:Dnd:Draft:ConfirmRiskyEdits", defaultValue: true);
+
+    private static bool IsDraftIntentRouterEnabled(DiscordModuleContext context)
+        => ReadBooleanConfiguration(context, "Discord:Modules:Dnd:Draft:IntentRouterEnabled", defaultValue: true);
+
+    private static bool IsDraftIntentRouterLegacyFallbackEnabled(DiscordModuleContext context)
+        => ReadBooleanConfiguration(context, "Discord:Modules:Dnd:Draft:IntentRouterLegacyFallback", defaultValue: true);
+
+    private static int GetDraftIntentRouterTimeoutSeconds(DiscordModuleContext context)
+        => Math.Clamp(ReadIntConfiguration(context, "Discord:Modules:Dnd:Draft:IntentRouterTimeoutSeconds", defaultValue: 20), 8, 60);
+
+    private static bool ReadBooleanConfiguration(DiscordModuleContext context, string key, bool defaultValue)
+    {
+        var raw = context?.Configuration?[key];
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return defaultValue;
+        }
+
+        if (bool.TryParse(raw, out var parsed))
+        {
+            return parsed;
+        }
+
+        if (int.TryParse(raw, out var asInt))
+        {
+            return asInt != 0;
+        }
+
+        var lower = raw.Trim().ToLowerInvariant();
+        return lower switch
+        {
+            "yes" or "y" or "on" or "enabled" => true,
+            "no" or "n" or "off" or "disabled" => false,
+            _ => defaultValue
+        };
+    }
+
+    private static int ReadIntConfiguration(DiscordModuleContext context, string key, int defaultValue)
+    {
+        var raw = context?.Configuration?[key];
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return defaultValue;
+        }
+
+        return int.TryParse(raw.Trim(), out var parsed) ? parsed : defaultValue;
+    }
+
+    private static string BuildDraftConversationalFallback(string userText)
+    {
+        var text = (userText ?? string.Empty).Trim();
+        if (text.Length == 0)
+        {
+            return "I'm here with you. Want to sketch the campaign premise, tone, and first hook?";
+        }
+
+        if (text.IndexOf("time", StringComparison.OrdinalIgnoreCase) >= 0 ||
+            text.IndexOf("space", StringComparison.OrdinalIgnoreCase) >= 0 ||
+            text.IndexOf("cosmic", StringComparison.OrdinalIgnoreCase) >= 0)
+        {
+            return "Great seed. I can build this as a time-and-space arc. Do you want it to feel more cosmic mystery, hard sci-fi, or mythic fantasy?";
+        }
+
+        return "I’m on it. I can help shape that into a playable draft. Do you want to start with premise, tone, or the opening scene?";
+    }
+
+    private static bool IsTokenLimitError(string message)
+    {
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            return false;
+        }
+
+        var lower = message.Trim().ToLowerInvariant();
+        return lower.Contains("max_tokens", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("max tokens", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("output limit", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("could not finish the message", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("length", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string SanitizeDraftToolNarration(string raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return null;
+        }
+
+        var lines = (raw ?? string.Empty)
+            .Replace("\r", string.Empty)
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Select(l => (l ?? string.Empty).Trim())
+            .Where(l => l.Length > 0)
+            .ToList();
+
+        var kept = new List<string>();
+        foreach (var line in lines)
+        {
+            var lower = line.ToLowerInvariant();
+            if (lower.StartsWith("calling ", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (lower.Contains("gptcli_dnd_", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if ((line.StartsWith("{", StringComparison.Ordinal) && line.EndsWith("}", StringComparison.Ordinal)) ||
+                (line.StartsWith("[", StringComparison.Ordinal) && line.EndsWith("]", StringComparison.Ordinal)))
+            {
+                if (TryParseJsonElement(line, out _))
+                {
+                    continue;
+                }
+            }
+
+            kept.Add(line);
+            if (kept.Count >= 3)
+            {
+                break;
+            }
+        }
+
+        if (kept.Count == 0)
+        {
+            return null;
+        }
+
+        return string.Join(" ", kept);
     }
 
     private static bool LooksLikeModeChangeIntent(string text)
@@ -1524,43 +3114,78 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             return false;
         }
 
-        // Mention-based PC party edits.
-        var mentioned = message.MentionedUsers
-            .Where(u => u != null && u.Id != 0 && u.Id != context.Client.CurrentUser.Id)
-            .Select(u => u.Id)
-            .Distinct()
-            .ToList();
-
-        var npcIds = ExtractNpcActorIds(strippedText);
-
-        var wantsAdd = LooksLikePartyAdd(strippedText);
-        var wantsRemove = LooksLikePartyRemove(strippedText);
+        var intent = AnalyzeDraftPartyEditIntent(context, message, strippedText);
 
         // If no obvious party signals, skip.
-        if (mentioned.Count == 0 && npcIds.Count == 0)
+        if (!intent.HasTargets)
         {
             return false;
         }
 
         // If both add and remove words exist, it's ambiguous; let the LLM router handle it.
-        if (wantsAdd && wantsRemove)
+        if (intent.IsAmbiguous)
         {
             return false;
         }
 
-        if (!wantsAdd && !wantsRemove)
+        if (!intent.WantsAdd && !intent.WantsRemove)
         {
             // Mentions without add/remove: let the LLM handle (could just be addressing someone).
             return false;
         }
 
+        var (applied, errors) = await ExecuteDraftPartyEditCoreAsync(
+            context,
+            channelState,
+            message,
+            wantsAdd: intent.WantsAdd,
+            mentionedUserIds: intent.MentionedUserIds,
+            npcActorIds: intent.NpcActorIds,
+            ct);
+
+        if (applied.Count == 0 && errors.Count == 0)
+        {
+            return false;
+        }
+
+        var replyLines = new List<string> { $"<@{message.Author.Id}> Updated the draft party roster." };
+        if (applied.Count > 0)
+        {
+            replyLines.Add("Applied:");
+            replyLines.AddRange(applied.Select(x => $"- {x}"));
+        }
+        if (errors.Count > 0)
+        {
+            replyLines.Add("Some requests were ignored:");
+            replyLines.AddRange(errors.Take(8).Select(e => $"- {e}"));
+        }
+
+        var reply = TrimToLimit(string.Join("\n", replyLines), 3500);
+        try { await SendChunkedAsync(message.Channel, reply); }
+        catch (Exception ex) { Console.WriteLine($"[dnd] send failed (draft party deterministic): {ex.GetType().Name} {ex.Message}"); }
+        if (TryRecordAssistantReply(channelState, reply))
+        {
+            try { await context.Host.SaveCachedChannelStateAsync(message.Channel.Id); } catch { }
+        }
+        return true;
+    }
+
+    private async Task<(List<string> Applied, List<string> Errors)> ExecuteDraftPartyEditCoreAsync(
+        DiscordModuleContext context,
+        InstructionGPT.ChannelState channelState,
+        SocketMessage message,
+        bool wantsAdd,
+        IReadOnlyCollection<ulong> mentionedUserIds,
+        IReadOnlyCollection<string> npcActorIds,
+        CancellationToken ct)
+    {
         var execCtx = new GptCliExecutionContext(context, channelState, message.Channel, message.Author, null, message);
         var applied = new List<string>();
         var errors = new List<string>();
 
         if (wantsAdd)
         {
-            foreach (var uid in mentioned)
+            foreach (var uid in (mentionedUserIds ?? Array.Empty<ulong>()))
             {
                 var argsJson = JsonSerializer.Serialize(new { user = uid });
                 try
@@ -1577,7 +3202,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 }
             }
 
-            foreach (var npc in npcIds)
+            foreach (var npc in (npcActorIds ?? Array.Empty<string>()))
             {
                 var argsJson = JsonSerializer.Serialize(new { id = npc });
                 try
@@ -1594,9 +3219,9 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 }
             }
         }
-        else if (wantsRemove)
+        else
         {
-            foreach (var uid in mentioned)
+            foreach (var uid in (mentionedUserIds ?? Array.Empty<ulong>()))
             {
                 var argsJson = JsonSerializer.Serialize(new { user = uid });
                 try
@@ -1613,7 +3238,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 }
             }
 
-            foreach (var npc in npcIds)
+            foreach (var npc in (npcActorIds ?? Array.Empty<string>()))
             {
                 var argsJson = JsonSerializer.Serialize(new { id = npc });
                 try
@@ -1631,27 +3256,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             }
         }
 
-        if (applied.Count == 0 && errors.Count == 0)
-        {
-            return false;
-        }
-
-        var replyLines = new List<string> { $"<@{message.Author.Id}> OK:" };
-        replyLines.AddRange(applied.Select(x => $"- {x}"));
-        if (errors.Count > 0)
-        {
-            replyLines.Add("Some requests were ignored:");
-            replyLines.AddRange(errors.Take(8).Select(e => $"- {e}"));
-        }
-
-        var reply = TrimToLimit(string.Join("\n", replyLines), 3500);
-        try { await SendChunkedAsync(message.Channel, reply); }
-        catch (Exception ex) { Console.WriteLine($"[dnd] send failed (draft party deterministic): {ex.GetType().Name} {ex.Message}"); }
-        if (TryRecordAssistantReply(channelState, reply))
-        {
-            try { await context.Host.SaveCachedChannelStateAsync(message.Channel.Id); } catch { }
-        }
-        return true;
+        return (applied, errors);
     }
 
     private async Task<bool> TryHandleDeterministicGameStartAsync(
@@ -1783,82 +3388,235 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         return false;
     }
 
-    private async Task<bool> TryHandlePendingCampaignOverwriteAsync(
+    private async Task SetPendingDraftActionAsync(
+        InstructionGPT.ChannelState channelState,
+        DndLiteChannelState dndState,
+        PendingDraftActionRequest pending,
+        CancellationToken ct)
+    {
+        if (dndState == null)
+        {
+            return;
+        }
+
+        dndState.PendingCampaignCreate = null;
+        dndState.PendingDraftAction = pending;
+        await SaveStateAsync(channelState, dndState, ct);
+    }
+
+    private static bool TryParseDraftConfirmationResponse(string raw, out bool isConfirm, out bool isCancel)
+    {
+        isConfirm = false;
+        isCancel = false;
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return false;
+        }
+
+        var normalized = raw.Trim().ToLowerInvariant();
+        isConfirm = normalized == "confirm" ||
+                    normalized == "confirm overwrite" ||
+                    normalized == "yes" ||
+                    normalized == "y";
+        isCancel = normalized == "cancel" ||
+                   normalized == "no" ||
+                   normalized == "n";
+        return isConfirm || isCancel;
+    }
+
+    private async Task<bool> TryHandlePendingDraftActionAsync(
         DiscordModuleContext context,
         InstructionGPT.ChannelState channelState,
         SocketMessage message,
         DndLiteChannelState dndState,
         CancellationToken ct)
     {
-        if (context == null || channelState == null || message == null || dndState?.PendingCampaignCreate == null)
+        if (context == null || channelState == null || message == null || dndState?.PendingDraftAction == null)
         {
             return false;
         }
 
-        var pending = dndState.PendingCampaignCreate;
+        var pending = dndState.PendingDraftAction;
         var now = DateTime.UtcNow;
         if (pending.ExpiresUtc != default && pending.ExpiresUtc <= now)
         {
-            dndState.PendingCampaignCreate = null;
+            dndState.PendingDraftAction = null;
             try { await SaveStateAsync(channelState, dndState, ct); } catch { }
             return false;
         }
 
         var raw = (message.Content ?? string.Empty).Trim();
-        if (raw.Length == 0)
+        if (!TryParseDraftConfirmationResponse(raw, out var isConfirm, out var isCancel))
         {
             return false;
         }
 
-        var normalized = raw.Trim().ToLowerInvariant();
-        var isConfirm = normalized == "confirm overwrite" || normalized == "confirm";
-        var isCancel = normalized == "cancel";
-
-        if (!isConfirm && !isCancel)
+        if (pending.RequestedByUserId != 0 && pending.RequestedByUserId != message.Author.Id)
         {
-            return false;
+            try
+            {
+                await message.Channel.SendMessageAsync(
+                    $"<@{message.Author.Id}> Only <@{pending.RequestedByUserId}> can confirm or cancel this pending draft change.");
+            }
+            catch
+            {
+                // ignore
+            }
+            return true;
         }
 
         if (isCancel)
         {
-            dndState.PendingCampaignCreate = null;
+            dndState.PendingDraftAction = null;
             await SaveStateAsync(channelState, dndState, ct);
             try { await message.Channel.SendMessageAsync($"<@{message.Author.Id}> Canceled."); } catch { }
             return true;
         }
 
-        // Confirm overwrite: execute creation using the stored prompt/name.
-        var argsJson = JsonSerializer.Serialize(new
-        {
-            name = pending.CampaignName,
-            prompt = pending.Prompt
-        });
-
-        dndState.PendingCampaignCreate = null;
+        dndState.PendingDraftAction = null;
         await SaveStateAsync(channelState, dndState, ct);
+        return await ExecutePendingDraftActionAsync(context, channelState, message, pending, ct);
+    }
+
+    private async Task<bool> ExecutePendingDraftActionAsync(
+        DiscordModuleContext context,
+        InstructionGPT.ChannelState channelState,
+        SocketMessage message,
+        PendingDraftActionRequest pending,
+        CancellationToken ct)
+    {
+        if (context == null || channelState == null || message == null || pending == null)
+        {
+            return false;
+        }
+
+        var actionType = (pending.ActionType ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(actionType))
+        {
+            try { await message.Channel.SendMessageAsync($"<@{message.Author.Id}> Pending draft action is invalid."); } catch { }
+            return true;
+        }
+
+        var execCtx = new GptCliExecutionContext(context, channelState, message.Channel, message.Author, null, message);
 
         try
         {
-            var execCtx = new GptCliExecutionContext(context, channelState, message.Channel, message.Author, null, message);
-            var res = await ExecuteCampaignCreateAsync(execCtx, argsJson, ct);
-            if (res is { Handled: true })
+            if (string.Equals(actionType, PendingActionCampaignCreate, StringComparison.OrdinalIgnoreCase))
             {
-	                var reply = string.IsNullOrWhiteSpace(res.Response)
-	                    ? $"<@{message.Author.Id}> OK."
-	                    : $"<@{message.Author.Id}>\n{res.Response.Trim()}";
-                Console.WriteLine(
-                    $"[dnd] draft-create-confirm: responding handled=true respLen={(res.Response ?? string.Empty).Length} replyLen={reply.Length}");
-                Console.WriteLine($"[dnd] draft-create-confirm: reply={reply}");
+                var argsJson = string.IsNullOrWhiteSpace(pending.ArgumentsJson) ? "{}" : pending.ArgumentsJson;
+                var res = await ExecuteCampaignCreateAsync(execCtx, argsJson, ct);
+                var reply = res is { Handled: true } && !string.IsNullOrWhiteSpace(res.Response)
+                    ? $"<@{message.Author.Id}>\n{res.Response.Trim()}"
+                    : $"<@{message.Author.Id}> Sorry, campaign creation failed. Try `/gptcli dnd campaigncreate`.";
                 await SendChunkedAsync(message.Channel, reply);
+                if (TryRecordAssistantReply(channelState, reply))
+                {
+                    try { await context.Host.SaveCachedChannelStateAsync(message.Channel.Id); } catch { }
+                }
+                return true;
+            }
+
+            if (string.Equals(actionType, PendingActionDraftUpdate, StringComparison.OrdinalIgnoreCase))
+            {
+                var argsJson = string.IsNullOrWhiteSpace(pending.ArgumentsJson) ? "{}" : pending.ArgumentsJson;
+                var res = await ExecuteDraftUpdateAsync(execCtx, argsJson, ct);
+                var reply = res is { Handled: true } && !string.IsNullOrWhiteSpace(res.Response)
+                    ? $"<@{message.Author.Id}>\n{res.Response.Trim()}"
+                    : $"<@{message.Author.Id}> Sorry, draft update failed.";
+                await SendChunkedAsync(message.Channel, reply);
+                if (TryRecordAssistantReply(channelState, reply))
+                {
+                    try { await context.Host.SaveCachedChannelStateAsync(message.Channel.Id); } catch { }
+                }
+                return true;
+            }
+
+            if (string.Equals(actionType, PendingActionPartyEdit, StringComparison.OrdinalIgnoreCase))
+            {
+                if (!TryParseJsonElement(pending.ArgumentsJson, out var root))
+                {
+                    try { await message.Channel.SendMessageAsync($"<@{message.Author.Id}> Pending party change is invalid JSON."); } catch { }
+                    return true;
+                }
+
+                var wantsAdd = TryGetPropertyIgnoreCase(root, "add", out var addEl) && addEl.ValueKind is JsonValueKind.True or JsonValueKind.False && addEl.GetBoolean();
+                var wantsRemove = TryGetPropertyIgnoreCase(root, "remove", out var remEl) && remEl.ValueKind is JsonValueKind.True or JsonValueKind.False && remEl.GetBoolean();
+                if (wantsAdd == wantsRemove)
+                {
+                    try { await message.Channel.SendMessageAsync($"<@{message.Author.Id}> Pending party change was ambiguous."); } catch { }
+                    return true;
+                }
+
+                var userIds = new List<ulong>();
+                if (TryGetPropertyIgnoreCase(root, "userIds", out var usersEl) && usersEl.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var el in usersEl.EnumerateArray())
+                    {
+                        if (el.ValueKind == JsonValueKind.Number && el.TryGetUInt64(out var uid) && uid != 0)
+                        {
+                            userIds.Add(uid);
+                        }
+                        else if (el.ValueKind == JsonValueKind.String && ulong.TryParse(el.GetString(), out uid) && uid != 0)
+                        {
+                            userIds.Add(uid);
+                        }
+                    }
+                }
+
+                var npcIds = new List<string>();
+                if (TryGetPropertyIgnoreCase(root, "npcIds", out var npcsEl) && npcsEl.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var el in npcsEl.EnumerateArray())
+                    {
+                        if (el.ValueKind == JsonValueKind.String)
+                        {
+                            var id = (el.GetString() ?? string.Empty).Trim();
+                            if (!string.IsNullOrWhiteSpace(id))
+                            {
+                                npcIds.Add(id);
+                            }
+                        }
+                    }
+                }
+
+                var (applied, errors) = await ExecuteDraftPartyEditCoreAsync(
+                    context,
+                    channelState,
+                    message,
+                    wantsAdd,
+                    userIds,
+                    npcIds,
+                    ct);
+
+                var replyLines = new List<string> { $"<@{message.Author.Id}> Updated the draft party roster." };
+                if (applied.Count > 0)
+                {
+                    replyLines.Add("Applied:");
+                    replyLines.AddRange(applied.Select(x => $"- {x}"));
+                }
+                if (errors.Count > 0)
+                {
+                    replyLines.Add("Some requests were ignored:");
+                    replyLines.AddRange(errors.Take(8).Select(e => $"- {e}"));
+                }
+
+                var reply = TrimToLimit(string.Join("\n", replyLines), 3500);
+                await SendChunkedAsync(message.Channel, reply);
+                if (TryRecordAssistantReply(channelState, reply))
+                {
+                    try { await context.Host.SaveCachedChannelStateAsync(message.Channel.Id); } catch { }
+                }
                 return true;
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[dnd] confirm overwrite campaign create failed: {ex.GetType().Name} {ex.Message}");
+            Console.WriteLine($"[dnd] pending action failed type={actionType}: {ex.GetType().Name} {ex.Message}");
+            try { await message.Channel.SendMessageAsync($"<@{message.Author.Id}> Pending draft action failed: {ex.Message}"); } catch { }
+            return true;
         }
 
-        try { await message.Channel.SendMessageAsync($"<@{message.Author.Id}> Sorry, campaign overwrite failed. Try `/gptcli dnd campaigncreate`."); } catch { }
+        try { await message.Channel.SendMessageAsync($"<@{message.Author.Id}> Unknown pending draft action type `{actionType}`."); } catch { }
         return true;
     }
 
@@ -3439,12 +5197,13 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 => await SendProgressUpdateAsync(ctx.Channel, text, ctx.Context);
 
             await Progress($"Character generation started for \"{name.Trim()}\".");
+            var generationCampaignContext = BuildGenerationCampaignContext(campaign?.CampaignMarkdown ?? draft?.CampaignMarkdown);
             var created = await GenerateCharacterAsync(
                 ctx.Context,
                 ctx.ChannelState,
                 name.Trim(),
                 concept.Trim(),
-                (campaign?.CampaignMarkdown ?? draft?.CampaignMarkdown),
+                generationCampaignContext,
                 ct,
                 Progress);
             if (created == null || created.Stats == null || created.MaxHp <= 0)
@@ -3601,12 +5360,13 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 => await SendProgressUpdateAsync(ctx.Channel, text, ctx.Context);
 
             await Progress($"NPC generation started for \"{name.Trim()}\".");
+            var generationCampaignContext = BuildGenerationCampaignContext(campaign?.CampaignMarkdown ?? draft?.CampaignMarkdown);
             var created = await GenerateCharacterAsync(
                 ctx.Context,
                 ctx.ChannelState,
                 name.Trim(),
                 concept.Trim(),
-                (campaign?.CampaignMarkdown ?? draft?.CampaignMarkdown),
+                generationCampaignContext,
                 ct,
                 Progress);
             if (created == null || created.Stats == null || created.MaxHp <= 0)
@@ -6647,7 +8407,8 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 
         var globalMin = ParseDndLogLevel(minLevelRaw, DndLogLevel.Information);
         var consoleMin = ParseDndLogLevel(consoleMinRaw, globalMin);
-        var discordMin = ParseDndLogLevel(discordMinRaw, globalMin);
+        // Keep Discord chat focused on normal dialogue by default; opt in via config if needed.
+        var discordMin = ParseDndLogLevel(discordMinRaw, DndLogLevel.None);
         return new DndLogPolicy(consoleMin, discordMin);
     }
 
@@ -7986,6 +9747,16 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         return sb.ToString().Trim();
     }
 
+    private static string BuildGenerationCampaignContext(string campaignMarkdown)
+    {
+        if (string.IsNullOrWhiteSpace(campaignMarkdown))
+        {
+            return null;
+        }
+
+        // Keep generation inputs focused; sheets don't need full campaign prose.
+        return TrimToLimit(campaignMarkdown.Trim(), 400);
+    }
 
     private static string BuildCreateCharacterPrompt(string name, string concept, string campaignMarkdown)
     {
@@ -7999,7 +9770,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         if (!string.IsNullOrWhiteSpace(campaignMarkdown))
         {
             sb.AppendLine("Campaign context (excerpt):");
-            sb.AppendLine(TrimToLimit(campaignMarkdown, 1500));
+            sb.AppendLine(TrimToLimit(campaignMarkdown, 400));
         }
         return sb.ToString().Trim();
     }
@@ -8661,6 +10432,25 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
     {
         st.Mode = NormalizeMode(st.Mode);
         st.ActiveCampaignName = string.IsNullOrWhiteSpace(st.ActiveCampaignName) ? "default" : st.ActiveCampaignName.Trim();
+        if (st.PendingDraftAction == null && st.PendingCampaignCreate != null)
+        {
+            // Back-compat: migrate overwrite confirmations from older builds.
+            st.PendingDraftAction = new PendingDraftActionRequest
+            {
+                ActionType = PendingActionCampaignCreate,
+                ArgumentsJson = JsonSerializer.Serialize(new
+                {
+                    name = st.PendingCampaignCreate.CampaignName ?? "default",
+                    prompt = st.PendingCampaignCreate.Prompt ?? string.Empty
+                }),
+                RequestedByUserId = 0,
+                RequestedUtc = st.PendingCampaignCreate.RequestedUtc == default ? DateTime.UtcNow : st.PendingCampaignCreate.RequestedUtc,
+                ExpiresUtc = st.PendingCampaignCreate.ExpiresUtc == default ? DateTime.UtcNow.AddMinutes(DraftPendingActionTtlMinutes) : st.PendingCampaignCreate.ExpiresUtc,
+                Summary = $"overwrite draft campaign \"{(st.PendingCampaignCreate.CampaignName ?? "default").Trim()}\""
+            };
+            st.PendingCampaignCreate = null;
+        }
+
         if (st.PendingCampaignCreate != null)
         {
             st.PendingCampaignCreate.CampaignName = (st.PendingCampaignCreate.CampaignName ?? string.Empty).Trim();
@@ -8669,6 +10459,22 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             if (st.PendingCampaignCreate.ExpiresUtc == default)
             {
                 st.PendingCampaignCreate.ExpiresUtc = DateTime.UtcNow.AddMinutes(5);
+            }
+        }
+        if (st.PendingDraftAction != null)
+        {
+            st.PendingDraftAction.ActionType = (st.PendingDraftAction.ActionType ?? string.Empty).Trim();
+            st.PendingDraftAction.ArgumentsJson = string.IsNullOrWhiteSpace(st.PendingDraftAction.ArgumentsJson)
+                ? "{}"
+                : st.PendingDraftAction.ArgumentsJson.Trim();
+            st.PendingDraftAction.Summary = (st.PendingDraftAction.Summary ?? string.Empty).Trim();
+            if (st.PendingDraftAction.RequestedUtc == default)
+            {
+                st.PendingDraftAction.RequestedUtc = DateTime.UtcNow;
+            }
+            if (st.PendingDraftAction.ExpiresUtc == default)
+            {
+                st.PendingDraftAction.ExpiresUtc = DateTime.UtcNow.AddMinutes(DraftPendingActionTtlMinutes);
             }
         }
         st.Live ??= new DndLiteLiveConfig();
@@ -8819,6 +10625,113 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         }
 
         return false;
+    }
+
+    private static List<string> TryGetStringListArg(string argsJson, string name)
+    {
+        var values = new List<string>();
+        if (!GptCliFunction.TryGetJsonProperty(argsJson, name, out var element))
+        {
+            return values;
+        }
+
+        if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+            {
+                if (item.ValueKind == JsonValueKind.String)
+                {
+                    var s = item.GetString();
+                    if (!string.IsNullOrWhiteSpace(s))
+                    {
+                        values.AddRange(SplitCsvValues(s));
+                    }
+                }
+                else
+                {
+                    var raw = item.ToString();
+                    if (!string.IsNullOrWhiteSpace(raw))
+                    {
+                        values.AddRange(SplitCsvValues(raw));
+                    }
+                }
+            }
+
+            return values
+                .Where(s => !string.IsNullOrWhiteSpace(s))
+                .Select(s => s.Trim())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        var single = element.ValueKind == JsonValueKind.String ? element.GetString() : element.ToString();
+        return SplitCsvValues(single)
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .Select(s => s.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private static List<ulong> TryGetUlongListArg(string argsJson, string name)
+    {
+        var values = new List<ulong>();
+        if (!GptCliFunction.TryGetJsonProperty(argsJson, name, out var element))
+        {
+            return values;
+        }
+
+        if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+            {
+                if (item.ValueKind == JsonValueKind.Number && item.TryGetUInt64(out var n) && n != 0)
+                {
+                    values.Add(n);
+                    continue;
+                }
+
+                var raw = item.ValueKind == JsonValueKind.String ? item.GetString() : item.ToString();
+                foreach (var parsed in ParseCsvUlongValues(raw))
+                {
+                    values.Add(parsed);
+                }
+            }
+
+            return values.Where(v => v != 0).Distinct().ToList();
+        }
+
+        var single = element.ValueKind == JsonValueKind.String ? element.GetString() : element.ToString();
+        values.AddRange(ParseCsvUlongValues(single));
+        return values.Where(v => v != 0).Distinct().ToList();
+    }
+
+    private static List<string> SplitCsvValues(string raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return new List<string>();
+        }
+
+        return raw
+            .Split(new[] { ',', ';', '|', ' ', '\n', '\r', '\t' }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(s => s.Trim())
+            .Where(s => s.Length > 0)
+            .ToList();
+    }
+
+    private static List<ulong> ParseCsvUlongValues(string raw)
+    {
+        var values = new List<ulong>();
+        foreach (var token in SplitCsvValues(raw))
+        {
+            var digits = new string(token.Where(char.IsDigit).ToArray());
+            if (ulong.TryParse(digits, out var id) && id != 0)
+            {
+                values.Add(id);
+            }
+        }
+
+        return values;
     }
 
     private static string SlugifySegment(string value)
@@ -9182,6 +11095,120 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         }
     }
 
+    private static DraftStatusUpdate BuildConversationalStatusUpdate(string rawText)
+    {
+        if (string.IsNullOrWhiteSpace(rawText))
+        {
+            return null;
+        }
+
+        var text = rawText.Trim();
+        var lower = text.ToLowerInvariant();
+
+        if (lower.Contains("campaign generation started", StringComparison.OrdinalIgnoreCase))
+        {
+            return new DraftStatusUpdate(
+                "campaign-gen-start",
+                "Got it. I'll get started on that now. First pass is usually about 30-90 seconds.",
+                Important: true);
+        }
+
+        if (lower.Contains("stage 1 - campaign foundation", StringComparison.OrdinalIgnoreCase) &&
+            lower.Contains("round 1/", StringComparison.OrdinalIgnoreCase))
+        {
+            return new DraftStatusUpdate(
+                "campaign-stage1",
+                "I'm working on the campaign foundation now: premise, tone, and encounter seeds. Usually about 20-40 seconds.",
+                Important: false);
+        }
+
+        if (lower.Contains("stage 2 - party and sheets", StringComparison.OrdinalIgnoreCase) &&
+            lower.Contains("round 1/", StringComparison.OrdinalIgnoreCase))
+        {
+            return new DraftStatusUpdate(
+                "campaign-stage2",
+                "Now I'm on party setup: roster and sheet details. Usually another 20-60 seconds.",
+                Important: false);
+        }
+
+        if (lower.Contains("stage 1 recovery - encounter templates", StringComparison.OrdinalIgnoreCase))
+        {
+            return new DraftStatusUpdate(
+                "campaign-stage1-recovery",
+                "Quick update: I'm filling in encounter templates before I continue. Usually another 15-35 seconds.",
+                Important: true);
+        }
+
+        if (lower.Contains("draft update started", StringComparison.OrdinalIgnoreCase))
+        {
+            return new DraftStatusUpdate(
+                "draft-update-start",
+                "Got it. I'm revising the draft now. This usually takes about 15-45 seconds.",
+                Important: true);
+        }
+
+        if (lower.Contains("character generation started", StringComparison.OrdinalIgnoreCase))
+        {
+            return new DraftStatusUpdate(
+                "character-gen-start",
+                "On it. I'm generating that character sheet now. Usually 10-30 seconds.",
+                Important: true);
+        }
+
+        if (lower.Contains("npc generation started", StringComparison.OrdinalIgnoreCase))
+        {
+            return new DraftStatusUpdate(
+                "npc-gen-start",
+                "On it. I'm generating that NPC profile now. Usually 10-30 seconds.",
+                Important: true);
+        }
+
+        if (lower.Contains("retrying", StringComparison.OrdinalIgnoreCase))
+        {
+            return new DraftStatusUpdate(
+                "generation-retry",
+                "Still working on it; retrying with stricter instructions. This can add about 20-45 seconds.",
+                Important: true);
+        }
+
+        if (lower.Contains("failed", StringComparison.OrdinalIgnoreCase))
+        {
+            return new DraftStatusUpdate(
+                "generation-failed",
+                "I hit a generation issue while working on that. Please try again in a moment.",
+                Important: true);
+        }
+
+        return null;
+    }
+
+    private bool ShouldSendSparseStatusUpdate(ulong channelId, DraftStatusUpdate update)
+    {
+        if (channelId == 0 || update == null)
+        {
+            return false;
+        }
+
+        var now = DateTime.UtcNow;
+        if (_lastStatusUpdateByChannel.TryGetValue(channelId, out var last))
+        {
+            if (string.Equals(last.Key, update.Key, StringComparison.OrdinalIgnoreCase) &&
+                (now - last.SentUtc) < TimeSpan.FromMinutes(2))
+            {
+                return false;
+            }
+
+            var minGap = update.Important ? TimeSpan.FromSeconds(12) : TimeSpan.FromSeconds(25);
+            if ((now - last.SentUtc) < minGap)
+            {
+                return false;
+            }
+        }
+
+        _lastStatusUpdateByChannel[channelId] = (now, update.Key);
+        return true;
+    }
+
     private async Task SendProgressUpdateAsync(IMessageChannel channel, string text, DiscordModuleContext context = null)
     {
         if (channel == null || string.IsNullOrWhiteSpace(text))
@@ -9190,12 +11217,17 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         }
 
         var logPolicy = ResolveDndLogPolicy(context ?? _moduleContext);
+        var update = BuildConversationalStatusUpdate(text);
+        if (update == null || !ShouldSendSparseStatusUpdate(channel.Id, update))
+        {
+            return;
+        }
         try
         {
-            var payload = $"⏳ {text.Trim()}";
+            var payload = $"⏳ {update.Message}";
             if (ShouldLog(DndLogLevel.Debug, logPolicy.ConsoleMinLevel))
             {
-                var preview = TrimToLimit(payload.Replace('\n', ' ').Replace('\r', ' '), 180);
+                var preview = TrimToLimit(payload.Replace('\n', ' ').Replace('\r', ' '), 220);
                 Console.WriteLine($"[dnd] progress->send channel={channel.Id} len={payload.Length} text={preview}");
             }
             await SendChunkedAsync(channel, payload);
@@ -9260,6 +11292,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 
         // Overwrite confirmations for deterministic "new campaign ..." chat creation in build mode.
         public PendingCampaignCreateRequest PendingCampaignCreate { get; set; }
+        public PendingDraftActionRequest PendingDraftAction { get; set; }
     }
 
     private sealed class PendingCampaignCreateRequest
@@ -9268,6 +11301,16 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         public string Prompt { get; set; }
         public DateTime RequestedUtc { get; set; }
         public DateTime ExpiresUtc { get; set; }
+    }
+
+    private sealed class PendingDraftActionRequest
+    {
+        public string ActionType { get; set; }
+        public string ArgumentsJson { get; set; }
+        public ulong RequestedByUserId { get; set; }
+        public DateTime RequestedUtc { get; set; }
+        public DateTime ExpiresUtc { get; set; }
+        public string Summary { get; set; }
     }
 
     private sealed class DndLiteLiveConfig
