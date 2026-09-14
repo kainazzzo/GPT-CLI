@@ -1,6 +1,6 @@
 namespace GPT.CLI.Chat.Dnd;
 
-public sealed class DndCampaignRunner
+public sealed partial class DndCampaignRunner
 {
     private sealed class PartyMemberState
     {
@@ -41,6 +41,16 @@ public sealed class DndCampaignRunner
     private DndEncounterRunner _encounter;
     private string _activeEncounterId = string.Empty;
     private string _activeEncounterName = string.Empty;
+    private string _activeTemplateId = string.Empty;
+
+    private bool _sessionStarted;
+    private DndGamePhase _sessionPhase = DndGamePhase.NotStarted;
+    private string _currentSceneId = string.Empty;
+    private DndGamePhase _previousPhase = DndGamePhase.NotStarted;
+    private DndPendingCheck _pendingCheck;
+    private bool _lastCheckSuccess;
+    private string _lastCheckSummary = string.Empty;
+    private readonly List<DndSceneDefinition> _scenes = new();
 
     public DndCampaignRunner(
         DndCampaignDefinition definition,
@@ -152,7 +162,19 @@ public sealed class DndCampaignRunner
             FailureReason = _failureReason ?? string.Empty,
             ActiveEncounterId = _activeEncounterId ?? string.Empty,
             ActiveEncounterName = _activeEncounterName ?? string.Empty,
-            ActiveEncounter = _encounter?.ToState()
+            ActiveTemplateId = _activeTemplateId ?? string.Empty,
+            ActiveEncounter = _encounter?.ToState(),
+            Session = new DndSessionRunnerState
+            {
+                Started = _sessionStarted,
+                Phase = _sessionPhase,
+                CurrentSceneId = _currentSceneId ?? string.Empty,
+                PreviousPhase = _previousPhase,
+                PendingCheck = _pendingCheck,
+                LastCheckSuccess = _lastCheckSuccess,
+                LastCheckSummary = _lastCheckSummary ?? string.Empty,
+                Scenes = _scenes.ToList()
+            }
         };
     }
 
@@ -195,11 +217,29 @@ public sealed class DndCampaignRunner
         runner._failureReason = state.FailureReason ?? string.Empty;
         runner._activeEncounterId = state.ActiveEncounterId ?? string.Empty;
         runner._activeEncounterName = state.ActiveEncounterName ?? string.Empty;
+        runner._activeTemplateId = state.ActiveTemplateId ?? string.Empty;
 
         // Active encounter.
         runner._encounter = state.ActiveEncounter == null
             ? null
             : DndEncounterRunner.FromState(state.ActiveEncounter, runner._rules, runner._dice, runner._clock);
+
+        var session = state.Session;
+        if (session != null)
+        {
+            runner._sessionStarted = session.Started;
+            runner._sessionPhase = session.Phase;
+            runner._currentSceneId = session.CurrentSceneId ?? string.Empty;
+            runner._previousPhase = session.PreviousPhase;
+            runner._pendingCheck = session.PendingCheck;
+            runner._lastCheckSuccess = session.LastCheckSuccess;
+            runner._lastCheckSummary = session.LastCheckSummary ?? string.Empty;
+            runner._scenes.Clear();
+            if (session.Scenes is { Count: > 0 })
+            {
+                runner._scenes.AddRange(session.Scenes.Where(s => s != null && !string.IsNullOrWhiteSpace(s.SceneId)));
+            }
+        }
 
         return runner;
     }
@@ -229,6 +269,7 @@ public sealed class DndCampaignRunner
         var encounterId = $"enc-{++_encounterSeq:D6}";
         _activeEncounterId = encounterId;
         _activeEncounterName = template.Name ?? template.TemplateId;
+        _activeTemplateId = template.TemplateId;
 
         var partyDefs = _party.Values
             .Select(p => new DndActorDefinition(
@@ -250,8 +291,12 @@ public sealed class DndCampaignRunner
         _encounter = new DndEncounterRunner(def, _rules, _dice, _clock);
         var res = _encounter.StartEncounter();
 
-        var newCampaignEntries = AppendEncounterEntries(res, encounterId, _activeEncounterName);
+        var newCampaignEntries = AppendEncounterEntries(res, encounterId, _activeEncounterName).ToList();
         ReconcilePartyFromSnapshot(res.State);
+        if (_sessionStarted)
+        {
+            EnterCombatFromEncounter(template.TemplateId, newCampaignEntries);
+        }
         MaybeFailCampaignFromEncounter(res.State, newCampaignEntries);
         return BuildCampaignResult(res, newCampaignEntries);
     }
@@ -283,6 +328,26 @@ public sealed class DndCampaignRunner
         {
             _failed = false;
             _failureReason = string.Empty;
+            if (_sessionStarted && _sessionPhase == DndGamePhase.Failed)
+            {
+                _pendingCheck = null;
+                var retryId = !string.IsNullOrWhiteSpace(_activeTemplateId)
+                    ? DndSceneCatalog.ApproachSceneId(_activeTemplateId)
+                    : DndSceneCatalog.IntroSceneId;
+                var scene = FindScene(retryId) ?? FindScene(DndSceneCatalog.IntroSceneId);
+                _currentSceneId = scene?.SceneId ?? DndSceneCatalog.IntroSceneId;
+                _sessionPhase = scene == null || scene.Kind == DndSceneKind.Intro
+                    ? DndGamePhase.SessionStart
+                    : DndGamePhase.Exploration;
+            }
+        }
+        else if (_sessionStarted && _sessionPhase != DndGamePhase.Failed && _sessionPhase != DndGamePhase.Complete)
+        {
+            // Stay in Rest if already there; otherwise this is a direct API long rest.
+            if (_sessionPhase != DndGamePhase.Rest)
+            {
+                EnterOverlay(DndGamePhase.Rest);
+            }
         }
 
         var msg = clearFailure
@@ -319,12 +384,13 @@ public sealed class DndCampaignRunner
         }
 
         var res = step();
-        var newCampaignEntries = AppendEncounterEntries(res, _activeEncounterId, _activeEncounterName);
+        var newCampaignEntries = AppendEncounterEntries(res, _activeEncounterId, _activeEncounterName).ToList();
 
         if (res != null)
         {
             ReconcilePartyFromSnapshot(res.State);
             MaybeFailCampaignFromEncounter(res.State, newCampaignEntries);
+            MaybeAdvanceSessionFromEncounter(res.State, newCampaignEntries);
         }
 
         // If encounter finished, leave it instantiated but inert; next encounter requires StartEncounter().
@@ -470,6 +536,7 @@ public sealed class DndCampaignRunner
             Party: DndCampaignModelHelpers.ToReadOnlyDictionary(party),
             ActiveEncounterId: _activeEncounterId ?? string.Empty,
             ActiveEncounterName: _activeEncounterName ?? string.Empty,
-            ActiveEncounterState: activeEncounterState);
+            ActiveEncounterState: activeEncounterState,
+            Session: BuildSessionSnapshot());
     }
 }

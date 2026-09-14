@@ -48,4 +48,19 @@ public sealed class DndRulesetTests
         Assert.Equal(3, Rules.GetAttackToHitModifier(stats));
         Assert.Equal(-1, Rules.GetSpellToHitModifier(stats));
     }
+
+    [Fact]
+    public void ClampCheckDc_and_GetCheckModifier_use_existing_stats()
+    {
+        Assert.Equal(8, Rules.ClampCheckDc(1));
+        Assert.Equal(18, Rules.ClampCheckDc(99));
+        Assert.Equal(12, Rules.ClampCheckDc(12));
+
+        var stats = new DndStats(Str: 16, Def: 8, Dex: 12, SpellPower: 10, Luck: 14);
+        Assert.Equal(3, Rules.GetCheckModifier(stats, DndCheckStat.Str));
+        Assert.Equal(-1, Rules.GetCheckModifier(stats, DndCheckStat.Def));
+        Assert.Equal(1, Rules.GetCheckModifier(stats, DndCheckStat.Dex));
+        Assert.Equal(0, Rules.GetCheckModifier(stats, DndCheckStat.SpellPower));
+        Assert.Equal(2, Rules.GetCheckModifier(stats, DndCheckStat.Luck));
+    }
 }

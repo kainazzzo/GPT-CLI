@@ -17,7 +17,47 @@ public sealed record DndEncounterTemplate(
     string TemplateId,
     string Name,
     DndActorDefinition Boss,
-    IReadOnlyList<DndActorDefinition> Adds);
+    IReadOnlyList<DndActorDefinition> Adds,
+    string Scene = "",
+    string Rewards = "");
+
+public sealed record DndPendingCheck(
+    string ActorId,
+    string ActorName,
+    DndCheckStat Stat,
+    int Dc,
+    string Reason);
+
+public sealed record DndSceneDefinition(
+    string SceneId,
+    string Title,
+    DndSceneKind Kind,
+    string Summary,
+    string LinkedEncounterTemplateId,
+    string NextSceneId);
+
+public sealed record DndSceneOption(
+    string Id,
+    string Label,
+    DndGamePhase TargetPhase,
+    string EncounterTemplateId = "",
+    string NextSceneId = "",
+    DndCheckStat? CheckStat = null,
+    int? CheckDc = null,
+    string CheckReason = "");
+
+public sealed record DndSessionSnapshot(
+    bool Started,
+    DndGamePhase Phase,
+    string CurrentSceneId,
+    string CurrentSceneTitle,
+    string CurrentSceneSummary,
+    DndGamePhase PreviousPhase,
+    DndPendingCheck PendingCheck,
+    bool LastCheckSuccess,
+    string LastCheckSummary,
+    IReadOnlyList<DndSceneDefinition> Scenes,
+    IReadOnlyList<DndSceneOption> Options);
 
 public sealed record DndCampaignSnapshot(
     bool IsFailed,
@@ -25,7 +65,8 @@ public sealed record DndCampaignSnapshot(
     IReadOnlyDictionary<string, DndCampaignPartyMember> Party,
     string ActiveEncounterId,
     string ActiveEncounterName,
-    DndEncounterSnapshot ActiveEncounterState);
+    DndEncounterSnapshot ActiveEncounterState,
+    DndSessionSnapshot Session = null);
 
 public sealed record DndCampaignLedgerEntry(
     int Sequence,

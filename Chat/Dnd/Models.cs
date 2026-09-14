@@ -16,6 +16,41 @@ public enum DndEncounterPhase
     Completed = 3
 }
 
+public enum DndGamePhase
+{
+    NotStarted = 0,
+    SessionStart = 1,
+    Exploration = 2,
+    Social = 3,
+    Travel = 4,
+    Check = 5,
+    Rest = 6,
+    Combat = 7,
+    Aftermath = 8,
+    Failed = 9,
+    Complete = 10
+}
+
+public enum DndSceneKind
+{
+    Intro = 0,
+    Exploration = 1,
+    Social = 2,
+    Travel = 3,
+    Combat = 4,
+    Aftermath = 5,
+    Finale = 6
+}
+
+public enum DndCheckStat
+{
+    Str = 0,
+    Def = 1,
+    Dex = 2,
+    SpellPower = 3,
+    Luck = 4
+}
+
 public enum DndNextRequestKind
 {
     NeedInitiativeRolls = 0,

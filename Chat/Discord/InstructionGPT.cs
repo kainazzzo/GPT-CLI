@@ -1731,6 +1731,8 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 	                   toolName.Equals("gptcli_dnd_attack", StringComparison.OrdinalIgnoreCase) ||
 	                   toolName.Equals("gptcli_dnd_cast", StringComparison.OrdinalIgnoreCase) ||
 	                   toolName.Equals("gptcli_dnd_pass", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_choose", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_rest", StringComparison.OrdinalIgnoreCase) ||
 	                   toolName.Equals("gptcli_dnd_rollall", StringComparison.OrdinalIgnoreCase) ||
 	                   toolName.Equals("gptcli_dnd_ledger", StringComparison.OrdinalIgnoreCase);
 	        }

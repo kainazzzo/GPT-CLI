@@ -52,7 +52,21 @@ public sealed class DndCampaignRunnerState
 
     public string ActiveEncounterId { get; set; } = string.Empty;
     public string ActiveEncounterName { get; set; } = string.Empty;
+    public string ActiveTemplateId { get; set; } = string.Empty;
 
     public DndEncounterRunnerState ActiveEncounter { get; set; }
+    public DndSessionRunnerState Session { get; set; }
+}
+
+public sealed class DndSessionRunnerState
+{
+    public bool Started { get; set; }
+    public DndGamePhase Phase { get; set; }
+    public string CurrentSceneId { get; set; } = string.Empty;
+    public DndGamePhase PreviousPhase { get; set; }
+    public DndPendingCheck PendingCheck { get; set; }
+    public bool LastCheckSuccess { get; set; }
+    public string LastCheckSummary { get; set; } = string.Empty;
+    public List<DndSceneDefinition> Scenes { get; set; } = new();
 }
 

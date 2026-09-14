@@ -76,6 +76,51 @@ public sealed class DndGameMasterModuleTests
         Assert.True(DndGameMasterModule.IsDndToolAllowedForMode("gptcli_dnd_campaigncreate", "draft"));
         Assert.False(DndGameMasterModule.IsDndToolAllowedForMode("gptcli_dnd_attack", "draft"));
         Assert.True(DndGameMasterModule.IsDndToolAllowedForMode("gptcli_dnd_attack", "game"));
+        Assert.True(DndGameMasterModule.IsDndToolAllowedForMode("gptcli_dnd_choose", "game"));
+        Assert.True(DndGameMasterModule.IsDndToolAllowedForMode("gptcli_dnd_rest", "game"));
+        Assert.False(DndGameMasterModule.IsDndToolAllowedForMode("gptcli_dnd_choose", "draft"));
         Assert.False(DndGameMasterModule.IsDndToolAllowedForMode("gptcli_dnd_campaigncreate", "game"));
+    }
+
+    [Fact]
+    public void TryMatchSessionOption_maps_numbers_labels_and_keywords()
+    {
+        var options = new[]
+        {
+            new DndSceneOption("begin", "Begin the adventure", DndGamePhase.Exploration),
+            new DndSceneOption("recap", "Recap the hook", DndGamePhase.SessionStart),
+            new DndSceneOption("party", "Show the party", DndGamePhase.SessionStart)
+        };
+
+        Assert.Equal("begin", DndGameMasterModule.TryMatchSessionOption("1", options));
+        Assert.Equal("begin", DndGameMasterModule.TryMatchSessionOption("begin", options));
+        Assert.Equal("begin", DndGameMasterModule.TryMatchSessionOption("let's play", options));
+        Assert.Equal("recap", DndGameMasterModule.TryMatchSessionOption("recap", options));
+        Assert.Null(DndGameMasterModule.TryMatchSessionOption("cast fireball", options));
+
+        var explore = new[]
+        {
+            new DndSceneOption("check:search", "Search the area", DndGamePhase.Check),
+            new DndSceneOption("social", "Talk to someone", DndGamePhase.Social),
+            new DndSceneOption("rest", "Make camp", DndGamePhase.Rest),
+            new DndSceneOption("combat:t1", "Start the fight", DndGamePhase.Combat, EncounterTemplateId: "t1"),
+            new DndSceneOption("continue", "Continue to the next scene", DndGamePhase.Combat)
+        };
+
+        Assert.Equal("check:search", DndGameMasterModule.TryMatchSessionOption("I search the rubble", explore));
+        Assert.Equal("social", DndGameMasterModule.TryMatchSessionOption("talk to the survivor", explore));
+        Assert.Equal("combat:t1", DndGameMasterModule.TryMatchSessionOption("fight the goblins", explore));
+        Assert.Equal("rest", DndGameMasterModule.TryMatchSessionOption("let's rest", explore));
+        Assert.Equal("continue", DndGameMasterModule.TryMatchSessionOption("continue", explore));
+    }
+
+    [Fact]
+    public void LooksLikeBeginIntent_ignores_fight_requests()
+    {
+        Assert.True(DndGameMasterModule.LooksLikeBeginIntent("let's play"));
+        Assert.True(DndGameMasterModule.LooksLikeBeginIntent("begin"));
+        Assert.False(DndGameMasterModule.LooksLikeBeginIntent("start the encounter"));
+        Assert.False(DndGameMasterModule.LooksLikeBeginIntent("start the fight"));
+        Assert.True(DndGameMasterModule.LooksLikeGameStartIntent("start the encounter"));
     }
 }

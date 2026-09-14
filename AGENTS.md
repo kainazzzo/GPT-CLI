@@ -1,38 +1,83 @@
-# Repository Guidelines
+# GPT-CLI
 
-## Project Structure & Module Organization
-- `Program.cs`, `OpenAILogic.cs`, and `GptOptions.cs` host the CLI entry point and core GPT logic.
-- `Chat/` contains chat-oriented flows, with `Chat/Discord/` holding Discord bot integrations.
-- `Embeddings/` includes document/embedding utilities (e.g., `Document.cs`, `CosineSimilarity.cs`).
-- `deploy/` holds shell scripts for deployment helpers.
-- `Properties/` contains runtime launch settings.
-- Build artifacts land in `bin/` and `obj/` (do not edit by hand).
+.NET 10 CLI and Discord bot around OpenAI-compatible chat, embeddings, and pluggable Discord feature modules. Target framework is `net10.0` (`gpt.csproj`). Example modules are **not** compiled into the CLI; they ship as separate DLLs loaded at Discord startup.
 
-## Build, Test, and Development Commands
-- `dotnet publish gpt.csproj -c Release -r win-x64 -o c:\bin\ --self-contained true -p:PublishSingleFile=true`
-  - Used by `localinstall.bat` to publish a single-file Windows binary.
-- `dotnet publish gpt.csproj -c Release -r linux-x64 -o $HOME/bin --self-contained true -p:PublishSingleFile=true`
-  - Used by `linuxinstall.sh` for Linux installs.
-- `release.bat <version>` updates version fields in `gpt.csproj`, commits, tags, and pushes.
-- `dotnet test ./GPT-CLI.sln -c Release` runs the xUnit suites in `tests/`.
-- `test.bat` is a Windows publish helper, not the unit-test runner.
+This file orients an agent to the whole repo. Nested `AGENTS.md` files cover a directory in more detail — read the closest one before editing that area.
 
-## Coding Style & Naming Conventions
-- Language: C# targeting `net10.0` (see `gpt.csproj`).
-- Use standard .NET conventions: PascalCase for types/methods, camelCase for locals/fields.
-- Keep new files near related functionality (e.g., Discord features in `Chat/Discord/`).
-- No repo-specific formatter is configured; avoid sweeping style reflows.
+## Nested agent files
 
-## Testing Guidelines
-- Unit tests live under `tests/` (`GptCli.Tests` for core/Discord/OpenAI I/O, `GptCli.Dnd.Tests` for the combat engine, `GptCli.Modules.Tests` for example modules).
-- Run them with `dotnet test ./GPT-CLI.sln -c Release`.
-- Tests must not call live OpenAI or Discord APIs; use fakes (`FixedDiceRoller`, `FakeFeatureModule`, `FakeOpenAIService`, `StubHttpMessageHandler`).
+| Path | When to read |
+|---|---|
+| `Chat/AGENTS.md` | Chat bot, Discord host, DnD engine |
+| `Chat/Discord/AGENTS.md` | Discord host, `/gptcli`, module pipeline |
+| `Chat/Dnd/AGENTS.md` | Deterministic DnD-lite rules engine (session + combat) |
+| `modules/AGENTS.md` | How Discord feature modules load and should be written |
+| `modules/examples/DndModuleExample/AGENTS.md` | DnD Discord adapter (draft/game, tools, persistence) |
+| `modules/examples/CasinoModuleExample/AGENTS.md` | Casino module |
+| `modules/examples/PollModuleExample/AGENTS.md` | Poll module |
+| `modules/examples/PinboardModuleExample/AGENTS.md` | Pinboard module |
+| `modules/examples/WelcomeModuleExample/AGENTS.md` | Welcome/onboarding module |
+| `tests/AGENTS.md` | Test projects, fakes, what not to hit |
 
-## Commit & Pull Request Guidelines
-- Commit messages follow a Conventional Commits style (e.g., `feat(discord): …`, `refactor(state): …`).
-- PRs should include: a concise summary, key commands run, and any config changes (e.g., `appsettings.json` or env vars).
-- For user-facing changes, include example CLI usage or a short before/after note.
+Built-in Discord module (compiled into the host, not a DLL): `Chat/Discord/Modules/InfobotModule.cs` (id `infobot`).
 
-## Configuration Tips
-- Local settings live in `appsettings.json` or environment variables (`OPENAI__APIKEY`, `GPT__PROMPT`).
-- Avoid committing real API keys; use placeholders in docs and examples.
+## What the app does
+
+`Program.cs` reads `GptOptions` (`GPT` + `OpenAI` config) and runs one of:
+
+- **Completion** — prompt in, completion out; optional embedding-file context via `ParameterMapping`.
+- **Chat** — `InstructionChatBot` REPL.
+- **Embed** — chunk files/directories (`Embeddings/Document.cs`) and rank with cosine similarity.
+- **Discord** — `InstructionGPT` bot: per-channel history, `/gptcli` slash tree, mention tool-routing, and a module pipeline.
+
+OpenAI I/O lives in `OpenAILogic.cs`. Default model is `gpt-6-astra`. GPT-6 requests omit sampling params the model rejects; tool calling for GPT-6 goes through the Responses API.
+
+## Layout
+
+- `Program.cs`, `OpenAILogic.cs`, `GptOptions.cs`, `ParameterMapping.cs` — entry, API, options.
+- `Chat/InstructionChatBot.cs` — non-Discord chat loop.
+- `Chat/Discord/` — Discord host, slash/tool commands, Infobot, module contracts.
+- `Chat/Dnd/` — rules engine used by the DnD module (no Discord types).
+- `Embeddings/` — `Document`, `CosineSimilarity`.
+- `modules/examples/` — plugin sources. Built DLLs copy to `modules/`.
+- `tests/` — xUnit; never live OpenAI or Discord.
+- `deploy/` — install/deploy helpers. `bin/` and `obj/` are build output.
+
+Per-channel Discord state is stored under `channels/<guild>_<id>/<channel>_<id>/`. Do not persist API keys or bot tokens in that JSON (`GptOptions.ApiKey` / `BotToken` are `[JsonIgnore]`).
+
+## Commands
+
+```bash
+dotnet test ./GPT-CLI.sln -c Release
+dotnet publish gpt.csproj -c Release -r linux-x64 -o $HOME/bin --self-contained true -p:PublishSingleFile=true
+# Windows equivalent: localinstall.bat / win-x64 publish
+# Version, commit, tag, push: release.bat <version>
+```
+
+`test.bat` is a Windows **publish** helper, not the unit-test runner.
+
+After changing an example module, rebuild/deploy its DLL (`modules/examples/<Name>/build-module.sh` or `modules/build-deploy-modules.sh`) and restart the Discord process. Host `gpt.csproj` excludes `modules/**/*.cs`.
+
+## Coding
+
+- C# `net10.0`, PascalCase types/methods, camelCase locals/fields.
+- Put new files next to related code (Discord host vs `Chat/Dnd` engine vs example module).
+- No repo formatter; do not reflow unrelated code.
+- Conventional Commits (`feat(discord): …`, `fix(dnd): …`).
+- PRs: summary, commands run, config/env changes, user-facing before/after.
+
+## Tests
+
+- `GptCli.Tests` — core, OpenAI mapping, Discord host helpers.
+- `GptCli.Dnd.Tests` — DnD engine (session + combat).
+- `GptCli.Modules.Tests` — example modules.
+
+No live OpenAI or Discord. Use `FixedDiceRoller`, `FakeClock`, `FakeFeatureModule`, `FakeOpenAIService`, `StubHttpMessageHandler`.
+
+## Config
+
+`appsettings.json` or env vars (`OPENAI__APIKEY`, `GPT__PROMPT`, `GPT__MODE`, `GPT__BOTTOKEN`, `DISCORD__MODULESPATH`). Never commit real keys. Placeholders only in docs.
+
+## DnD in one paragraph
+
+Mechanics are deterministic in `Chat/Dnd/` (HP, stats, damage, checks, rest, legal scene transitions). The Discord module in `modules/examples/DndModuleExample` is an adapter: draft mode is GM prep, game mode starts a session state machine and uses the LLM only for narration and mapping player text onto listed options. Read `Chat/Dnd/AGENTS.md` and `modules/examples/DndModuleExample/AGENTS.md` before changing either side.
