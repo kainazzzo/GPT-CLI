@@ -106,4 +106,51 @@ public sealed class DndCampaignRunnerTests
         Assert.False(cleared.Campaign.IsFailed);
         Assert.Equal(20, cleared.Campaign.Party["p1"].Hp);
     }
+
+    [Fact]
+    public void StartEncounter_unknown_template_fails()
+    {
+        var camp = MakeCampaign();
+        var res = camp.StartEncounter("missing");
+        Assert.False(res.Ok);
+        Assert.Contains("template", res.Error, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void LongRest_without_clearFailure_restores_hp_but_keeps_failed()
+    {
+        var dice = new FixedDiceRoller(new[] { 20, 1, 1, 20, 8, 8 });
+        var camp = MakeCampaign(startingHp: 3, startingMp: 0, dice: dice);
+        camp.RegisterEncounterTemplate(BasicTemplate());
+        camp.StartEncounter("t1");
+        camp.RollAll();
+        camp.Attack("p1", "b1");
+        camp.RollAll();
+
+        Assert.True(camp.GetState().IsFailed);
+
+        var rested = camp.LongRest(clearFailure: false);
+        Assert.True(rested.Ok);
+        Assert.True(rested.Campaign.IsFailed);
+        Assert.Equal("defeat", rested.Campaign.FailureReason);
+        Assert.Equal(20, rested.Campaign.Party["p1"].Hp);
+
+        var blocked = camp.StartEncounter("t1");
+        Assert.False(blocked.Ok);
+    }
+
+    [Fact]
+    public void Pass_reconciles_party_hp_mp_when_enemy_misses()
+    {
+        var dice = new FixedDiceRoller(new[] { 20, 1, 1 });
+        var camp = MakeCampaign(startingHp: 20, startingMp: 10, dice: dice);
+        camp.RegisterEncounterTemplate(BasicTemplate());
+        camp.StartEncounter("t1");
+        camp.RollAll();
+
+        var res = camp.Pass("p1");
+        Assert.True(res.Ok);
+        Assert.Equal(20, res.Campaign.Party["p1"].Hp);
+        Assert.Equal(10, res.Campaign.Party["p1"].Mp);
+    }
 }

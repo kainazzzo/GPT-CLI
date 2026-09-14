@@ -2,6 +2,24 @@
 
 Notable user-facing changes. Entries are ordered newest-first.
 
+## 2026-09-09
+
+### Default model: GPT-6 Astra
+
+- Updated the default text and vision model to OpenAI's current flagship, `gpt-6-astra`.
+- Chat Completions requests now omit sampling parameters (`temperature`, `top_p`, `logprobs`) that GPT-6 Astra rejects.
+- Tool-calling requests for GPT-6 models go through the Responses API, which GPT-6 Astra requires for tools.
+
+Files:
+- `GptOptions.cs`
+- `OpenAILogic.cs`
+- `appsettings.json`
+- `deploy/appsettings.json`
+- `Properties/launchSettings.json`
+- `Dockerfile.discord`
+- `README.md`
+- `modules/examples/DndModuleExample/DndModuleExample/DndGameMasterModule.cs`
+
 ## 2026-02-13
 
 ### Discord integration and module-flow expansion

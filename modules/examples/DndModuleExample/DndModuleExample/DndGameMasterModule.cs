@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Globalization;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
@@ -156,6 +157,8 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 "- Game mode is live play: narrate scenes, run encounters, track turns, and respond as GM.\n" +
                 "- The user may describe actions in natural language; your job is to call the relevant `gptcli_dnd_*` functions for mechanics/state (encounters, rolls, attacks/casts, status, timeouts).\n" +
                 "- Do not require `!` commands for gameplay; plain language like \"I attack the boss\" should work.\n" +
+                "- Resolve all pending rolls automatically; do not ask players to manually run roll commands.\n" +
+                "- In roleplay dialogue, prefer one responder: the character/NPC explicitly addressed (name or @mention). Do not make the whole party answer unless the user asks for a group response.\n" +
                 "- Prefer Discord-friendly formatting for readability: bold beats, short paragraphs, and occasional emojis.\n" +
                 "- Keep responses short, in-character, and always drive toward the next playable decision.\n" +
                 "When To Engage (triggers):\n" +
@@ -1157,6 +1160,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                     "Game mode is live play. Treat every user message as in-game gameplay or roleplay.\n" +
                     "The user may mention any available DnD capability; your job is to call the appropriate `gptcli_dnd_*` functions to carry out mechanics/state changes when needed.\n" +
                     "Never require `!` commands for combat actions; plain language should be enough.\n" +
+                    "Resolve pending rolls automatically (initiative/to-hit/damage) instead of asking users to run roll commands.\n" +
                     "Do not call `gptcli_dnd_mode` unless the user explicitly asks to change modes.\n" +
                     "Important: if the user asks to change modes while in GAME mode, instruct them to use the slash command `/gptcli dnd mode value:draft` (or `off`). Do NOT call `gptcli_dnd_mode` from natural language.\n" +
                     "Party roster is provided in context under \"Party roster (actors)\".\n" +
@@ -1164,6 +1168,11 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                     "If the user asks to change the auto-pass / player turn timeout / pass timeout, call `gptcli_dnd_passtimeout`.\n" +
                     "If the user intends a mechanical action (attack/cast/pass/rolls/encounter control), call the appropriate tool(s).\n" +
                     "If it is roleplay/table talk, respond as GM but do not invent mechanical outcomes.\n" +
+                    "Roleplay speaker targeting rules:\n" +
+                    "- Prefer a single in-character responder based on who is addressed (name/@mention/title).\n" +
+                    "- If one party member is addressed, reply as that one character only (plus brief GM framing if needed).\n" +
+                    "- Do not have multiple party members chime in unless the user explicitly asks the group/party/everyone.\n" +
+                    "- If addressee is ambiguous and it changes meaning, ask one short clarification question.\n" +
                     "Style: short, in-character, vivid. No meta/explanations.\n" +
                     "Formatting: use Discord markdown for readability: **bold** for scene beats, *italics* for tone, `code` for mechanical snippets.\n" +
                     "Use emojis sparingly (1-3) to signal beats/roles (e.g. 🎲 ⚔️ 🧙 🛡️ 🧠 🧭).\n" +
@@ -2361,7 +2370,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             "Keep tool arguments minimal and explicit. For overwrite=true, only set when user explicitly asked to overwrite/replace.";
     }
 
-    private static bool IsDndToolAllowedForMode(string toolName, string mode)
+    internal static bool IsDndToolAllowedForMode(string toolName, string mode)
     {
         if (string.IsNullOrWhiteSpace(toolName))
         {
@@ -2438,7 +2447,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         return false;
     }
 
-    private static bool TryDetectCampaignCreateIntent(string text, out string campaignName, out bool wantsOverwrite)
+    internal static bool TryDetectCampaignCreateIntent(string text, out string campaignName, out bool wantsOverwrite)
     {
         campaignName = null;
         wantsOverwrite = false;
@@ -2518,7 +2527,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         return true;
     }
 
-    private static bool LooksLikeDraftUpdateIntent(string text)
+    internal static bool LooksLikeDraftUpdateIntent(string text)
     {
         if (string.IsNullOrWhiteSpace(text))
         {
@@ -2612,7 +2621,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         return ids;
     }
 
-    private static bool LooksLikePartyAdd(string text)
+    internal static bool LooksLikePartyAdd(string text)
     {
         if (string.IsNullOrWhiteSpace(text)) return false;
         var l = text.Trim().ToLowerInvariant();
@@ -2623,7 +2632,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                l.Contains("join", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static bool LooksLikePartyRemove(string text)
+    internal static bool LooksLikePartyRemove(string text)
     {
         if (string.IsNullOrWhiteSpace(text)) return false;
         var l = text.Trim().ToLowerInvariant();
@@ -2688,7 +2697,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 lower.Contains("pass", StringComparison.OrdinalIgnoreCase));
     }
 
-    private static bool TryExtractPassTimeoutArgs(string text, out int? seconds, out int? minutes)
+    internal static bool TryExtractPassTimeoutArgs(string text, out int? seconds, out int? minutes)
     {
         seconds = null;
         minutes = null;
@@ -3302,7 +3311,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                lower.Contains("length", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static string SanitizeDraftToolNarration(string raw)
+    internal static string SanitizeDraftToolNarration(string raw)
     {
         if (string.IsNullOrWhiteSpace(raw))
         {
@@ -3354,7 +3363,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         return string.Join(" ", kept);
     }
 
-    private static bool LooksLikeModeChangeIntent(string text)
+    internal static bool LooksLikeModeChangeIntent(string text)
     {
         if (string.IsNullOrWhiteSpace(text))
         {
@@ -3396,7 +3405,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                lower.Contains("off", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static bool LooksLikeGameStartIntent(string text)
+    internal static bool LooksLikeGameStartIntent(string text)
     {
         if (string.IsNullOrWhiteSpace(text))
         {
@@ -3752,7 +3761,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         await SaveStateAsync(channelState, dndState, ct);
     }
 
-    private static bool TryParseDraftConfirmationResponse(string raw, out bool isConfirm, out bool isCancel)
+    internal static bool TryParseDraftConfirmationResponse(string raw, out bool isConfirm, out bool isCancel)
     {
         isConfirm = false;
         isCancel = false;
@@ -4128,7 +4137,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             }
 
             sb.AppendLine();
-            sb.AppendLine("Game commands: `!help`, `!state`, `!targets`, `!attack <target>`, `!cast <target>`, `!pass`, `!rollall`, `!roll initiative`, `!roll <rollId>`, `!ledger [n]`");
+            sb.AppendLine("Game commands: `!help`, `!state`, `!targets`, `!attack <target>`, `!cast <target>`, `!pass`, `!ledger [n]`");
 
             return new GptCliExecutionResult(true, TrimToLimit(sb.ToString().Trim(), 3500), false);
         }
@@ -4501,7 +4510,13 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 }
 
                 var templateId = SlugifySegment(e.TemplateId);
-                var bossActorId = $"{templateId}:{SlugifySegment(e.Boss.Id ?? "boss")}";
+                var usedEnemyIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var bossEnemyId = MakeUniqueSlug(
+                    firstChoice: SlugifyOptionalSegment(e.Boss.Id),
+                    used: usedEnemyIds,
+                    fallback: SlugifyOptionalSegment(e.Boss.Name),
+                    defaultValue: "boss");
+                var bossActorId = $"{templateId}:{bossEnemyId}";
                 var boss = ToEnemyDef(bossActorId, e.Boss.Name, isBoss: true, e.Boss.Stats, e.Boss.MaxHp, e.Boss.MaxMp);
 
                 var adds = new List<DndActorDefinition>();
@@ -4513,7 +4528,12 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                         continue;
                     }
 
-                    var addActorId = $"{templateId}:{SlugifySegment(add.Id ?? add.Name ?? "add")}";
+                    var addEnemyId = MakeUniqueSlug(
+                        firstChoice: SlugifyOptionalSegment(add.Id),
+                        used: usedEnemyIds,
+                        fallback: SlugifyOptionalSegment(add.Name),
+                        defaultValue: "add");
+                    var addActorId = $"{templateId}:{addEnemyId}";
                     adds.Add(ToEnemyDef(addActorId, add.Name, isBoss: false, add.Stats, add.MaxHp, add.MaxMp));
                     addDescs.Add(new DndLiteActorDescriptor
                     {
@@ -6152,6 +6172,11 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             }
 
             var res = runner.StartEncounter(templateId);
+            var (autoChanged, autoResult) = AutoResolvePendingRolls(runner);
+            if (autoChanged && autoResult != null)
+            {
+                res = autoResult;
+            }
             await PersistRunnerAsync(ctx.ChannelState, st.ActiveCampaignName, campaign, runner, ct);
 
             var legacyText = RenderTurnResult(res);
@@ -6648,7 +6673,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         return (false, false);
     }
 
-    private enum NaturalGameActionKind
+    internal enum NaturalGameActionKind
     {
         None = 0,
         Attack = 1,
@@ -6659,7 +6684,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         RollById = 6
     }
 
-    private sealed class NaturalGameIntent
+    internal sealed class NaturalGameIntent
     {
         public NaturalGameActionKind Action { get; init; }
         public bool LooksMechanical { get; init; }
@@ -6712,6 +6737,18 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             return false;
         }
 
+        var (autoChanged, _) = AutoResolvePendingRolls(runner);
+        if (autoChanged)
+        {
+            await PersistRunnerAsync(channelState, dndState.ActiveCampaignName, campaign, runner, ct);
+            snap = runner.GetState();
+            encounter = snap?.ActiveEncounterState;
+            if (encounter == null || encounter.IsCompleted)
+            {
+                return true;
+            }
+        }
+
         var pending = campaign.RunnerState.ActiveEncounter?.PendingRolls ?? new List<DndPendingRoll>();
         var next = DndTurnResult.BuildNextRequest(encounter, pending);
         if (next == null || next.Kind == DndNextRequestKind.Completed)
@@ -6732,45 +6769,15 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 
         if (next.Kind == DndNextRequestKind.NeedInitiativeRolls)
         {
-            if (intent.Action == NaturalGameActionKind.RollAll)
-            {
-                var (handled, _) = await TryHandleBangCommandAsync(context, channelState, message, dndState, "!rollall", ct);
-                return handled;
-            }
-
-            if (intent.Action == NaturalGameActionKind.RollById && !string.IsNullOrWhiteSpace(intent.RollId))
-            {
-                var (handled, _) = await TryHandleBangCommandAsync(context, channelState, message, dndState, $"!roll {intent.RollId}", ct);
-                return handled;
-            }
-
-            if (intent.Action == NaturalGameActionKind.RollInitiative)
-            {
-                var (handled, _) = await TryHandleBangCommandAsync(context, channelState, message, dndState, "!roll initiative", ct);
-                return handled;
-            }
-
             await message.Channel.SendMessageAsync(
-                $"{authorMention} Initiative is still pending. Say you want to roll initiative (or ask me to resolve all pending initiative rolls).");
+                $"{authorMention} Initiative rolls are resolving automatically. Give me a moment, then call your action.");
             return true;
         }
 
         if (next.Kind == DndNextRequestKind.NeedRolls)
         {
-            if (intent.Action == NaturalGameActionKind.RollAll)
-            {
-                var (handled, _) = await TryHandleBangCommandAsync(context, channelState, message, dndState, "!rollall", ct);
-                return handled;
-            }
-
-            if (intent.Action == NaturalGameActionKind.RollById && !string.IsNullOrWhiteSpace(intent.RollId))
-            {
-                var (handled, _) = await TryHandleBangCommandAsync(context, channelState, message, dndState, $"!roll {intent.RollId}", ct);
-                return handled;
-            }
-
             await message.Channel.SendMessageAsync(
-                $"{authorMention} There are pending rolls to resolve first. Ask for a specific pending roll ID or ask me to resolve all pending rolls.");
+                $"{authorMention} Pending rolls are resolving automatically. Give me a moment, then call your action.");
             return true;
         }
 
@@ -6836,7 +6843,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         return true;
     }
 
-    private static NaturalGameIntent ParseNaturalGameIntent(string text, DndEncounterSnapshot encounter)
+    internal static NaturalGameIntent ParseNaturalGameIntent(string text, DndEncounterSnapshot encounter)
     {
         var t = (text ?? string.Empty).Trim();
         if (t.Length == 0)
@@ -7259,6 +7266,12 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             return (true, false, msg);
         }
 
+        var (preAutoChanged, _) = AutoResolvePendingRolls(runner);
+        if (preAutoChanged)
+        {
+            await PersistRunnerAsync(channelState, dndState.ActiveCampaignName, campaign, runner, ct);
+        }
+
         var (res, responseText) = await action(runner);
         if (res == null)
         {
@@ -7270,6 +7283,13 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             return (true, false, msg);
         }
 
+        var (postAutoChanged, postAutoResult) = AutoResolvePendingRolls(runner);
+        if (postAutoChanged && postAutoResult != null)
+        {
+            res = postAutoResult;
+            responseText = RenderTurnResult(res);
+        }
+
         await PersistRunnerAsync(channelState, dndState.ActiveCampaignName, campaign, runner, ct);
         var finalResponse = await FormatGameTurnOutputAsync(context, channelState, res, responseText, actionLabel, ct);
         if (postToChannel)
@@ -7277,6 +7297,83 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             await SendChunkedAsync(discordChannel, finalResponse);
         }
         return (true, true, finalResponse);
+    }
+
+    private static (bool changed, DndCampaignResult lastResult) AutoResolvePendingRolls(DndCampaignRunner runner)
+    {
+        if (runner == null)
+        {
+            return (false, null);
+        }
+
+        var changed = false;
+        DndCampaignResult lastResult = null;
+
+        for (var step = 0; step < 64; step++)
+        {
+            var snap = runner.GetState();
+            var encounter = snap?.ActiveEncounterState;
+            if (encounter == null || encounter.IsCompleted)
+            {
+                break;
+            }
+
+            var pending = runner.ToState()?.ActiveEncounter?.PendingRolls ?? new List<DndPendingRoll>();
+            var next = DndTurnResult.BuildNextRequest(encounter, pending);
+            if (next == null || next.Kind is DndNextRequestKind.Completed or DndNextRequestKind.NeedAction)
+            {
+                break;
+            }
+
+            if (next.Kind == DndNextRequestKind.NeedInitiativeRolls)
+            {
+                var actorIds = pending
+                    .Where(r => r != null && r.Kind == DndPendingRollKind.Initiative && !string.IsNullOrWhiteSpace(r.ActorId))
+                    .Select(r => r.ActorId.Trim())
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                if (actorIds.Count == 0)
+                {
+                    break;
+                }
+
+                var rolledAny = false;
+                foreach (var actorId in actorIds)
+                {
+                    var res = runner.RollInitiative(actorId);
+                    if (res is { Ok: true })
+                    {
+                        changed = true;
+                        rolledAny = true;
+                        lastResult = res;
+                    }
+                }
+
+                if (!rolledAny)
+                {
+                    break;
+                }
+
+                continue;
+            }
+
+            if (next.Kind == DndNextRequestKind.NeedRolls)
+            {
+                var res = runner.RollAll();
+                if (res is not { Ok: true })
+                {
+                    break;
+                }
+
+                changed = true;
+                lastResult = res;
+                continue;
+            }
+
+            break;
+        }
+
+        return (changed, lastResult);
     }
 
     private async Task PersistRunnerAsync(
@@ -7805,23 +7902,8 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 
         if (campaign.RunnerState != null && campaign.RunnerState.Party is { Count: > 0 })
         {
+            campaign.RunnerState.Templates = BuildRunnerTemplates(campaign.EncounterTemplates);
             var runner1 = RestoreCampaignRunner(channelState.ChannelId, campaign.RunnerState);
-
-            // Ensure templates from doc are present.
-            foreach (var t in campaign.EncounterTemplates ?? new List<DndLiteEncounterTemplateDocument>())
-            {
-                if (t?.Mechanics == null)
-                {
-                    continue;
-                }
-
-                var exists = runner1.ListEncounterTemplates().Any(x => string.Equals(x.TemplateId, t.Mechanics.TemplateId, StringComparison.OrdinalIgnoreCase));
-                if (!exists)
-                {
-                    runner1.RegisterEncounterTemplate(t.Mechanics);
-                }
-            }
-
             return runner1;
         }
 
@@ -7880,12 +7962,9 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         var dice = _diceByChannel.GetOrAdd(channelState.ChannelId, _ => new RandomDiceRoller());
         var runner = new DndCampaignRunner(new DndCampaignDefinition(members), diceRoller: dice);
 
-        foreach (var t in campaign.EncounterTemplates ?? new List<DndLiteEncounterTemplateDocument>())
+        foreach (var template in BuildRunnerTemplates(campaign.EncounterTemplates))
         {
-            if (t?.Mechanics != null)
-            {
-                runner.RegisterEncounterTemplate(t.Mechanics);
-            }
+            runner.RegisterEncounterTemplate(template);
         }
 
         campaign.RunnerState = runner.ToState();
@@ -7961,10 +8040,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             campaign.RunnerState = new DndCampaignRunnerState
             {
                 Party = members,
-                Templates = (campaign.EncounterTemplates ?? new List<DndLiteEncounterTemplateDocument>())
-                    .Where(t => t?.Mechanics != null)
-                    .Select(t => t.Mechanics)
-                    .ToList()
+                Templates = BuildRunnerTemplates(campaign.EncounterTemplates)
             };
 
             return true;
@@ -7987,10 +8063,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         var changed = false;
 
         // Keep templates aligned with campaign document.
-        runnerState.Templates = (campaign.EncounterTemplates ?? new List<DndLiteEncounterTemplateDocument>())
-            .Where(t => t?.Mechanics != null)
-            .Select(t => t.Mechanics)
-            .ToList();
+        runnerState.Templates = BuildRunnerTemplates(campaign.EncounterTemplates);
 
         runnerState.Party ??= new List<DndCampaignPartyMember>();
 
@@ -8096,6 +8169,106 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 
         // IMPORTANT: do not normalize runnerState.ActiveEncounter. It must remain stable for resuming.
         return changed;
+    }
+
+    private static List<DndEncounterTemplate> BuildRunnerTemplates(IEnumerable<DndLiteEncounterTemplateDocument> templates)
+    {
+        var list = new List<DndEncounterTemplate>();
+        foreach (var t in templates ?? Enumerable.Empty<DndLiteEncounterTemplateDocument>())
+        {
+            if (t?.Mechanics == null)
+            {
+                continue;
+            }
+
+            list.Add(SanitizeEncounterTemplateForRunner(t.Mechanics));
+        }
+
+        return list;
+    }
+
+    private static DndEncounterTemplate SanitizeEncounterTemplateForRunner(DndEncounterTemplate template)
+    {
+        if (template == null)
+        {
+            return null;
+        }
+
+        var templateId = SlugifySegment(template.TemplateId);
+        var templateName = string.IsNullOrWhiteSpace(template.Name) ? templateId : template.Name.Trim();
+        var usedEnemyIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        var bossSeed = ResolveEnemyIdSeed(template.Boss?.ActorId, template.Boss?.Name, "boss");
+        var bossEnemyId = MakeUniqueSlug(
+            firstChoice: bossSeed,
+            used: usedEnemyIds,
+            fallback: SlugifyOptionalSegment(template.Boss?.Name),
+            defaultValue: "boss");
+        var bossActorId = $"{templateId}:{bossEnemyId}";
+        var boss = ToEnemyDef(
+            bossActorId,
+            template.Boss?.Name,
+            isBoss: true,
+            template.Boss?.Stats,
+            template.Boss?.MaxHp ?? 40,
+            template.Boss?.MaxMp ?? 0);
+
+        var adds = new List<DndActorDefinition>();
+        foreach (var add in template.Adds ?? Array.Empty<DndActorDefinition>())
+        {
+            if (add == null)
+            {
+                continue;
+            }
+
+            var addSeed = ResolveEnemyIdSeed(add.ActorId, add.Name, "add");
+            var addEnemyId = MakeUniqueSlug(
+                firstChoice: addSeed,
+                used: usedEnemyIds,
+                fallback: SlugifyOptionalSegment(add.Name),
+                defaultValue: "add");
+            var addActorId = $"{templateId}:{addEnemyId}";
+            adds.Add(ToEnemyDef(
+                addActorId,
+                add.Name,
+                isBoss: false,
+                add.Stats,
+                add.MaxHp,
+                add.MaxMp));
+        }
+
+        return new DndEncounterTemplate(
+            TemplateId: templateId,
+            Name: templateName,
+            Boss: boss,
+            Adds: adds);
+    }
+
+    private static string ResolveEnemyIdSeed(string actorId, string name, string fallback)
+    {
+        var token = actorId?.Trim();
+        if (!string.IsNullOrWhiteSpace(token))
+        {
+            var idx = token.LastIndexOf(':');
+            if (idx >= 0 && idx < token.Length - 1)
+            {
+                token = token[(idx + 1)..];
+            }
+        }
+
+        var fromActorId = SlugifyOptionalSegment(token);
+        if (!string.IsNullOrWhiteSpace(fromActorId))
+        {
+            return fromActorId;
+        }
+
+        var fromName = SlugifyOptionalSegment(name);
+        if (!string.IsNullOrWhiteSpace(fromName))
+        {
+            return fromName;
+        }
+
+        return SlugifyOptionalSegment(fallback);
     }
 
     private DndCampaignRunner RestoreCampaignRunner(ulong channelId, DndCampaignRunnerState state)
@@ -8273,7 +8446,18 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             {
                 sb.AppendLine();
             }
-            sb.AppendLine($"📊 {RenderPartySummary(res.Campaign)}");
+            sb.AppendLine(RenderPartyFightDetails(res.Campaign));
+        }
+
+        var encounter = res.EncounterResult?.State ?? res.Campaign?.ActiveEncounterState;
+        var enemyDetails = RenderEnemyFightDetails(encounter);
+        if (!string.IsNullOrWhiteSpace(enemyDetails))
+        {
+            if (sb.Length > 0)
+            {
+                sb.AppendLine();
+            }
+            sb.AppendLine(enemyDetails);
         }
 
         var next = res.EncounterResult?.NextRequest;
@@ -8297,6 +8481,53 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         }
 
         return TrimToLimit(sb.ToString().Trim(), 2400);
+    }
+
+    private static string RenderPartyFightDetails(DndCampaignSnapshot snap)
+    {
+        var lines = new List<string> { "📊 **Party**" };
+        if (snap?.Party == null || snap.Party.Count == 0)
+        {
+            lines.Add("- 🤷 _No party members loaded._");
+            return string.Join("\n", lines);
+        }
+
+        foreach (var p in snap.Party.Values.OrderBy(p => p.Name, StringComparer.OrdinalIgnoreCase))
+        {
+            var name = string.IsNullOrWhiteSpace(p.Name) ? "Unknown" : TrimToLimit(p.Name.Trim(), 80);
+            lines.Add($"- 🧑‍🎤 **{name}** — **HP {p.Hp}/{p.MaxHp}** | MP {p.Mp}/{p.MaxMp}");
+        }
+
+        return string.Join("\n", lines);
+    }
+
+    private static string RenderEnemyFightDetails(DndEncounterSnapshot encounter)
+    {
+        if (encounter?.Actors == null || encounter.Actors.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        var enemies = encounter.Actors.Values
+            .Where(a => a != null && a.Side == DndSide.Enemy)
+            .OrderBy(a => a.IsBoss ? 0 : 1)
+            .ThenBy(a => a.Name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (enemies.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        var lines = new List<string> { "👹 **Enemies (Boss & Adds)**" };
+        foreach (var e in enemies.Take(8))
+        {
+            var icon = e.IsBoss ? "👑" : "⚔️";
+            var name = string.IsNullOrWhiteSpace(e.Name) ? "Enemy" : TrimToLimit(e.Name.Trim(), 80);
+            var down = e.IsAlive ? string.Empty : " _(down)_";
+            lines.Add($"- {icon} **{name}**{down} — **HP {e.Hp}/{e.MaxHp}** | MP {e.Mp}/{e.MaxMp}");
+        }
+
+        return string.Join("\n", lines);
     }
 
     private static List<string> ExtractMechanicsHighlights(DndCampaignResult res)
@@ -8643,27 +8874,13 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 
         if (next.RequiredRolls == null || next.RequiredRolls.Count == 0)
         {
-            return "Next: pending rolls required.";
+            return "Next: resolving pending rolls automatically.";
         }
 
         var lines = new List<string>();
         lines.Add(next.Kind == DndNextRequestKind.NeedInitiativeRolls
-            ? "Next: initiative rolls are pending. Ask to roll initiative (or resolve all pending initiative rolls)."
-            : "Next: rolls are pending before the turn can continue. Ask to resolve a specific roll ID (or all pending rolls).");
-
-        var rollParts = next.RequiredRolls
-            .Take(8)
-            .Select(r =>
-            {
-                var actor = RenderActorReference(r.ActorId, encounter);
-                var target = string.IsNullOrWhiteSpace(r.TargetId) ? string.Empty : $" vs {RenderActorReference(r.TargetId, encounter)}";
-                return $"{r.RollId} ({r.Kind} for {actor}{target})";
-            })
-            .ToList();
-        if (rollParts.Count > 0)
-        {
-            lines.Add("Pending roll IDs: " + string.Join(", ", rollParts));
-        }
+            ? "Next: initiative rolls are pending and will resolve automatically."
+            : "Next: rolls are pending and will resolve automatically before play continues.");
 
         return TrimToLimit(string.Join("\n", lines), 900);
     }
@@ -8735,14 +8952,12 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         return
             "DND simplified gameplay (game mode)\n" +
             "- Natural play: say actions in plain language (for example: \"I attack Boss\", \"I cast at Boss\", \"I pass\")\n" +
+            "- Rolls are automatic (initiative, to-hit, and damage)\n" +
             "- `!state` (party + encounter summary)\n" +
             "- `!targets` (list enemies)\n" +
             "- `!attack <target>`\n" +
             "- `!cast <target>`\n" +
             "- `!pass`\n" +
-            "- `!roll initiative`\n" +
-            "- `!roll <rollId>`\n" +
-            "- `!rollall`\n" +
             "- `!ledger [n]`\n\n" +
             "Bang commands are still available, but plain-language actions are preferred.";
     }
@@ -9027,7 +9242,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         // Responses-based campaign generation should use the primary text model, not the vision model.
         // Some saved channel states still carry older vision defaults (e.g. gpt-5.2-nano) that are invalid.
         var model = ResolveModel(context, channelState);
-        return string.IsNullOrWhiteSpace(model) ? "gpt-5.2" : model.Trim();
+        return string.IsNullOrWhiteSpace(model) ? "gpt-6-astra" : model.Trim();
     }
 
     private static string ResolveResponsesApiKey(DiscordModuleContext context, InstructionGPT.ChannelState channelState)
@@ -9727,14 +9942,14 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 continue;
             }
 
-            var templateId = SlugifySegment(src.TemplateId);
+            var templateId = SlugifyOptionalSegment(src.TemplateId);
             if (string.IsNullOrWhiteSpace(templateId))
             {
-                templateId = SlugifySegment(src.Name);
+                templateId = SlugifyOptionalSegment(src.Name);
             }
             if (string.IsNullOrWhiteSpace(templateId))
             {
-                continue;
+                templateId = $"encounter-{normalized.Count + 1}";
             }
             if (!seen.Add(templateId))
             {
@@ -9742,11 +9957,12 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             }
 
             var boss = src.Boss ?? new ActorDto();
-            boss.Id = SlugifySegment(boss.Id);
-            if (string.IsNullOrWhiteSpace(boss.Id))
-            {
-                boss.Id = "boss";
-            }
+            var usedEnemyIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            boss.Id = MakeUniqueSlug(
+                firstChoice: SlugifyOptionalSegment(boss.Id),
+                used: usedEnemyIds,
+                fallback: SlugifyOptionalSegment(boss.Name),
+                defaultValue: "boss");
             boss.Name = string.IsNullOrWhiteSpace(boss.Name) ? "Boss" : boss.Name.Trim();
             boss.Description ??= string.Empty;
             boss.MaxHp = Math.Clamp(boss.MaxHp <= 0 ? 40 : boss.MaxHp, 1, 250);
@@ -9760,15 +9976,11 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 {
                     continue;
                 }
-                var id = SlugifySegment(add.Id);
-                if (string.IsNullOrWhiteSpace(id))
-                {
-                    id = SlugifySegment(add.Name);
-                }
-                if (string.IsNullOrWhiteSpace(id))
-                {
-                    continue;
-                }
+                var id = MakeUniqueSlug(
+                    firstChoice: SlugifyOptionalSegment(add.Id),
+                    used: usedEnemyIds,
+                    fallback: SlugifyOptionalSegment(add.Name),
+                    defaultValue: "add");
 
                 adds.Add(new ActorDto
                 {
@@ -11485,7 +11697,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
     {
         return channelState?.InstructionChat?.ChatBotState?.Parameters?.Model
                ?? context.DefaultParameters?.Model
-               ?? "gpt-4o-mini";
+               ?? "gpt-6-astra";
     }
 
     private static string NormalizeMode(string value)
@@ -11871,6 +12083,52 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         var normalized = Regex.Replace(value.Trim().ToLowerInvariant(), @"[^a-z0-9._-]+", "-");
         normalized = normalized.Trim('-');
         return string.IsNullOrWhiteSpace(normalized) ? "default" : normalized;
+    }
+
+    private static string SlugifyOptionalSegment(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        var normalized = Regex.Replace(value.Trim().ToLowerInvariant(), @"[^a-z0-9._-]+", "-");
+        normalized = normalized.Trim('-');
+        return normalized;
+    }
+
+    private static string MakeUniqueSlug(string firstChoice, HashSet<string> used, string fallback, string defaultValue)
+    {
+        used ??= new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var baseSlug = SlugifyOptionalSegment(firstChoice);
+        if (string.IsNullOrWhiteSpace(baseSlug))
+        {
+            baseSlug = SlugifyOptionalSegment(fallback);
+        }
+        if (string.IsNullOrWhiteSpace(baseSlug))
+        {
+            baseSlug = SlugifyOptionalSegment(defaultValue);
+        }
+        if (string.IsNullOrWhiteSpace(baseSlug))
+        {
+            baseSlug = "default";
+        }
+
+        if (used.Add(baseSlug))
+        {
+            return baseSlug;
+        }
+
+        for (var i = 2; i <= 999; i++)
+        {
+            var candidate = $"{baseSlug}-{i}";
+            if (used.Add(candidate))
+            {
+                return candidate;
+            }
+        }
+
+        return $"{baseSlug}-{Guid.NewGuid():N}"[..Math.Min(40, baseSlug.Length + 9)];
     }
 
     private static string StripBotMentions(string text, ulong botUserId)

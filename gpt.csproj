@@ -33,6 +33,10 @@
     <Compile Remove="tests/**/*.cs" />
   </ItemGroup>
   <ItemGroup>
+    <InternalsVisibleTo Include="GptCli.Tests" />
+    <InternalsVisibleTo Include="GptCli.Dnd.Tests" />
+  </ItemGroup>
+  <ItemGroup>
     <None Update="appsettings.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>

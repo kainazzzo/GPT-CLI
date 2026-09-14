@@ -172,4 +172,163 @@ public sealed class DndEncounterRunnerTests
         var fail = r.DeclareAttack("p1", "b1");
         Assert.False(fail.Ok);
     }
+
+    [Fact]
+    public void Pass_advances_turn_and_autoruns_enemy()
+    {
+        // Initiative: p1=15, b1=5. Enemy follow-up miss (to-hit 1).
+        var dice = new FixedDiceRoller(new[] { 15, 5, 1 });
+        var r = new DndEncounterRunner(BasicEncounter(), diceRoller: dice, clock: new FakeClock(DateTimeOffset.Parse("2026-02-08T00:00:00Z")));
+        r.StartEncounter();
+        r.RollAll();
+
+        var res = r.Pass("p1");
+        Assert.True(res.Ok);
+        Assert.Contains(res.NewLedgerEntries, e => e.Message.Contains("passes", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal("p1", res.State.CurrentActorId);
+        Assert.Equal(20, res.State.Actors["p1"].Hp);
+    }
+
+    [Fact]
+    public void DeclareAttack_unknown_actor_fails()
+    {
+        var r = ReadyCombat();
+        var err = r.DeclareAttack("nope", "b1");
+        Assert.False(err.Ok);
+        Assert.Contains("Actor", err.Error, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void DeclareAttack_not_actors_turn_fails()
+    {
+        var r = ReadyCombat();
+        var err = r.DeclareAttack("b1", "p1");
+        Assert.False(err.Ok);
+        Assert.Contains("turn", err.Error, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void DeclareAttack_unknown_target_fails()
+    {
+        var r = ReadyCombat();
+        var err = r.DeclareAttack("p1", "ghost");
+        Assert.False(err.Ok);
+        Assert.Contains("Target", err.Error, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Starting_hp_mp_of_zero_or_negative_default_to_max()
+    {
+        var party = new[]
+        {
+            new DndActorDefinition(
+                ActorId: "p1",
+                Name: "Hero",
+                Side: DndSide.Party,
+                IsBoss: false,
+                Stats: new DndStats(Str: 14, Def: 12, Dex: 12, SpellPower: 10, Luck: 10),
+                MaxHp: 20,
+                MaxMp: 10,
+                StartingHp: 0,
+                StartingMp: -1)
+        };
+
+        var boss = new DndActorDefinition(
+            ActorId: "b1",
+            Name: "Boss",
+            Side: DndSide.Enemy,
+            IsBoss: true,
+            Stats: new DndStats(Str: 12, Def: 10, Dex: 10, SpellPower: 10, Luck: 10),
+            MaxHp: 12,
+            MaxMp: 0,
+            StartingHp: 12,
+            StartingMp: 0);
+
+        var r = new DndEncounterRunner(
+            new DndEncounterDefinition(party, boss, Adds: Array.Empty<DndActorDefinition>()),
+            diceRoller: new FixedDiceRoller(new[] { 10, 5 }),
+            clock: new FakeClock(DateTimeOffset.Parse("2026-02-08T00:00:00Z")));
+
+        var res = r.StartEncounter();
+        Assert.True(res.Ok);
+        Assert.Equal(20, res.State.Actors["p1"].Hp);
+        Assert.Equal(10, res.State.Actors["p1"].Mp);
+    }
+
+    [Fact]
+    public void Adds_are_included_in_initiative()
+    {
+        var add = new DndActorDefinition(
+            ActorId: "a1",
+            Name: "Goblin",
+            Side: DndSide.Enemy,
+            IsBoss: false,
+            Stats: new DndStats(Str: 10, Def: 10, Dex: 10, SpellPower: 10, Luck: 10),
+            MaxHp: 6,
+            MaxMp: 0,
+            StartingHp: 6,
+            StartingMp: 0);
+
+        var enc = new DndEncounterDefinition(
+            BasicEncounter().Party,
+            BasicEncounter().Boss,
+            Adds: new[] { add });
+
+        var r = new DndEncounterRunner(
+            enc,
+            diceRoller: new FixedDiceRoller(new[] { 15, 5, 8 }),
+            clock: new FakeClock(DateTimeOffset.Parse("2026-02-08T00:00:00Z")));
+
+        var started = r.StartEncounter();
+        Assert.True(started.Ok);
+        Assert.Equal(3, started.PendingRolls.Count);
+
+        var res = r.RollAll();
+        Assert.True(res.Ok);
+        Assert.Contains("a1", res.State.TurnOrder);
+        Assert.True(res.State.Actors.ContainsKey("a1"));
+    }
+
+    [Fact]
+    public void Party_wipe_completes_encounter_as_defeat()
+    {
+        var party = new[]
+        {
+            new DndActorDefinition(
+                ActorId: "p1",
+                Name: "Hero",
+                Side: DndSide.Party,
+                IsBoss: false,
+                Stats: new DndStats(Str: 14, Def: 12, Dex: 12, SpellPower: 10, Luck: 10),
+                MaxHp: 20,
+                MaxMp: 10,
+                StartingHp: 1,
+                StartingMp: 10)
+        };
+
+        var enc = new DndEncounterDefinition(party, BasicEncounter().Boss, Adds: Array.Empty<DndActorDefinition>());
+        // Initiative p1 first, player miss, enemy crit + damage.
+        var dice = new FixedDiceRoller(new[] { 15, 5, 1, 20, 8, 8 });
+        var r = new DndEncounterRunner(enc, diceRoller: dice, clock: new FakeClock(DateTimeOffset.Parse("2026-02-08T00:00:00Z")));
+        r.StartEncounter();
+        r.RollAll();
+        r.DeclareAttack("p1", "b1");
+        var res = r.RollAll();
+
+        Assert.True(res.Ok);
+        Assert.True(res.State.IsCompleted);
+        Assert.Equal("defeat", res.State.CompletionReason);
+        Assert.False(res.State.Actors["p1"].IsAlive);
+    }
+
+    private static DndEncounterRunner ReadyCombat()
+    {
+        var r = new DndEncounterRunner(
+            BasicEncounter(),
+            diceRoller: new FixedDiceRoller(new[] { 15, 5 }),
+            clock: new FakeClock(DateTimeOffset.Parse("2026-02-08T00:00:00Z")));
+        r.StartEncounter();
+        r.RollAll();
+        return r;
+    }
 }

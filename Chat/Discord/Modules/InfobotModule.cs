@@ -894,7 +894,7 @@ public sealed class InfobotModule : FeatureModuleBase
         }
     }
 
-    private static bool TryParseInfobotSet(string content, out string term, out string fact)
+    internal static bool TryParseInfobotSet(string content, out string term, out string fact)
     {
         term = null;
         fact = null;
@@ -922,7 +922,7 @@ public sealed class InfobotModule : FeatureModuleBase
         return !string.IsNullOrWhiteSpace(term) && !string.IsNullOrWhiteSpace(fact);
     }
 
-    private static string NormalizeTerm(string term)
+    internal static string NormalizeTerm(string term)
     {
         if (string.IsNullOrWhiteSpace(term))
         {
@@ -935,7 +935,7 @@ public sealed class InfobotModule : FeatureModuleBase
         return normalized.Length == 0 ? null : normalized.ToLowerInvariant();
     }
 
-    private static string PreprocessInfobotQuestion(string message)
+    internal static string PreprocessInfobotQuestion(string message)
     {
         if (message == null)
         {
@@ -968,7 +968,7 @@ public sealed class InfobotModule : FeatureModuleBase
         return question;
     }
 
-    private static string NormalizeInfobotQuery(string input, ref bool finalQMark)
+    internal static string NormalizeInfobotQuery(string input, ref bool finalQMark)
     {
         if (string.IsNullOrWhiteSpace(input))
         {
@@ -1028,7 +1028,7 @@ public sealed class InfobotModule : FeatureModuleBase
         return query;
     }
 
-    private static string SwitchPerson(string input, string who, bool addressed, string botName)
+    internal static string SwitchPerson(string input, string who, bool addressed, string botName)
     {
         if (string.IsNullOrWhiteSpace(input))
         {
@@ -1059,7 +1059,7 @@ public sealed class InfobotModule : FeatureModuleBase
         return text;
     }
 
-    private static List<string> BuildInfobotQueries(string message, string who, bool addressed, string botName)
+    internal static List<string> BuildInfobotQueries(string message, string who, bool addressed, string botName)
     {
         var queries = new List<string>();
         if (string.IsNullOrWhiteSpace(message))
@@ -1123,7 +1123,7 @@ public sealed class InfobotModule : FeatureModuleBase
         return stats;
     }
 
-    private static FactoidMatchStats BuildMatchStatsFromEntries(IEnumerable<FactoidMatchEntry> matches)
+    internal static FactoidMatchStats BuildMatchStatsFromEntries(IEnumerable<FactoidMatchEntry> matches)
     {
         var stats = EnsureMatchStats(new FactoidMatchStats());
         if (matches == null)
@@ -1188,7 +1188,7 @@ public sealed class InfobotModule : FeatureModuleBase
             : new Dictionary<string, ulong>(dictionary, StringComparer.OrdinalIgnoreCase);
     }
 
-    private static List<FactoidEntry> FindMostSimilarFactoids(List<FactoidEntry> factoids, List<double> queryEmbedding, int limit, double threshold)
+    internal static List<FactoidEntry> FindMostSimilarFactoids(List<FactoidEntry> factoids, List<double> queryEmbedding, int limit, double threshold)
     {
         var matches = new List<(FactoidEntry Factoid, double Similarity)>(factoids.Count);
         foreach (var factoid in factoids)
@@ -1208,7 +1208,7 @@ public sealed class InfobotModule : FeatureModuleBase
         return matches.Take(limit).Select(x => x.Factoid).ToList();
     }
 
-    private static List<FactoidEntry> FilterFactoidsForChannel(IEnumerable<FactoidEntry> factoids, ulong guildId, ulong channelId)
+    internal static List<FactoidEntry> FilterFactoidsForChannel(IEnumerable<FactoidEntry> factoids, ulong guildId, ulong channelId)
     {
         if (factoids == null)
         {
@@ -1374,7 +1374,7 @@ public sealed class InfobotModule : FeatureModuleBase
         }
     }
 
-    private static async Task SaveFactoidsAsync(DiscordModuleContext context, InstructionGPT.ChannelState channel, List<FactoidEntry> entries)
+    internal static async Task SaveFactoidsAsync(DiscordModuleContext context, InstructionGPT.ChannelState channel, List<FactoidEntry> entries)
     {
         var channelDirectory = InstructionGPT.GetChannelDirectory(channel);
         Directory.CreateDirectory(channelDirectory);

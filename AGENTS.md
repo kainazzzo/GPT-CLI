@@ -14,7 +14,8 @@
 - `dotnet publish gpt.csproj -c Release -r linux-x64 -o $HOME/bin --self-contained true -p:PublishSingleFile=true`
   - Used by `linuxinstall.sh` for Linux installs.
 - `release.bat <version>` updates version fields in `gpt.csproj`, commits, tags, and pushes.
-- `test.bat` currently runs a publish command (no automated tests are wired here).
+- `dotnet test ./GPT-CLI.sln -c Release` runs the xUnit suites in `tests/`.
+- `test.bat` is a Windows publish helper, not the unit-test runner.
 
 ## Coding Style & Naming Conventions
 - Language: C# targeting `net10.0` (see `gpt.csproj`).
@@ -23,8 +24,9 @@
 - No repo-specific formatter is configured; avoid sweeping style reflows.
 
 ## Testing Guidelines
-- There is no dedicated test project or framework in this repository yet.
-- If you add tests, keep them in a `tests/` or `*.Tests` project and document how to run them.
+- Unit tests live under `tests/` (`GptCli.Tests` for core/Discord/OpenAI I/O, `GptCli.Dnd.Tests` for the combat engine, `GptCli.Modules.Tests` for example modules).
+- Run them with `dotnet test ./GPT-CLI.sln -c Release`.
+- Tests must not call live OpenAI or Discord APIs; use fakes (`FixedDiceRoller`, `FakeFeatureModule`, `FakeOpenAIService`, `StubHttpMessageHandler`).
 
 ## Commit & Pull Request Guidelines
 - Commit messages follow a Conventional Commits style (e.g., `feat(discord): …`, `refactor(state): …`).

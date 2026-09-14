@@ -7,7 +7,8 @@
         "GPT__CHUNKSIZE": "1536",
         "GPT__MAXTOKENS": "64000",
         "GPT__MAXCHATHISTORYLENGTH": "3072",
-        "GPT__MODEL": "gpt-5.2"
+        "GPT__MODEL": "gpt-6-astra",
+        "GPT__VISIONMODEL": "gpt-6-astra"
       },
       "workingDirectory": "C:\\projects\\GPT-CLI\\"
     }

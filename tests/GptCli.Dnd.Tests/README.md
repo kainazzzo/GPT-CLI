@@ -18,6 +18,9 @@ These tests exercise:
 - `Chat/Dnd/DndEncounterRunner.cs`: encounter state machine (initiative, turn order, actions, rolls, auto-running enemy turns, victory lock).
 - `Chat/Dnd/DndCampaignRunner.cs`: campaign wrapper (party HP/MP carrying into encounters, reconciliation back into campaign, failure state).
 - Persistence roundtrips for both runners (serialize to state and restore from state).
+- `DndRuleset` stat modifiers and derived to-hit/defense/initiative values.
+- `RandomDiceRoller` range and seed determinism.
+- `DndTurnResult.BuildNextRequest` phase mapping.
 
 ### Test Doubles
 
@@ -47,6 +50,11 @@ These tests exercise:
   - After the player resolves an action, enemy turns are simulated automatically, logged, and can reduce party HP.
 - `Victory_locks_engine_and_rejects_further_actions`
   - Killing the boss completes the encounter with `CompletionReason == "victory"` and further actions are rejected.
+- `Pass_advances_turn_and_autoruns_enemy`
+- `DeclareAttack_unknown_actor_fails` / `DeclareAttack_not_actors_turn_fails` / `DeclareAttack_unknown_target_fails`
+- `Starting_hp_mp_of_zero_or_negative_default_to_max`
+- `Adds_are_included_in_initiative`
+- `Party_wipe_completes_encounter_as_defeat`
 
 ### `DndCampaignRunnerTests` (`tests/GptCli.Dnd.Tests/DndCampaignRunnerTests.cs`)
 
@@ -56,6 +64,9 @@ These tests exercise:
   - Encounter results (including auto-run enemy turns) reconcile back into the campaign party state (e.g., HP decreases).
 - `Party_wipe_marks_campaign_failed_and_blocks_actions_until_cleared`
   - If the party is wiped, the campaign is marked failed (`FailureReason == "defeat"`), actions are blocked, and `LongRest(clearFailure: true)` clears failure and restores HP.
+- `StartEncounter_unknown_template_fails`
+- `LongRest_without_clearFailure_restores_hp_but_keeps_failed`
+- `Pass_reconciles_party_hp_mp_when_enemy_misses`
 
 ### `DndPersistenceRoundtripTests` (`tests/GptCli.Dnd.Tests/DndPersistenceRoundtripTests.cs`)
 

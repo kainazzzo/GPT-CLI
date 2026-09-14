@@ -562,7 +562,7 @@ public sealed class WelcomeOnboardingModule : FeatureModuleBase
         return $"Rule moved from #{from.Value} to #{to.Value}.";
     }
 
-    private static string ListRules(InstructionGPT.WelcomeState welcome)
+    internal static string ListRules(InstructionGPT.WelcomeState welcome)
     {
         if (welcome.Rules.Count == 0)
         {
@@ -707,7 +707,7 @@ public sealed class WelcomeOnboardingModule : FeatureModuleBase
         return $"Rules posted in <#{welcome.WelcomeChannelId.Value}>.";
     }
 
-    private static string BuildRulesText(InstructionGPT.WelcomeState welcome)
+    internal static string BuildRulesText(InstructionGPT.WelcomeState welcome)
     {
         if (welcome.Rules.Count == 0)
         {
@@ -743,7 +743,7 @@ public sealed class WelcomeOnboardingModule : FeatureModuleBase
         return updated ? "Acknowledged. Checking your onboarding status now." : "No acknowledge validation configured.";
     }
 
-    private static bool ApplyAcknowledgeValidation(InstructionGPT.WelcomeState welcome, InstructionGPT.WelcomeUserState userState)
+    internal static bool ApplyAcknowledgeValidation(InstructionGPT.WelcomeState welcome, InstructionGPT.WelcomeUserState userState)
     {
         var updated = false;
         foreach (var validation in welcome.Validations.Where(v => v.Type == "acknowledge"))
@@ -757,7 +757,7 @@ public sealed class WelcomeOnboardingModule : FeatureModuleBase
         return updated;
     }
 
-    private static bool ApplyReactionValidation(InstructionGPT.WelcomeState welcome, InstructionGPT.WelcomeUserState userState, string emojiName)
+    internal static bool ApplyReactionValidation(InstructionGPT.WelcomeState welcome, InstructionGPT.WelcomeUserState userState, string emojiName)
     {
         if (string.IsNullOrWhiteSpace(emojiName))
         {
@@ -779,7 +779,7 @@ public sealed class WelcomeOnboardingModule : FeatureModuleBase
         return updated;
     }
 
-    private static bool ApplyPhraseValidation(InstructionGPT.WelcomeState welcome, InstructionGPT.WelcomeUserState userState, string content)
+    internal static bool ApplyPhraseValidation(InstructionGPT.WelcomeState welcome, InstructionGPT.WelcomeUserState userState, string content)
     {
         if (string.IsNullOrWhiteSpace(content))
         {
@@ -802,7 +802,7 @@ public sealed class WelcomeOnboardingModule : FeatureModuleBase
         return updated;
     }
 
-    private static InstructionGPT.WelcomeUserState GetOrCreateUserState(InstructionGPT.WelcomeState welcome, ulong userId)
+    internal static InstructionGPT.WelcomeUserState GetOrCreateUserState(InstructionGPT.WelcomeState welcome, ulong userId)
     {
         welcome.Users ??= new Dictionary<ulong, InstructionGPT.WelcomeUserState>();
         if (!welcome.Users.TryGetValue(userId, out var userState))
@@ -891,7 +891,7 @@ public sealed class WelcomeOnboardingModule : FeatureModuleBase
         }
     }
 
-    private static bool ShouldNudge(InstructionGPT.WelcomeUserState userState)
+    internal static bool ShouldNudge(InstructionGPT.WelcomeUserState userState)
     {
         if (!userState.LastNudgeUtc.HasValue)
         {

@@ -244,7 +244,7 @@ public sealed class PollModule : FeatureModuleBase
         return new PollRequest(option.Name, args.ToArray());
     }
 
-    private static bool TryParseMessageCommand(string content, out PollRequest request)
+    internal static bool TryParseMessageCommand(string content, out PollRequest request)
     {
         request = null;
         var trimmed = content.Trim();
@@ -266,7 +266,7 @@ public sealed class PollModule : FeatureModuleBase
         return true;
     }
 
-    private static PollActionResult ExecutePollAction(DiscordModuleContext context, InstructionGPT.ChannelState channelState, ulong userId, PollRequest request)
+    internal static PollActionResult ExecutePollAction(DiscordModuleContext context, InstructionGPT.ChannelState channelState, ulong userId, PollRequest request)
     {
         channelState.Polls ??= new InstructionGPT.PollState();
         var polls = channelState.Polls.Polls;
@@ -292,7 +292,7 @@ public sealed class PollModule : FeatureModuleBase
         }
     }
 
-    private static PollActionResult CreatePoll(InstructionGPT.ChannelState channelState, ulong userId, string[] args)
+    internal static PollActionResult CreatePoll(InstructionGPT.ChannelState channelState, ulong userId, string[] args)
     {
         if (args.Length < 2)
         {
@@ -322,7 +322,7 @@ public sealed class PollModule : FeatureModuleBase
         return new PollActionResult($"Poll #{pollId} created.", false, details);
     }
 
-    private static PollActionResult VotePoll(InstructionGPT.ChannelState channelState, ulong userId, string[] args)
+    internal static PollActionResult VotePoll(InstructionGPT.ChannelState channelState, ulong userId, string[] args)
     {
         if (!TryParseIntArg(args, 0, out var pollId) || !TryParseIntArg(args, 1, out var optionIndex))
         {
@@ -351,7 +351,7 @@ public sealed class PollModule : FeatureModuleBase
         return new PollActionResult($"Vote recorded for poll #{pollId}.", false, details);
     }
 
-    private static PollActionResult ListPolls(InstructionGPT.ChannelState channelState)
+    internal static PollActionResult ListPolls(InstructionGPT.ChannelState channelState)
     {
         if (channelState.Polls?.Polls == null || channelState.Polls.Polls.Count == 0)
         {
@@ -383,7 +383,7 @@ public sealed class PollModule : FeatureModuleBase
         return new PollActionResult(text, true);
     }
 
-    private static PollActionResult ClosePoll(InstructionGPT.ChannelState channelState, string[] args)
+    internal static PollActionResult ClosePoll(InstructionGPT.ChannelState channelState, string[] args)
     {
         if (!TryParseIntArg(args, 0, out var pollId))
         {
@@ -401,7 +401,7 @@ public sealed class PollModule : FeatureModuleBase
         return new PollActionResult($"Poll #{pollId} closed.", false, details);
     }
 
-    private static PollActionResult DeletePoll(InstructionGPT.ChannelState channelState, string[] args)
+    internal static PollActionResult DeletePoll(InstructionGPT.ChannelState channelState, string[] args)
     {
         if (!TryParseIntArg(args, 0, out var pollId))
         {
@@ -418,7 +418,7 @@ public sealed class PollModule : FeatureModuleBase
         return new PollActionResult($"Poll #{pollId} deleted.", false);
     }
 
-    private static PollActionResult ShowResults(InstructionGPT.ChannelState channelState, string[] args)
+    internal static PollActionResult ShowResults(InstructionGPT.ChannelState channelState, string[] args)
     {
         if (!TryParseIntArg(args, 0, out var pollId))
         {
@@ -455,7 +455,7 @@ public sealed class PollModule : FeatureModuleBase
         return channelState.Polls?.Polls?.FirstOrDefault(p => p.Id == pollId);
     }
 
-    private static List<string> SplitOptions(string input)
+    internal static List<string> SplitOptions(string input)
     {
         return input.Split(',', StringSplitOptions.RemoveEmptyEntries)
             .Select(opt => opt.Trim())
@@ -562,7 +562,7 @@ public sealed class PollModule : FeatureModuleBase
         }
     }
 
-    private sealed record PollRequest(string Command, string[] Args);
+    internal sealed record PollRequest(string Command, string[] Args);
 
-    private sealed record PollActionResult(string PlainText, bool IsListResponse, string Details = null);
+    internal sealed record PollActionResult(string PlainText, bool IsListResponse, string Details = null);
 }

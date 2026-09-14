@@ -188,7 +188,7 @@ public sealed class PinboardModule : FeatureModuleBase
         return new PinRequest(option.Name, args.ToArray());
     }
 
-    private static bool TryParseMessageCommand(string content, out PinRequest request)
+    internal static bool TryParseMessageCommand(string content, out PinRequest request)
     {
         request = null;
         var trimmed = content.Trim();
@@ -210,7 +210,7 @@ public sealed class PinboardModule : FeatureModuleBase
         return true;
     }
 
-    private static async Task<string> ExecutePinActionAsync(
+    internal static async Task<string> ExecutePinActionAsync(
         DiscordModuleContext context,
         InstructionGPT.ChannelState channelState,
         IMessageChannel channel,
@@ -274,7 +274,7 @@ public sealed class PinboardModule : FeatureModuleBase
         return $"Pinned #{entry.Id}: {BuildMessageLink(context, channelState, messageId)}";
     }
 
-    private static string RemovePin(InstructionGPT.ChannelState channelState, string[] args)
+    internal static string RemovePin(InstructionGPT.ChannelState channelState, string[] args)
     {
         if (!TryParseIntArg(args, 0, out var pinId))
         {
@@ -291,7 +291,7 @@ public sealed class PinboardModule : FeatureModuleBase
         return $"Pin #{pinId} removed.";
     }
 
-    private static string ListPins(DiscordModuleContext context, InstructionGPT.ChannelState channelState, string[] args)
+    internal static string ListPins(DiscordModuleContext context, InstructionGPT.ChannelState channelState, string[] args)
     {
         if (channelState.Pinboard.Pins.Count == 0)
         {
@@ -313,7 +313,7 @@ public sealed class PinboardModule : FeatureModuleBase
         return string.Join("\n", lines);
     }
 
-    private static string SearchPins(DiscordModuleContext context, InstructionGPT.ChannelState channelState, string[] args)
+    internal static string SearchPins(DiscordModuleContext context, InstructionGPT.ChannelState channelState, string[] args)
     {
         if (args.Length == 0)
         {
@@ -380,7 +380,7 @@ public sealed class PinboardModule : FeatureModuleBase
         return channelState.Pinboard.Pins.Max(p => p.Id) + 1;
     }
 
-    private static bool TryParseMessageId(string token, out ulong messageId, out ulong channelId)
+    internal static bool TryParseMessageId(string token, out ulong messageId, out ulong channelId)
     {
         messageId = 0;
         channelId = 0;
@@ -465,5 +465,5 @@ public sealed class PinboardModule : FeatureModuleBase
         }
     }
 
-    private sealed record PinRequest(string Command, string[] Args);
+    internal sealed record PinRequest(string Command, string[] Args);
 }

@@ -12,6 +12,16 @@ You will need an OpenAI API key. [Sign up](https://platform.openai.com) if you h
 
 If you build from source, you’ll need the .NET 10 SDK. The published binaries can be self-contained.
 
+## Tests
+
+xUnit suites live in `tests/`. From the repo root:
+
+```bash
+dotnet test ./GPT-CLI.sln -c Release
+```
+
+These cover embeddings, OpenAI request mapping (stubbed HTTP), hosted-bot internals, Discord helper logic, example modules, and the DnD combat/campaign engine. They do not require an API key or Discord token and never log into Discord.
+
 ## Configuration
 
 GPT-CLI uses standard .NET configuration sources (appsettings.json, environment variables, and command-line args). Most settings live under the `GPT` section, with OpenAI credentials under `OpenAI`.
@@ -28,8 +38,8 @@ Create an `appsettings.json` in the working directory:
     "ApiKey": "sk-optional-override",
     "Mode": "Completion",
     "Prompt": "generate a hello world python script",
-    "Model": "gpt-5.2",
-    "VisionModel": "gpt-5.2-nano",
+    "Model": "gpt-6-astra",
+    "VisionModel": "gpt-6-astra",
     "MaxTokens": 64000,
     "ChunkSize": 1536,
     "MaxChatHistoryLength": 4096,
@@ -46,8 +56,8 @@ Notes:
 - Do not commit real API keys or bot tokens.
 
 Common `GPT` settings:
-- `Model` (e.g. `gpt-5.2`)
-- `VisionModel` (e.g. `gpt-5.2-nano`, used for image analysis)
+- `Model` (e.g. `gpt-6-astra`, OpenAI's current flagship)
+- `VisionModel` (e.g. `gpt-6-astra`, used for image analysis; the flagship accepts image input)
 - `Prompt` (Completion mode only)
 - `MaxTokens`, `Temperature`, `TopP`
 - `ChunkSize`, `ClosestMatchLimit` (embedding behavior)
@@ -61,8 +71,8 @@ Environment variable equivalents use double underscores:
 OPENAI__APIKEY="sk-your-apikey-here" \
 GPT__MODE="Completion" \
 GPT__PROMPT="generate a hello world python script" \
-GPT__MODEL="gpt-5.2" \
-GPT__VISIONMODEL="gpt-5.2-nano" \
+GPT__MODEL="gpt-6-astra" \
+GPT__VISIONMODEL="gpt-6-astra" \
 gpt > hello.py
 ```
 
@@ -72,8 +82,8 @@ Discord bot example:
 OPENAI__APIKEY="sk-your-apikey-here" \
 GPT__MODE="Discord" \
 GPT__BOTTOKEN="your-discord-bot-token" \
-GPT__MODEL="gpt-5.2" \
-GPT__VISIONMODEL="gpt-5.2-nano" \
+GPT__MODEL="gpt-6-astra" \
+GPT__VISIONMODEL="gpt-6-astra" \
 gpt
 ```
 

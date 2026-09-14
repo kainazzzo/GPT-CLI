@@ -39,6 +39,18 @@ public sealed class DiscordModulePipeline
         return new DiscordModulePipeline(context, ordered, report, log);
     }
 
+    internal static DiscordModulePipeline CreateForTests(
+        IReadOnlyList<IFeatureModule> modules,
+        DiscordModuleContext context = null,
+        Action<string> log = null)
+    {
+        log ??= static _ => { };
+        var report = new ModuleDiscoveryReport();
+        var ordered = OrderModules(modules ?? Array.Empty<IFeatureModule>(), log);
+        report.LoadedModuleIds = ordered.Select(m => m.Id).ToList();
+        return new DiscordModulePipeline(context, ordered, report, log);
+    }
+
     public async Task InitializeAsync(CancellationToken cancellationToken)
     {
         foreach (var module in _modules)
@@ -385,7 +397,7 @@ public sealed class DiscordModulePipeline
         }
     }
 
-    private static IReadOnlyList<IFeatureModule> OrderModules(IEnumerable<IFeatureModule> modules, Action<string> log)
+    internal static IReadOnlyList<IFeatureModule> OrderModules(IEnumerable<IFeatureModule> modules, Action<string> log)
     {
         var moduleList = modules.ToList();
         var byId = new Dictionary<string, IFeatureModule>(StringComparer.OrdinalIgnoreCase);

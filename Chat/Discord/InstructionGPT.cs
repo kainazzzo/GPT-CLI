@@ -24,9 +24,15 @@ namespace GPT.CLI.Chat.Discord;
 
 public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 {
+    private const int DefaultPromptDebounceSeconds = 5;
+    private const int MaxPromptDebounceSeconds = 300;
+
     private readonly IServiceProvider _services;
     private readonly IHostApplicationLifetime _appLifetime;
     private readonly ConcurrentDictionary<ulong, HashSet<string>> _imageResponseMap = new();
+    private readonly Dictionary<(ulong ChannelId, ulong UserId), DateTimeOffset> _lastPromptByUser = new();
+    private readonly object _promptDebounceLock = new();
+    private readonly int _defaultPromptDebounceSeconds;
 	private DiscordModulePipeline _modulePipeline;
 	private DiscordModuleContext _moduleContext;
 	private CancellationToken _shutdownToken;
@@ -42,6 +48,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 	    {
 	        _services = services;
             _appLifetime = appLifetime;
+            _defaultPromptDebounceSeconds = ResolveConfiguredPromptDebounceSeconds(configuration);
             _appLifetime.ApplicationStopping.Register(() =>
             {
                 Interlocked.Exchange(ref _stopping, 1);
@@ -99,8 +106,11 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
         [JsonPropertyName("learning-personality-prompt")]
         public string LearningPersonalityPrompt { get; set; }
 
-        [JsonPropertyName("factoid-similarity-threshold")]
-        public double FactoidSimilarityThreshold { get; set; } = 0.80;
+	        [JsonPropertyName("factoid-similarity-threshold")]
+	        public double FactoidSimilarityThreshold { get; set; } = 0.80;
+
+            [JsonPropertyName("prompt-debounce-seconds")]
+            public int PromptDebounceSeconds { get; set; } = DefaultPromptDebounceSeconds;
 
 	        [JsonPropertyName("casino-enabled")]
 	        public bool CasinoEnabled { get; set; }
@@ -1016,6 +1026,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
             channelState.InstructionChat.ChatBotState.Parameters.BotToken = null;
             channelState.Options ??= new ChannelOptions();
             channelState.Options.LearningPersonalityPrompt ??= DefaultParameters.LearningPersonalityPrompt;
+            channelState.Options.PromptDebounceSeconds = NormalizePromptDebounceSeconds(channelState.Options.PromptDebounceSeconds);
 
             if (!hasToken)
             {
@@ -1044,7 +1055,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
         }
     }
 
-    private async Task SaveCachedChannelState(ulong channelId)
+    internal async Task SaveCachedChannelState(ulong channelId)
     {
         if (!ChannelBots.TryGetValue(channelId, out var channelState))
         {
@@ -1078,7 +1089,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
     }
 
     // Method to write state to a Stream in JSON format
-    private async Task WriteAsync(ulong channelId, Stream stream)
+    internal async Task WriteAsync(ulong channelId, Stream stream)
     {
         if (ChannelBots.TryGetValue(channelId, out var channelState))
         {
@@ -1092,7 +1103,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
     }
 
     // Method to read state from a Stream in JSON format
-    private async Task<ChannelState> ReadAsync(ulong channelId, Stream stream)
+    internal async Task<ChannelState> ReadAsync(ulong channelId, Stream stream)
     {
         try
         {
@@ -1138,6 +1149,11 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
         // Handle the received message here
         // ...
         var channel = ChannelBots.GetOrAdd(message.Channel.Id, _ => InitializeChannel(message.Channel));
+        channel.Options ??= new ChannelOptions
+        {
+            LearningPersonalityPrompt = DefaultParameters.LearningPersonalityPrompt,
+            PromptDebounceSeconds = _defaultPromptDebounceSeconds
+        };
         if (message.Channel is IGuildChannel guildChannel)
         {
             EnsureChannelStateMetadata(channel, guildChannel);
@@ -1152,9 +1168,28 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
         var isTagged = message.MentionedUsers.Any(user => user.Id == Client.CurrentUser.Id);
         var isDirectMessage = message.Channel is IPrivateChannel;
         var shouldRespond = isTagged || isDirectMessage;
+        channel.Options.PromptDebounceSeconds = NormalizePromptDebounceSeconds(channel.Options.PromptDebounceSeconds);
 
-        // Mention-based /gptcli set tool routing (LLM function calling).
-        if (shouldRespond && !string.IsNullOrWhiteSpace(message.Content))
+        if (channel.Options.Enabled && shouldRespond && !string.IsNullOrWhiteSpace(message.Content))
+        {
+            if (!TryAcquirePromptDebounceSlot(message.Channel.Id, message.Author.Id, channel.Options.PromptDebounceSeconds, out var retryAfter))
+            {
+                var waitSeconds = Math.Max(1, (int)Math.Ceiling(retryAfter.TotalSeconds));
+                try
+                {
+                    await message.Channel.SendMessageAsync($"<@{message.Author.Id}> Please wait {waitSeconds}s before sending another prompt.");
+                }
+                catch
+                {
+                    // Best effort only.
+                }
+
+                return;
+            }
+        }
+
+        // Mention-based tool routing (LLM function calling) only when the channel bot is enabled.
+        if (channel.Options.Enabled && shouldRespond && !string.IsNullOrWhiteSpace(message.Content))
         {
             var stripped = StripBotMentions(message.Content, Client.CurrentUser.Id).Trim();
             var handled = await TryHandleMentionedToolCallsAsync(message, channel, stripped);
@@ -1172,7 +1207,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 
         if (!channel.Options.Enabled)
         {
-            // When disabled, only allow mention-based settings changes (handled above).
+            // When disabled, do not run mention-based routing or normal chat responses.
             return;
         }
 
@@ -1380,7 +1415,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
         await SaveCachedChannelState(message.Channel.Id);
     }
 
-	    private static string StripBotMentions(string content, ulong botUserId)
+	    internal static string StripBotMentions(string content, ulong botUserId)
 	    {
 	        if (string.IsNullOrWhiteSpace(content))
 	        {
@@ -1395,7 +1430,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 	            .Trim();
 	    }
 
-	    private static string NormalizeModuleId(string moduleId)
+	    internal static string NormalizeModuleId(string moduleId)
 	    {
 	        var key = (moduleId ?? string.Empty).Trim().ToLowerInvariant();
 	        // Back-compat aliases.
@@ -1405,6 +1440,73 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 	            _ => key
 	        };
 	    }
+
+    internal static int ResolveConfiguredPromptDebounceSeconds(IConfiguration configuration)
+    {
+        var raw = configuration?["GPT:PromptDebounceSeconds"];
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            raw = configuration?["Discord:PromptDebounceSeconds"];
+        }
+
+        if (!int.TryParse(raw, out var value))
+        {
+            value = DefaultPromptDebounceSeconds;
+        }
+
+        return NormalizePromptDebounceSeconds(value);
+    }
+
+    internal static int NormalizePromptDebounceSeconds(int value)
+    {
+        if (value < 0)
+        {
+            return 0;
+        }
+
+        return Math.Clamp(value, 0, MaxPromptDebounceSeconds);
+    }
+
+    internal bool TryAcquirePromptDebounceSlot(ulong channelId, ulong userId, int debounceSeconds, out TimeSpan retryAfter)
+    {
+        retryAfter = TimeSpan.Zero;
+        if (debounceSeconds <= 0)
+        {
+            return true;
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        var debounce = TimeSpan.FromSeconds(debounceSeconds);
+        lock (_promptDebounceLock)
+        {
+            var key = (channelId, userId);
+            if (_lastPromptByUser.TryGetValue(key, out var last))
+            {
+                var elapsed = now - last;
+                if (elapsed < debounce)
+                {
+                    retryAfter = debounce - elapsed;
+                    return false;
+                }
+            }
+
+            _lastPromptByUser[key] = now;
+            if (_lastPromptByUser.Count > 10000)
+            {
+                var cutoff = now.AddHours(-1);
+                var staleKeys = _lastPromptByUser
+                    .Where(kvp => kvp.Value < cutoff)
+                    .Select(kvp => kvp.Key)
+                    .ToList();
+                foreach (var stale in staleKeys)
+                {
+                    _lastPromptByUser.Remove(stale);
+                }
+            }
+        }
+
+        return true;
+    }
 
 	    public static bool IsModuleEnabled(ChannelState channelState, string moduleId)
 	    {
@@ -1466,7 +1568,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 		        }
 		    }
 
-	    private static bool IsFunctionAvailable(ChannelState channelState, GptCliFunction fn)
+	    internal static bool IsFunctionAvailable(ChannelState channelState, GptCliFunction fn)
 	    {
 	        if (fn == null)
 	        {
@@ -1637,11 +1739,16 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 	    }
 
 
-	    private async Task<bool> TryHandleMentionedToolCallsAsync(SocketMessage message, ChannelState channelState, string strippedContent)
-	    {
-	        var requestId = Guid.NewGuid().ToString("n")[..8];
-	        try
-	        {
+    private async Task<bool> TryHandleMentionedToolCallsAsync(SocketMessage message, ChannelState channelState, string strippedContent)
+    {
+        if (channelState?.Options?.Enabled != true)
+        {
+            return false;
+        }
+
+        var requestId = Guid.NewGuid().ToString("n")[..8];
+        try
+        {
 	            await Console.Out.WriteLineAsync(
 	                $"[tools:{requestId}] mention-tool-router start channel={message.Channel.Id} user={message.Author.Id} model={channelState?.InstructionChat?.ChatBotState?.Parameters?.Model} text={NormalizeSingleLine(strippedContent)}");
 	        }
@@ -1946,7 +2053,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 
     private const double ImageSimilarityThreshold = 0.80;
 
-    private ChannelState InitializeChannel(ulong channelId)
+    internal ChannelState InitializeChannel(ulong channelId)
     {
         var channel = Client.GetChannel(channelId);
         if (channel != null)
@@ -2002,7 +2109,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
         return channelState;
     }
 
-    private ChannelState CreateBaseChannelState(ulong channelId)
+    internal ChannelState CreateBaseChannelState(ulong channelId)
     {
         GptOptions CreateChannelParameters()
         {
@@ -2028,7 +2135,8 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
             },
             Options = new()
             {
-                LearningPersonalityPrompt = DefaultParameters.LearningPersonalityPrompt
+                LearningPersonalityPrompt = DefaultParameters.LearningPersonalityPrompt,
+                PromptDebounceSeconds = _defaultPromptDebounceSeconds
             },
             CasinoBalances = new(),
             Welcome = new(),
@@ -2661,7 +2769,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
         return (true, guildId);
     }
 
-    private bool IsChannelGuildMatch(ChannelState channelState, IMessageChannel channel, string context)
+    internal bool IsChannelGuildMatch(ChannelState channelState, IMessageChannel channel, string context)
     {
         if (channelState == null || channel == null)
         {
@@ -4036,6 +4144,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
                 choices: new[] { new GptCliParamChoice("Explicit", "Explicit"), new GptCliParamChoice("All", "All") }),
             BuildCoreSetOption("max-chat-history-length", GptCliParamType.Integer, "Set the maximum chat history length.", ExecuteSetMaxChatHistoryAsync, minInt: 100),
             BuildCoreSetOption("max-tokens", GptCliParamType.Integer, "Set the maximum tokens.", ExecuteSetMaxTokensAsync, minInt: 50),
+            BuildCoreSetOption("prompt-debounce-seconds", GptCliParamType.Integer, "Set per-user prompt debounce in seconds (0 disables).", ExecuteSetPromptDebounceSecondsAsync, minInt: 0, maxInt: MaxPromptDebounceSeconds),
             BuildCoreSetOption("model", GptCliParamType.String, "Set the model name.", ExecuteSetModelAsync)
 	        };
 	    }
@@ -4121,6 +4230,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
         string description,
         Func<GptCliExecutionContext, string, CancellationToken, Task<GptCliExecutionResult>> executor,
         int? minInt = null,
+        int? maxInt = null,
         IReadOnlyList<GptCliParamChoice> choices = null)
     {
         return new GptCliFunction
@@ -4130,7 +4240,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
             Slash = new GptCliSlashBinding(GptCliSlashBindingKind.SetOption, "set", "Settings", SetOptionName: optionName),
             Parameters = new[]
             {
-                new GptCliParamSpec("value", type, "Value", Required: true, MinInt: minInt, Choices: choices)
+                new GptCliParamSpec("value", type, "Value", Required: true, MinInt: minInt, MaxInt: maxInt, Choices: choices)
             },
             ExecuteAsync = executor
         };
@@ -5075,6 +5185,23 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 
         ctx.ChannelState.InstructionChat.ChatBotState.Parameters.MaxTokens = value;
         return Task.FromResult(new GptCliExecutionResult(true, $"max-tokens = {value}"));
+    }
+
+    private Task<GptCliExecutionResult> ExecuteSetPromptDebounceSecondsAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)
+    {
+        if (!GptCliFunction.TryGetJsonProperty(argsJson, "value", out var valueEl) || !valueEl.TryGetInt32(out var value))
+        {
+            return Task.FromResult(new GptCliExecutionResult(true, "prompt-debounce-seconds expects integer >= 0.", false));
+        }
+
+        if (value < 0 || value > MaxPromptDebounceSeconds)
+        {
+            return Task.FromResult(new GptCliExecutionResult(true, $"prompt-debounce-seconds expects integer between 0 and {MaxPromptDebounceSeconds}.", false));
+        }
+
+        ctx.ChannelState.Options ??= new ChannelOptions();
+        ctx.ChannelState.Options.PromptDebounceSeconds = value;
+        return Task.FromResult(new GptCliExecutionResult(true, $"prompt-debounce-seconds = {value}"));
     }
 
     private Task<GptCliExecutionResult> ExecuteSetModelAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)

@@ -19,6 +19,8 @@ public sealed class CasinoGameModule : FeatureModuleBase
     private const int DefaultDiceSides = 6;
     private const int MaxDiceSides = 100;
 
+    internal static Random Rng { get; set; } = Rng;
+
     private static readonly string DealerSystemPrompt =
         "You are a friendly casino dealer. Use the provided game results verbatim. " +
         "Keep the reply short (1-3 sentences), upbeat, and clear. Do not change any numbers. " +
@@ -178,7 +180,7 @@ public sealed class CasinoGameModule : FeatureModuleBase
             .WithType(ApplicationCommandOptionType.Boolean);
     }
 
-    private static bool TryParseMessageCommand(string content, out GameRequest request)
+    internal static bool TryParseMessageCommand(string content, out GameRequest request)
     {
         request = null;
         var trimmed = content.Trim();
@@ -401,7 +403,7 @@ public sealed class CasinoGameModule : FeatureModuleBase
         return new GameRequest(gameType, args.ToArray());
     }
 
-    private static GameResult ExecuteGame(DiscordModuleContext context, InstructionGPT.ChannelState channelState, ulong userId, GameRequest request)
+    internal static GameResult ExecuteGame(DiscordModuleContext context, InstructionGPT.ChannelState channelState, ulong userId, GameRequest request)
     {
         channelState.CasinoBalances ??= new Dictionary<ulong, decimal>();
         var casinoEnabled = channelState.Options.CasinoEnabled;
@@ -476,14 +478,14 @@ public sealed class CasinoGameModule : FeatureModuleBase
                 bet = parsedBet;
             }
         }
-        var flip = Random.Shared.Next(2) == 0 ? "heads" : "tails";
+        var flip = Rng.Next(2) == 0 ? "heads" : "tails";
         var outcome = $"Coin landed on {flip}.";
         var net = ComputeNet(guess != null, guess == flip, bet, bet);
         var details = guess == null ? "No guess placed." : $"Guess: {guess}.";
         return new GameResult("Coinflip", outcome, bet, net, details);
     }
 
-    private static GameResult RunPurchase(InstructionGPT.ChannelState channelState, ulong userId, string[] args)
+    internal static GameResult RunPurchase(InstructionGPT.ChannelState channelState, ulong userId, string[] args)
     {
         var amount = 0m;
         if (args.Length > 0 && TryParseDecimal(args[0], out var parsed) && parsed > 0)
@@ -602,7 +604,7 @@ public sealed class CasinoGameModule : FeatureModuleBase
             guess = numbers[0];
         }
 
-        var roll = Random.Shared.Next(1, sides + 1);
+        var roll = Rng.Next(1, sides + 1);
         var outcome = $"Rolled a {roll} on a d{sides}.";
         var winAmount = bet * Math.Max(1, sides - 1);
         var net = ComputeNet(guess.HasValue, guess == roll, bet, winAmount);
@@ -655,7 +657,7 @@ public sealed class CasinoGameModule : FeatureModuleBase
             }
         }
 
-        var number = Random.Shared.Next(0, 37);
+        var number = Rng.Next(0, 37);
         var color = number == 0 ? "green" : (RouletteRed.Contains(number) ? "red" : "black");
 
         var outcome = $"Roulette landed on {number} ({color}).";
@@ -670,9 +672,9 @@ public sealed class CasinoGameModule : FeatureModuleBase
     private static GameResult RunSlots(string[] args)
     {
         var bet = args.Length > 0 ? ParseBet(args[0]) : DefaultBet;
-        var reel1 = SlotSymbols[Random.Shared.Next(SlotSymbols.Length)];
-        var reel2 = SlotSymbols[Random.Shared.Next(SlotSymbols.Length)];
-        var reel3 = SlotSymbols[Random.Shared.Next(SlotSymbols.Length)];
+        var reel1 = SlotSymbols[Rng.Next(SlotSymbols.Length)];
+        var reel2 = SlotSymbols[Rng.Next(SlotSymbols.Length)];
+        var reel3 = SlotSymbols[Rng.Next(SlotSymbols.Length)];
 
         var outcome = $"Slots: [{reel1} | {reel2} | {reel3}]";
         var matches = CountMatches(reel1, reel2, reel3);
@@ -769,13 +771,13 @@ public sealed class CasinoGameModule : FeatureModuleBase
         });
     }
 
-    private static decimal GetBalance(InstructionGPT.ChannelState channelState, ulong userId)
+    internal static decimal GetBalance(InstructionGPT.ChannelState channelState, ulong userId)
     {
         channelState.CasinoBalances ??= new Dictionary<ulong, decimal>();
         return channelState.CasinoBalances.TryGetValue(userId, out var balance) ? balance : 0m;
     }
 
-    private static void SetBalance(InstructionGPT.ChannelState channelState, ulong userId, decimal balance)
+    internal static void SetBalance(InstructionGPT.ChannelState channelState, ulong userId, decimal balance)
     {
         channelState.CasinoBalances ??= new Dictionary<ulong, decimal>();
         channelState.CasinoBalances[userId] = Math.Max(0m, balance);
@@ -919,7 +921,7 @@ public sealed class CasinoGameModule : FeatureModuleBase
         return fallback?.Username ?? $"User {userId}";
     }
 
-    private static string NormalizeHeadsTails(string value)
+    internal static string NormalizeHeadsTails(string value)
     {
         var cleaned = value.Trim().ToLowerInvariant();
         if (cleaned is "heads" or "head")
@@ -933,7 +935,7 @@ public sealed class CasinoGameModule : FeatureModuleBase
         return null;
     }
 
-    private static decimal ParseBet(string value)
+    internal static decimal ParseBet(string value)
     {
         if (TryParseDecimal(value, out var parsed) && parsed > 0)
         {
@@ -942,7 +944,7 @@ public sealed class CasinoGameModule : FeatureModuleBase
         return DefaultBet;
     }
 
-    private static decimal ComputeNet(bool hasBet, bool win, decimal bet, decimal winAmount)
+    internal static decimal ComputeNet(bool hasBet, bool win, decimal bet, decimal winAmount)
     {
         if (!hasBet)
         {
@@ -954,7 +956,7 @@ public sealed class CasinoGameModule : FeatureModuleBase
 
     private static int Clamp(int value, int min, int max) => Math.Min(Math.Max(value, min), max);
 
-    private static int CountMatches(string a, string b, string c)
+    internal static int CountMatches(string a, string b, string c)
     {
         if (a == b && b == c)
         {
@@ -971,12 +973,12 @@ public sealed class CasinoGameModule : FeatureModuleBase
 
     private static Card DrawCard()
     {
-        var rank = CardRanks[Random.Shared.Next(CardRanks.Length)];
-        var suit = CardSuits[Random.Shared.Next(CardSuits.Length)];
+        var rank = CardRanks[Rng.Next(CardRanks.Length)];
+        var suit = CardSuits[Rng.Next(CardSuits.Length)];
         return new Card(rank, suit, CardValue(rank));
     }
 
-    private static int CardValue(string rank)
+    internal static int CardValue(string rank)
     {
         return rank switch
         {
@@ -986,7 +988,7 @@ public sealed class CasinoGameModule : FeatureModuleBase
         };
     }
 
-    private static int HandValue(List<Card> hand)
+    internal static int HandValue(List<Card> hand)
     {
         var total = hand.Sum(card => card.Value);
         var aces = hand.Count(card => card.Rank == "A");
@@ -1109,7 +1111,7 @@ public sealed class CasinoGameModule : FeatureModuleBase
                || decimal.TryParse(input, NumberStyles.Number, CultureInfo.CurrentCulture, out value);
     }
 
-    private enum GameType
+    internal enum GameType
     {
         Help,
         Status,
@@ -1124,11 +1126,11 @@ public sealed class CasinoGameModule : FeatureModuleBase
         Blackjack
     }
 
-    private sealed record GameRequest(GameType Game, string[] Args);
+    internal sealed record GameRequest(GameType Game, string[] Args);
 
-    private sealed record GameResult(string Game, string Outcome, decimal? Bet, decimal? Net, string Details, decimal? Balance = null);
+    internal sealed record GameResult(string Game, string Outcome, decimal? Bet, decimal? Net, string Details, decimal? Balance = null);
 
-    private sealed record Card(string Rank, string Suit, int Value)
+    internal sealed record Card(string Rank, string Suit, int Value)
     {
         public string Label => $"{Rank}{Suit}";
     }
