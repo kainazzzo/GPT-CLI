@@ -80,6 +80,14 @@ GPT intent router first (conversation + pending-action context). It dispatches t
 - Monsters → append encounter templates (boss/adds + stats). Does not rewrite `CampaignMarkdown`.
 - Locations/maps → `DndLiteLocationDocument` list on the draft catalog (`Id`, `Name`, `Summary`, optional ASCII `MapMarkdown`). Copied through finalize.
 
+After a draft lock-in (proposal pick, campaign create, sheet, party, story update), the reply appends a short **Next:** prompt from current draft inventory (story / locations / encounters / party) so the GM is not left to ask “what’s next?”. Game replies already include session **Options** / next-request via `RenderSessionPrompt`.
+
+**Finish the rest:** `dnd_route_finish_draft` fills remaining locations/encounters/NPCs, missing roster sheets, and an additive endgame/finale appendix. It should leave **What's left** empty except optional tweaks. Does not rewrite existing story prose.
+
+**Status / what’s left:** `dnd_route_draft_status` renders Discord markdown inventory (`**In place**` / `**What's left**` / `**How to edit**`) instead of a prose paragraph. After each lock-in, the reply includes done + left. After `finish the rest`, it includes a full snapshot plus natural-language edit examples.
+
+Draft chat replies (including `dnd_route_chat_reply`) should use Discord markdown: **bold** headings and `- ` bullets for any list of 2+ items.
+
 `LooksLikeDraftUpdateIntent` must stay false for “no rewrite / just generate / locations / monsters / examples”. Sheet-create with an explicit name and concept still creates immediately.
 
 ## Live tick

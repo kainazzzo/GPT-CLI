@@ -17,6 +17,11 @@ Notable user-facing changes. Entries are ordered newest-first.
 - Draft monster/NPC/location proposals honor “give me 3” / “more than 2”; they no longer always invent two encounters or treat “more than 2” as picking item 2.
 - Draft and game untagged chat now ask the GPT model to parse intent from conversation (including pending numbered proposals) before keyword/regex handlers.
 - Draft location proposals salvage truncated JSON (Club Calor-style cutoffs). `mapMarkdown` stays in the strict schema (empty string allowed) so OpenAI accepts the format.
+- After locking in draft content (maps, encounters, NPCs, party, story), the bot appends a **Next:** prompt so you are not left to ask what’s next. Game turns already include session **Options**.
+- Draft “finish the rest” / “fill it out” fills missing locations, encounters, and NPCs in one step (no numbered pick). Tweak afterward in natural language.
+- Draft replies use Discord markdown (headings + bullets). “What’s left” is a structured inventory, not a paragraph.
+- `finish the rest` also writes missing character sheets and an endgame/finale appendix. Status no longer lists leftover plot chores when the draft is complete.
+- After each draft lock-in, the bot summarizes what’s in place and what’s left. After `finish the rest`, it adds a full snapshot plus **How to edit** examples.
 
 ### Default model: GPT-5.6 Sol
 

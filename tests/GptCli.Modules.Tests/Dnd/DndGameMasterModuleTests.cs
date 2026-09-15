@@ -331,6 +331,96 @@ public sealed class DndGameMasterModuleTests
     }
 
     [Fact]
+    public void BuildDraftNextStepsPrompt_after_location_asks_for_fight_or_npcs()
+    {
+        var next = DndGameMasterModule.BuildDraftNextStepsPrompt(
+            "location",
+            "Club Calor",
+            hasStory: true,
+            locationCount: 1,
+            encounterCount: 0,
+            partyMemberCount: 2);
+        Assert.Contains("Club Calor", next, StringComparison.Ordinal);
+        Assert.Contains("fight", next, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("**Next**", next, StringComparison.Ordinal);
+        Assert.Contains("\n- ", next, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void BuildDraftNextStepsPrompt_playable_draft_offers_game_mode()
+    {
+        var next = DndGameMasterModule.BuildDraftNextStepsPrompt(
+            "mixed",
+            null,
+            hasStory: true,
+            locationCount: 2,
+            encounterCount: 2,
+            partyMemberCount: 3);
+        Assert.Contains("mode value:game", next, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void LooksLikeFinishDraftIntent_matches_finish_the_rest()
+    {
+        Assert.True(DndGameMasterModule.LooksLikeFinishDraftIntent("finish out the rest for me"));
+        Assert.True(DndGameMasterModule.LooksLikeFinishDraftIntent("fill it out"));
+        Assert.True(DndGameMasterModule.LooksLikeFinishDraftIntent("complete the draft"));
+        Assert.False(DndGameMasterModule.LooksLikeFinishDraftIntent("give me 3 monsters"));
+        Assert.False(DndGameMasterModule.LooksLikeFinishDraftIntent("all"));
+    }
+
+    [Fact]
+    public void LooksLikeDraftStatusIntent_and_status_markdown_use_bullets()
+    {
+        Assert.True(DndGameMasterModule.LooksLikeDraftStatusIntent("what's left"));
+        Assert.True(DndGameMasterModule.LooksLikeDraftStatusIntent("whats missing"));
+        Assert.True(DndGameMasterModule.LooksLikeDraftStatusIntent("what else is left to be tweaked?"));
+        Assert.False(DndGameMasterModule.LooksLikeDraftStatusIntent("finish the rest"));
+
+        Assert.Empty(DndGameMasterModule.BuildDraftRemainingGaps(
+            hasStory: true,
+            locationCount: 3,
+            encounterCount: 9,
+            partyPcs: 1,
+            partyNpcs: 5,
+            missingSheets: 0,
+            hasFinale: true));
+        Assert.True(DndGameMasterModule.CampaignMarkdownHasFinale("## Finale\nStop the drop."));
+        Assert.False(DndGameMasterModule.CampaignMarkdownHasFinale("Just a premise about Medina."));
+
+        var markdown = DndGameMasterModule.BuildDraftStatusMarkdown(
+            "funky cold medina",
+            hasStory: true,
+            locations: new[] { "The Icebreaker" },
+            encounters: Array.Empty<string>(),
+            partyPcs: 1,
+            partyNpcs: 1,
+            remaining: new[] { "2–3 investigation or combat encounters", "Key districts or hideouts" });
+        Assert.Contains("**Draft status**", markdown, StringComparison.Ordinal);
+        Assert.Contains("**What's left**", markdown, StringComparison.Ordinal);
+        Assert.Contains("\n- 2–3 investigation", markdown, StringComparison.Ordinal);
+        Assert.Contains("The Icebreaker", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain("The core is in place:", markdown, StringComparison.Ordinal);
+
+        var complete = DndGameMasterModule.BuildDraftStatusMarkdown(
+            "funky cold medina",
+            hasStory: true,
+            locations: new[] { "The Icebreaker" },
+            encounters: new[] { "Medina Mile Freeze-Out" },
+            partyPcs: 1,
+            partyNpcs: 5,
+            remaining: Array.Empty<string>(),
+            hasFinale: true,
+            includeNext: true,
+            includeEditHelp: true);
+        Assert.Contains("Nothing required", complete, StringComparison.Ordinal);
+        Assert.Contains("**How to edit**", complete, StringComparison.Ordinal);
+        Assert.Contains("natural language", complete, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("`finish the rest` to fill remaining gaps", complete, StringComparison.Ordinal);
+        Assert.Contains(DndGameMasterModule.BuildDraftEditInstructions(complete: true), complete, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void TryParseProposalBundle_accepts_full_encounter_with_stats()
     {
         var json = """
