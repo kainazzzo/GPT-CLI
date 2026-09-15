@@ -30,7 +30,7 @@ Built-in Discord module (compiled into the host, not a DLL): `Chat/Discord/Modul
 - **Embed** — chunk files/directories (`Embeddings/Document.cs`) and rank with cosine similarity.
 - **Discord** — `InstructionGPT` bot: per-channel history, `/gptcli` slash tree, mention tool-routing, and a module pipeline.
 
-OpenAI I/O lives in `OpenAILogic.cs`. Default model is `gpt-6-astra`. GPT-6 requests omit sampling params the model rejects; tool calling for GPT-6 goes through the Responses API.
+OpenAI I/O lives in `OpenAILogic.cs` and uses the official `OpenAI` .NET SDK. Default model is `gpt-5.6-sol`. GPT-5.6/GPT-6 requests omit sampling params the model rejects; GPT-5.6 (all chat) and GPT-6 function tools go through the Responses API. Chat Completions and embeddings use `ChatClient` / `EmbeddingClient`. Strict JSON (`json_schema`) uses `ResponsesClient`. Request/response types (`ChatMessage`, `ChatCompletionCreateRequest`, …) are first-party DTOs so Discord modules and persisted channel history are not coupled to SDK types.
 
 ## Layout
 
@@ -72,7 +72,7 @@ After changing an example module, rebuild/deploy its DLL (`modules/examples/<Nam
 - `GptCli.Dnd.Tests` — DnD engine (session + combat).
 - `GptCli.Modules.Tests` — example modules.
 
-No live OpenAI or Discord. Use `FixedDiceRoller`, `FakeClock`, `FakeFeatureModule`, `FakeOpenAIService`, `StubHttpMessageHandler`.
+No live OpenAI or Discord. Use `FixedDiceRoller`, `FakeClock`, `FakeFeatureModule`, `FakeOpenAiHttp`, `StubHttpMessageHandler`.
 
 ## Config
 

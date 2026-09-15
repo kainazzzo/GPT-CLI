@@ -7,6 +7,8 @@
     <Nullable>disable</Nullable>
     <GenerateTargetFrameworkAttribute>false</GenerateTargetFrameworkAttribute>
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <!-- Official OpenAI Responses types are still [Experimental(OPENAI001)]. -->
+    <NoWarn>$(NoWarn);OPENAI001</NoWarn>
     <FileVersion>0.15.5</FileVersion>
     <AssemblyVersion>0.15.5</AssemblyVersion>
     <Version>0.15.5-beta</Version>
@@ -15,7 +17,6 @@
     <None Include=".github\workflows\release.yml" />
   </ItemGroup>
   <ItemGroup>
-    <PackageReference Include="Betalgo.Ranul.OpenAI" Version="*" />
     <PackageReference Include="Discord.Net" Version="3.18.0" />
     <PackageReference Include="Discord.Net.Interactions" Version="3.18.0" />
     <PackageReference Include="Mapster" Version="7.4.0" />

@@ -30,9 +30,9 @@ While DnD is in **game** mode, the module mutes the core bot (`ChannelState.Opti
 
 `InstructionGPT.ChannelState` is persisted under the channel directory. Modules may hang extra documents next to it (DnD uses `dnd-lite/`). Do not write secrets into channel JSON.
 
-## GPT-6
+## GPT-5.6
 
-Default model `gpt-6-astra`. Chat Completions: omit `temperature` / `top_p` / `logprobs` when the model rejects them. Tool loops for GPT-6 use the Responses API (`OpenAILogic`). DnD draft generation already uses a Responses tool loop.
+Default model `gpt-5.6-sol`. Chat Completions: omit `temperature` / `top_p` / `logprobs` when the model rejects them. Function tools for GPT-5.6 and GPT-6 use the Responses API (`OpenAILogic`); `gpt-5.6-sol` rejects tools on `/v1/chat/completions`.
 
 ## Tests
 

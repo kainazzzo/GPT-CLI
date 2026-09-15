@@ -1,5 +1,3 @@
-using Betalgo.Ranul.OpenAI.ObjectModels.RequestModels;
-using Betalgo.Ranul.OpenAI.ObjectModels.SharedModels;
 using GPT.CLI;
 using Xunit;
 
@@ -8,7 +6,7 @@ namespace GptCli.Tests.Core;
 public sealed class OpenAILogicCompatibilityTests
 {
     [Theory]
-    [InlineData("gpt-6-astra")]
+    [InlineData("gpt-5.6-sol")]
     [InlineData("GPT-5")]
     [InlineData("o1-preview")]
     [InlineData("o3-mini")]
@@ -41,6 +39,7 @@ public sealed class OpenAILogicCompatibilityTests
     }
 
     [Theory]
+    [InlineData("gpt-5.6-sol", false)]
     [InlineData("gpt-6-astra", true)]
     [InlineData("gpt-6", true)]
     [InlineData("gpt-4o", false)]
@@ -51,18 +50,53 @@ public sealed class OpenAILogicCompatibilityTests
         Assert.Equal(expected, OpenAILogic.IsGpt6Family(model));
     }
 
-    [Fact]
-    public void RequiresResponsesForTools_only_for_gpt6_with_tools()
+    [Theory]
+    [InlineData(null, "gpt-5.6-sol", "gpt-5.6-sol")]
+    [InlineData("", "gpt-5.6-sol", "gpt-5.6-sol")]
+    [InlineData("gpt-5.2", "gpt-5.6-sol", "gpt-5.6-sol")]
+    [InlineData("gpt-5.2-nano", "gpt-5.6-sol", "gpt-5.6-sol")]
+    [InlineData("GPT-5", "gpt-5.6-sol", "gpt-5.6-sol")]
+    [InlineData("gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-sol")]
+    [InlineData("gpt-6-sol", "gpt-5.6-sol", "gpt-5.6-sol")]
+    [InlineData("gpt-5.6-sol", "gpt-5.6-sol", "gpt-5.6-sol")]
+    [InlineData("gpt-4o", "gpt-5.6-sol", "gpt-4o")]
+    public void ResolveCurrentTextModel_replaces_stale_gpt5(string requested, string fallback, string expected)
     {
-        var withTools = SampleRequest("gpt-6-astra");
-        withTools.Tools = new List<ToolDefinition> { new() { Type = "function" } };
-        Assert.True(OpenAILogic.RequiresResponsesForTools(withTools));
+        Assert.Equal(expected, OpenAILogic.ResolveCurrentTextModel(requested, fallback));
+    }
 
-        var noTools = SampleRequest("gpt-6-astra");
-        Assert.False(OpenAILogic.RequiresResponsesForTools(noTools));
+    [Theory]
+    [InlineData("gpt-5.6-sol", true)]
+    [InlineData("GPT-5.6-sol", true)]
+    [InlineData("gpt-5.2", false)]
+    [InlineData("gpt-6-astra", false)]
+    [InlineData("", false)]
+    [InlineData(null, false)]
+    public void IsGpt56Family_detects_prefix(string model, bool expected)
+    {
+        Assert.Equal(expected, OpenAILogic.IsGpt56Family(model));
+    }
+
+    [Fact]
+    public void RequiresResponsesForTools_for_gpt6_and_gpt56_with_tools()
+    {
+        var gpt6Tools = SampleRequest("gpt-6-astra");
+        gpt6Tools.Tools = new List<ToolDefinition> { new() { Type = "function" } };
+        Assert.True(OpenAILogic.RequiresResponsesForTools(gpt6Tools));
+
+        var gpt56Tools = SampleRequest("gpt-5.6-sol");
+        gpt56Tools.Tools = gpt6Tools.Tools;
+        Assert.True(OpenAILogic.RequiresResponsesForTools(gpt56Tools));
+
+        var gpt56NoTools = SampleRequest("gpt-5.6-sol");
+        Assert.True(OpenAILogic.RequiresResponsesApi(gpt56NoTools));
+
+        var gpt52Tools = SampleRequest("gpt-5.2");
+        gpt52Tools.Tools = gpt6Tools.Tools;
+        Assert.False(OpenAILogic.RequiresResponsesForTools(gpt52Tools));
 
         var oldModel = SampleRequest("gpt-4o");
-        oldModel.Tools = withTools.Tools;
+        oldModel.Tools = gpt6Tools.Tools;
         Assert.False(OpenAILogic.RequiresResponsesForTools(oldModel));
     }
 

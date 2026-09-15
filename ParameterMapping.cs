@@ -1,8 +1,5 @@
 ﻿using System.Text.Json;
 using GPT.CLI.Embeddings;
-using Betalgo.Ranul.OpenAI.ObjectModels;
-using Betalgo.Ranul.OpenAI.ObjectModels.RequestModels;
-using Betalgo.Ranul.OpenAI.Contracts.Enums;
 
 namespace GPT.CLI;
 

@@ -11,11 +11,10 @@ internal static class BotFactory
 {
     public static InstructionGPT Create(
         GptOptions options = null,
-        FakeOpenAIService fake = null,
+        FakeOpenAiHttp fake = null,
         HttpClient http = null,
         IConfiguration configuration = null)
     {
-        fake ??= new FakeOpenAIService();
         options ??= new GptOptions
         {
             Model = "gpt-4o",
@@ -30,10 +29,12 @@ internal static class BotFactory
             })
             .Build();
 
+        http ??= new HttpClient(fake ?? new FakeOpenAiHttp(), disposeHandler: false);
+
         return new InstructionGPT(
             new DiscordSocketClient(),
             configuration,
-            new OpenAILogic(fake.Service, options, http),
+            new OpenAILogic(options, http),
             options,
             new ServiceCollection().BuildServiceProvider(),
             new FakeHostApplicationLifetime());

@@ -15,10 +15,6 @@ using GPT.CLI.Chat.Discord.Modules;
 using Mapster;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
-using Betalgo.Ranul.OpenAI.ObjectModels;
-using Betalgo.Ranul.OpenAI.ObjectModels.RequestModels;
-using Betalgo.Ranul.OpenAI.Contracts.Enums;
-using Betalgo.Ranul.OpenAI.ObjectModels.SharedModels;
 
 namespace GPT.CLI.Chat.Discord;
 
@@ -1024,6 +1020,9 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
             // Secrets are global app settings; never keep them in per-channel state.
             channelState.InstructionChat.ChatBotState.Parameters.ApiKey = null;
             channelState.InstructionChat.ChatBotState.Parameters.BotToken = null;
+            channelState.InstructionChat.ChatBotState.Parameters.Model = OpenAILogic.ResolveCurrentTextModel(
+                channelState.InstructionChat.ChatBotState.Parameters.Model,
+                DefaultParameters?.Model);
             channelState.Options ??= new ChannelOptions();
             channelState.Options.LearningPersonalityPrompt ??= DefaultParameters.LearningPersonalityPrompt;
             channelState.Options.PromptDebounceSeconds = NormalizePromptDebounceSeconds(channelState.Options.PromptDebounceSeconds);

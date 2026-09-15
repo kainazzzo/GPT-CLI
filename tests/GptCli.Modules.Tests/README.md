@@ -24,4 +24,4 @@ No OpenAI API key or Discord token is required. Tests call module domain helpers
 - Casino command parsing, purchase/wallet, seeded coinflip, card/hand math.
 - Pinboard `!pin` parsing, remove, add validation, optional fake `IMessageChannel` add.
 - Welcome validation application, nudge cooldown, rules text.
-- DnD GM natural-language intents, confirmations, narration sanitizing, tool-vs-mode allowlist.
+- DnD GM natural-language intents, confirmations, narration sanitizing, tool-vs-mode allowlist, draft propose/select parsing.

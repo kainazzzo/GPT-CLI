@@ -1,7 +1,4 @@
 using System.Net;
-using Betalgo.Ranul.OpenAI.Contracts.Enums;
-using Betalgo.Ranul.OpenAI.ObjectModels.RequestModels;
-using Betalgo.Ranul.OpenAI.ObjectModels.SharedModels;
 using GPT.CLI;
 using GptCli.Tests.TestDoubles;
 using Xunit;
@@ -13,8 +10,8 @@ public sealed class OpenAILogicIoTests
     [Fact]
     public async Task CreateChatCompletionAsync_delegates_to_service_for_non_gpt6_tools()
     {
-        var fake = new FakeOpenAIService();
-        var logic = new OpenAILogic(fake.Service, new GptOptions { Model = "gpt-4o", ApiKey = "sk-test" });
+        var fake = new FakeOpenAiHttp();
+        var logic = new OpenAILogic(new GptOptions { Model = "gpt-4o", ApiKey = "sk-test" }, fake.CreateClient());
         var request = new ChatCompletionCreateRequest
         {
             Model = "gpt-4o",
@@ -32,8 +29,8 @@ public sealed class OpenAILogicIoTests
     [Fact]
     public async Task CreateChatCompletionAsync_gpt6_without_tools_still_uses_chat_completions()
     {
-        var fake = new FakeOpenAIService();
-        var logic = new OpenAILogic(fake.Service, new GptOptions { Model = "gpt-6-astra", ApiKey = "sk-test" });
+        var fake = new FakeOpenAiHttp();
+        var logic = new OpenAILogic(new GptOptions { Model = "gpt-5.6-sol", ApiKey = "sk-test" }, fake.CreateClient());
         var request = new ChatCompletionCreateRequest
         {
             Model = "gpt-6-astra",
@@ -47,12 +44,27 @@ public sealed class OpenAILogicIoTests
     }
 
     [Fact]
+    public async Task CreateChatCompletionAsync_gpt56_plain_uses_responses_not_chat()
+    {
+        var fake = new FakeOpenAiHttp();
+        var logic = new OpenAILogic(new GptOptions { Model = "gpt-5.6-sol" }, fake.CreateClient());
+        var request = new ChatCompletionCreateRequest
+        {
+            Model = "gpt-5.6-sol",
+            Messages = new List<ChatMessage> { new(ChatCompletionRole.User, "hi") }
+        };
+
+        var response = await logic.CreateChatCompletionAsync(request);
+        Assert.Equal(0, fake.ChatCalls);
+        Assert.Equal(HttpStatusCode.Unauthorized, response.HttpStatusCode);
+    }
+
+    [Fact]
     public async Task CreateChatCompletionAsync_gpt6_tools_without_api_key_fails_without_http()
     {
         var handler = new StubHttpMessageHandler();
         var logic = new OpenAILogic(
-            new FakeOpenAIService().Service,
-            new GptOptions { Model = "gpt-6-astra" },
+            new GptOptions { Model = "gpt-5.6-sol" },
             new HttpClient(handler));
         var request = Gpt6ToolsRequest();
 
@@ -67,8 +79,7 @@ public sealed class OpenAILogicIoTests
     {
         var handler = new StubHttpMessageHandler();
         var logic = new OpenAILogic(
-            new FakeOpenAIService().Service,
-            new GptOptions { Model = "gpt-6-astra", ApiKey = "sk-test" },
+            new GptOptions { Model = "gpt-5.6-sol", ApiKey = "sk-test" },
             new HttpClient(handler));
         var request = Gpt6ToolsRequest();
         request.Messages = new List<ChatMessage>();
@@ -81,8 +92,8 @@ public sealed class OpenAILogicIoTests
     [Fact]
     public async Task CreateEmbeddings_writes_vectors_onto_documents()
     {
-        var fake = new FakeOpenAIService { Embedding = new List<double> { 0.2, 0.8 } };
-        var logic = new OpenAILogic(fake.Service, new GptOptions());
+        var fake = new FakeOpenAiHttp { Embedding = new List<double> { 0.2, 0.8 } };
+        var logic = new OpenAILogic(new GptOptions { ApiKey = "sk-test" }, fake.CreateClient());
         var docs = new List<GPT.CLI.Embeddings.Document>
         {
             new() { Text = "a" },
@@ -90,16 +101,18 @@ public sealed class OpenAILogicIoTests
         };
 
         await logic.CreateEmbeddings(docs);
-        Assert.Equal(new[] { 0.2, 0.8 }, docs[0].Embedding);
-        Assert.Equal(new[] { 0.2, 0.8 }, docs[1].Embedding);
-        Assert.Equal(2, fake.LastEmbedRequest.InputAsList.Count);
+        Assert.Equal(0.2, docs[0].Embedding[0], 5);
+        Assert.Equal(0.8, docs[0].Embedding[1], 5);
+        Assert.Equal(0.2, docs[1].Embedding[0], 5);
+        Assert.Equal(0.8, docs[1].Embedding[1], 5);
+        Assert.Equal(2, fake.LastEmbedInputCount());
     }
 
     [Fact]
     public async Task GetEmbeddingForPrompt_returns_fake_vector()
     {
-        var fake = new FakeOpenAIService { Embedding = new List<double> { 9, 8, 7 } };
-        var logic = new OpenAILogic(fake.Service, new GptOptions());
+        var fake = new FakeOpenAiHttp { Embedding = new List<double> { 9, 8, 7 } };
+        var logic = new OpenAILogic(new GptOptions { ApiKey = "sk-test" }, fake.CreateClient());
         var vector = await logic.GetEmbeddingForPrompt("hello");
         Assert.Equal(new[] { 9.0, 8.0, 7.0 }, vector);
     }

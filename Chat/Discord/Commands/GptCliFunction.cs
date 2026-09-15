@@ -2,8 +2,6 @@ using System.Text.Json;
 using Discord;
 using Discord.WebSocket;
 using GPT.CLI.Chat.Discord.Modules;
-using Betalgo.Ranul.OpenAI.ObjectModels.RequestModels;
-using Betalgo.Ranul.OpenAI.ObjectModels.SharedModels;
 
 namespace GPT.CLI.Chat.Discord.Commands;
 

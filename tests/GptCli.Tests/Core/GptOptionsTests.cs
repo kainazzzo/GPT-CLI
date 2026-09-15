@@ -14,7 +14,7 @@ public sealed class GptOptionsTests
             ApiKey = "sk-secret",
             BotToken = "bot-secret",
             Prompt = "hello",
-            Model = "gpt-6-astra"
+            Model = "gpt-5.6-sol"
         };
 
         var json = JsonSerializer.Serialize(options);
@@ -23,7 +23,7 @@ public sealed class GptOptionsTests
         Assert.DoesNotContain("ApiKey", json, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("BotToken", json, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("hello", json, StringComparison.Ordinal);
-        Assert.Contains("gpt-6-astra", json, StringComparison.Ordinal);
+        Assert.Contains("gpt-5.6-sol", json, StringComparison.Ordinal);
     }
 
     [Fact]

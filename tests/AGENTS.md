@@ -4,7 +4,7 @@ Three xUnit projects. Always `dotnet test ./GPT-CLI.sln -c Release` before claim
 
 | Project | Covers | Fakes |
 |---|---|---|
-| `GptCli.Tests` | Embeddings, `GptOptions`, `ParameterMapping`, OpenAI HTTP mapping, `InstructionChatBot`, Discord host helpers, Infobot, module pipeline | `FakeOpenAIService`, `StubHttpMessageHandler`, `FakeFeatureModule` |
+| `GptCli.Tests` | Embeddings, `GptOptions`, `ParameterMapping`, OpenAI HTTP mapping, `InstructionChatBot`, Discord host helpers, Infobot, module pipeline | `FakeOpenAiHttp`, `StubHttpMessageHandler`, `FakeFeatureModule` |
 | `GptCli.Dnd.Tests` | `Chat/Dnd` engine: combat, campaign, **session FSM**, scene synthesis, rest/checks, persistence | `FixedDiceRoller`, `FakeClock` |
 | `GptCli.Modules.Tests` | Example modules: parsers, allow-lists, casino math, poll lifecycle, pinboard, welcome, DnD intents | Seeded `Random`, in-memory `ChannelState` |
 

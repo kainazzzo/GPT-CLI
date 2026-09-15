@@ -1,8 +1,5 @@
 using System.Net;
 using System.Text.Json;
-using Betalgo.Ranul.OpenAI.Contracts.Enums;
-using Betalgo.Ranul.OpenAI.ObjectModels.RequestModels;
-using Betalgo.Ranul.OpenAI.ObjectModels.SharedModels;
 using GPT.CLI;
 using GptCli.Tests.TestDoubles;
 using Xunit;
@@ -19,7 +16,6 @@ public sealed class OpenAILogicResponsesTests
             ResponseBody = """{"id":"resp_1","output_text":"hello from responses"}"""
         };
         var logic = new OpenAILogic(
-            new FakeOpenAIService().Service,
             new GptOptions { ApiKey = " sk-secret ", BaseDomain = "https://example.com/v1" },
             new HttpClient(handler));
 
@@ -47,7 +43,6 @@ public sealed class OpenAILogicResponsesTests
                 """
         };
         var logic = new OpenAILogic(
-            new FakeOpenAIService().Service,
             new GptOptions { ApiKey = "sk-test" },
             new HttpClient(handler));
 
@@ -66,7 +61,6 @@ public sealed class OpenAILogicResponsesTests
             ResponseBody = """{"error":{"message":"bad model"}}"""
         };
         var logic = new OpenAILogic(
-            new FakeOpenAIService().Service,
             new GptOptions { ApiKey = "sk-test" },
             new HttpClient(handler));
 
@@ -80,7 +74,6 @@ public sealed class OpenAILogicResponsesTests
     {
         var handler = new StubHttpMessageHandler { ResponseBody = "not-json" };
         var logic = new OpenAILogic(
-            new FakeOpenAIService().Service,
             new GptOptions { ApiKey = "sk-test" },
             new HttpClient(handler));
 
@@ -96,7 +89,6 @@ public sealed class OpenAILogicResponsesTests
             ResponseBody = """{"output_text":"streamed"}"""
         };
         var logic = new OpenAILogic(
-            new FakeOpenAIService().Service,
             new GptOptions { ApiKey = "sk-test" },
             new HttpClient(handler));
 
@@ -120,7 +112,7 @@ public sealed class OpenAILogicResponsesTests
               ]
             }
             """);
-        var mapped = OpenAILogic.MapResponsesToChatCompletion("gpt-6-astra", doc.RootElement);
+        var mapped = OpenAILogic.MapResponsesToChatCompletion("gpt-5.6-sol", doc.RootElement);
         Assert.Contains("line one", mapped.Choices[0].Message.Content, StringComparison.Ordinal);
         Assert.Contains("line two", mapped.Choices[0].Message.Content, StringComparison.Ordinal);
     }

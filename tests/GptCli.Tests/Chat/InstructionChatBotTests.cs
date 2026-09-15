@@ -1,5 +1,3 @@
-using Betalgo.Ranul.OpenAI.Contracts.Enums;
-using Betalgo.Ranul.OpenAI.ObjectModels.RequestModels;
 using GPT.CLI;
 using GPT.CLI.Chat;
 using Xunit;

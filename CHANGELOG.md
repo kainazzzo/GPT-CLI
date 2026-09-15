@@ -2,6 +2,27 @@
 
 Notable user-facing changes. Entries are ordered newest-first.
 
+## 2026-09-14
+
+### OpenAI I/O: official SDK only
+
+- Removed `Betalgo.Ranul.OpenAI`. Chat Completions and embeddings now use the official OpenAI .NET SDK (`ChatClient` / `EmbeddingClient`).
+- Discord modules and persisted chat history use first-party `ChatMessage` / request DTOs instead of Betalgo types.
+- GPT-5.6 chat and GPT-6 tools still use the existing Responses API mapper; strict `json_schema` still uses `ResponsesClient`.
+
+### Draft proposals: official OpenAI structured outputs
+
+- Additive draft NPC/monster/location proposals now request strict `json_schema` through the official OpenAI .NET SDK Responses client instead of prompt-only JSON on Betalgo Chat Completions.
+- Proposal Discord cards no longer clip encounter scenes to 160 characters; the reply can chunk, and the structured-output token cap is higher.
+- Draft monster/NPC/location proposals honor “give me 3” / “more than 2”; they no longer always invent two encounters or treat “more than 2” as picking item 2.
+- Draft and game untagged chat now ask the GPT model to parse intent from conversation (including pending numbered proposals) before keyword/regex handlers.
+- Draft location proposals salvage truncated JSON (Club Calor-style cutoffs). `mapMarkdown` stays in the strict schema (empty string allowed) so OpenAI accepts the format.
+
+### Default model: GPT-5.6 Sol
+
+- Updated the default text and vision model to `gpt-5.6-sol`.
+- Persisted `gpt-5` / `gpt-5.2` / `gpt-6-astra` channel overrides, and the misnamed `gpt-6-sol` leftover, now resolve to the current default (`gpt-5.6*` is kept).
+
 ## 2026-09-09
 
 ### Default model: GPT-6 Astra

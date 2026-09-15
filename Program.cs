@@ -9,11 +9,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using GPT.CLI.Chat.Discord;
 using GPT.CLI.Chat;
-using Betalgo.Ranul.OpenAI.Extensions;
-using Betalgo.Ranul.OpenAI.ObjectModels;
-using Betalgo.Ranul.OpenAI.ObjectModels.RequestModels;
-using Betalgo.Ranul.OpenAI.Contracts.Enums;
-using Betalgo.Ranul.OpenAI.ObjectModels.ResponseModels;
+
 
 namespace GPT.CLI;
 
@@ -455,14 +451,6 @@ class Program
 
         // Add the configuration object to the services
         services.AddSingleton(configuration);
-        services.AddOpenAIService(settings =>
-        {
-            settings.ApiKey = gptParameters.ApiKey;
-            if (!string.IsNullOrWhiteSpace(gptParameters.BaseDomain))
-            {
-                settings.BaseDomain = gptParameters.BaseDomain;
-            }
-        });
         services.AddSingleton<OpenAILogic>();
 
         if (gptParameters.Mode == ParameterMapping.Mode.Discord)

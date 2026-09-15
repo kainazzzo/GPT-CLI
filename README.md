@@ -38,8 +38,8 @@ Create an `appsettings.json` in the working directory:
     "ApiKey": "sk-optional-override",
     "Mode": "Completion",
     "Prompt": "generate a hello world python script",
-    "Model": "gpt-6-astra",
-    "VisionModel": "gpt-6-astra",
+    "Model": "gpt-5.6-sol",
+    "VisionModel": "gpt-5.6-sol",
     "MaxTokens": 64000,
     "ChunkSize": 1536,
     "MaxChatHistoryLength": 4096,
@@ -56,8 +56,8 @@ Notes:
 - Do not commit real API keys or bot tokens.
 
 Common `GPT` settings:
-- `Model` (e.g. `gpt-6-astra`, OpenAI's current flagship)
-- `VisionModel` (e.g. `gpt-6-astra`, used for image analysis; the flagship accepts image input)
+- `Model` (e.g. `gpt-5.6-sol`, OpenAI's current flagship)
+- `VisionModel` (e.g. `gpt-5.6-sol`, used for image analysis; the flagship accepts image input)
 - `Prompt` (Completion mode only)
 - `MaxTokens`, `Temperature`, `TopP`
 - `ChunkSize`, `ClosestMatchLimit` (embedding behavior)
@@ -71,8 +71,8 @@ Environment variable equivalents use double underscores:
 OPENAI__APIKEY="sk-your-apikey-here" \
 GPT__MODE="Completion" \
 GPT__PROMPT="generate a hello world python script" \
-GPT__MODEL="gpt-6-astra" \
-GPT__VISIONMODEL="gpt-6-astra" \
+GPT__MODEL="gpt-5.6-sol" \
+GPT__VISIONMODEL="gpt-5.6-sol" \
 gpt > hello.py
 ```
 
@@ -82,8 +82,8 @@ Discord bot example:
 OPENAI__APIKEY="sk-your-apikey-here" \
 GPT__MODE="Discord" \
 GPT__BOTTOKEN="your-discord-bot-token" \
-GPT__MODEL="gpt-6-astra" \
-GPT__VISIONMODEL="gpt-6-astra" \
+GPT__MODEL="gpt-5.6-sol" \
+GPT__VISIONMODEL="gpt-5.6-sol" \
 gpt
 ```
 

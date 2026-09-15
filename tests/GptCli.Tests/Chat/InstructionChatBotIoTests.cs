@@ -1,5 +1,3 @@
-using Betalgo.Ranul.OpenAI.Contracts.Enums;
-using Betalgo.Ranul.OpenAI.ObjectModels.RequestModels;
 using GPT.CLI;
 using GPT.CLI.Chat;
 using GptCli.Tests.TestDoubles;
@@ -12,24 +10,26 @@ public sealed class InstructionChatBotIoTests
     [Fact]
     public async Task GetResponseAsync_uses_fake_openai_completion()
     {
-        var fake = new FakeOpenAIService();
-        fake.ChatResponse.Choices[0].Message = new ChatMessage(ChatCompletionRole.Assistant, "bot-says-hi");
-        var options = new GptOptions { Model = "gpt-4o", Prompt = "be brief", MaxTokens = 16 };
-        var logic = new OpenAILogic(fake.Service, options);
+        var fake = new FakeOpenAiHttp { ChatContent = "bot-says-hi" };
+        var options = new GptOptions { Model = "gpt-4o", Prompt = "be brief", MaxTokens = 16, ApiKey = "sk-test", Stream = false };
+        var logic = new OpenAILogic(options, fake.CreateClient());
         var bot = new InstructionChatBot(logic, options);
         bot.AddInstruction(new ChatMessage(ChatCompletionRole.System, "stay short"));
         bot.AddMessage(new ChatMessage(ChatCompletionRole.User, "hello"));
 
-        string last = null;
+        var text = new System.Text.StringBuilder();
         await foreach (var response in bot.GetResponseAsync())
         {
-            last = response.Choices[0].Message.Content;
+            var content = response.Choices[0].Message.Content;
+            if (content != null)
+            {
+                text.Append(content);
+            }
         }
 
-        Assert.Equal("bot-says-hi", last);
+        Assert.Equal("bot-says-hi", text.ToString());
         Assert.Equal(1, fake.ChatCalls);
-        Assert.NotNull(fake.LastChatRequest);
-        Assert.Equal("gpt-4o", fake.LastChatRequest.Model);
+        Assert.Contains("\"model\":\"gpt-4o\"", fake.LastBody.Replace(" ", string.Empty), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -44,8 +44,8 @@ public sealed class InstructionChatBotIoTests
             """);
         try
         {
-            var fake = new FakeOpenAIService { Embedding = new List<double> { 1.0, 0.0 } };
-            var logic = new OpenAILogic(fake.Service, new GptOptions());
+            var fake = new FakeOpenAiHttp { Embedding = new List<double> { 1.0, 0.0 } };
+            var logic = new OpenAILogic(new GptOptions { ApiKey = "sk-test" }, fake.CreateClient());
             var options = new GptOptions
             {
                 Prompt = "what is alpha?",

@@ -4,18 +4,15 @@ using System.Globalization;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using Discord;
 using Discord.WebSocket;
+using GPT.CLI;
 using GPT.CLI.Chat.Discord;
 using GPT.CLI.Chat.Discord.Commands;
 using GPT.CLI.Chat.Discord.Modules;
 using GPT.CLI.Chat.Dnd;
-using Betalgo.Ranul.OpenAI.ObjectModels;
-using Betalgo.Ranul.OpenAI.ObjectModels.RequestModels;
-using Betalgo.Ranul.OpenAI.Contracts.Enums;
-using Betalgo.Ranul.OpenAI.ObjectModels.ResponseModels;
-using Betalgo.Ranul.OpenAI.ObjectModels.SharedModels;
 
 namespace DndModuleExample;
 
@@ -36,10 +33,13 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
     private const string PendingActionCampaignCreate = "campaign-create";
     private const string PendingActionDraftUpdate = "draft-update";
     private const string PendingActionPartyEdit = "party-edit";
+    private const string PendingActionProposeContent = "propose-content";
     private const string RouteToolCampaignCreate = "dnd_route_campaign_create";
     private const string RouteToolDraftUpdate = "dnd_route_draft_update";
     private const string RouteToolPartyEdit = "dnd_route_party_edit";
     private const string RouteToolSheetCreate = "dnd_route_sheet_create";
+    private const string RouteToolProposeContent = "dnd_route_propose_content";
+    private const string RouteToolPendingReply = "dnd_route_pending_reply";
     private const string RouteToolPassTimeout = "dnd_route_passtimeout";
     private const string RouteToolChatReply = "dnd_route_chat_reply";
     private const string RouteToolClarify = "dnd_route_clarify";
@@ -613,12 +613,6 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                     try { await context.Host.SaveCachedChannelStateAsync(message.Channel.Id); } catch { }
                 }
 
-                // First: handle pending draft confirmations, if any.
-                if (await TryHandlePendingDraftActionAsync(context, channelState, message, dndState, cancellationToken))
-                {
-                    return;
-                }
-
                 var stripped = StripBotMentions(content, context.Client.CurrentUser.Id);
                 var intentRouterEnabled = IsDraftIntentRouterEnabled(context);
                 if (intentRouterEnabled)
@@ -656,6 +650,11 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                     }
 
                     Console.WriteLine($"[dnd] draft-route: router unhandled, using legacy fallback (channel={message.Channel?.Id})");
+                }
+
+                if (await TryHandlePendingDraftActionAsync(context, channelState, message, dndState, cancellationToken))
+                {
+                    return;
                 }
 
                 var partyIntent = AnalyzeDraftPartyEditIntent(context, message, stripped);
@@ -845,6 +844,30 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                         return;
                     }
 
+                    var proposeKinds = DetectDraftProposeKinds(stripped);
+                    if (proposeKinds.Npcs || proposeKinds.Encounters || proposeKinds.Locations ||
+                        LooksLikeBrainstormExamplesIntent(stripped))
+                    {
+                        var proposed = await HandleDraftRouteProposeContentAsync(
+                            context,
+                            channelState,
+                            message,
+                            dndState,
+                            "{}",
+                            stripped,
+                            cancellationToken);
+                        if (proposed.Handled && !string.IsNullOrWhiteSpace(proposed.Reply))
+                        {
+                            var reply = $"<@{message.Author.Id}> {proposed.Reply.Trim()}";
+                            await SendChunkedAsync(message.Channel, reply);
+                            if (TryRecordAssistantReply(channelState, reply))
+                            {
+                                try { await context.Host.SaveCachedChannelStateAsync(message.Channel.Id); } catch { }
+                            }
+                            return;
+                        }
+                    }
+
                     if (await TryHandleDeterministicDraftPassTimeoutFromMessageAsync(
                             context, channelState, message, dndState, stripped, cancellationToken))
                     {
@@ -943,6 +966,14 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             {
                 try { await context.Host.SaveCachedChannelStateAsync(message.Channel.Id); } catch { }
             }
+
+            var handled = await TryHandleAutoRoutedMessageAsync(context, channelState, message, dndState, cancellationToken);
+            Console.WriteLine($"[dnd] auto-route: handled={handled} mode=game (channel={message.Channel?.Id})");
+            if (handled)
+            {
+                return;
+            }
+
             if (await TryHandleDeterministicGameStartAsync(context, channelState, message, dndState, cancellationToken))
             {
                 return;
@@ -961,13 +992,6 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 lockHandle.Release();
             }
             if (naturalHandled)
-            {
-                return;
-            }
-
-            var handled = await TryHandleAutoRoutedMessageAsync(context, channelState, message, dndState, cancellationToken);
-            Console.WriteLine($"[dnd] auto-route: handled={handled} mode=game (channel={message.Channel?.Id})");
-            if (handled)
             {
                 return;
             }
@@ -992,15 +1016,18 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         if (string.Equals(dndState.Mode, ModeGame, StringComparison.OrdinalIgnoreCase))
         {
             Console.WriteLine($"[dnd] processing: mode=game tagged (channel={message.Channel?.Id})");
-            // Serialize combat mutations.
+            EnsureTickLoopRunning(message.Channel.Id);
+
+            var routed = await TryHandleAutoRoutedMessageAsync(context, channelState, message, dndState, cancellationToken);
+            if (routed)
+            {
+                return;
+            }
+
             var lockHandle = _channelLocks.GetOrAdd(message.Channel.Id, _ => new SemaphoreSlim(1, 1));
             await lockHandle.WaitAsync(cancellationToken);
             try
             {
-                EnsureTickLoopRunning(message.Channel.Id);
-
-                // Hybrid input: when tagged, allow a tiny action-router to convert the message into a single deterministic action.
-                // If it doesn't match a combat action, fall back to campaign-aware chat below.
                 var handled = await TryHandleNaturalGameActionAsync(context, channelState, message, dndState, cancellationToken);
                 if (handled)
                 {
@@ -1182,6 +1209,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                           "When responding in draft mode, end with one actionable follow-up question unless the user asked for direct execution only.\n",
                 ModeGame =>
                     "You are the D&D game master assistant operating in GAME mode.\n" +
+                    "Parse the player's intent from the conversation, then call the matching tool. Do not rely on isolated keywords.\n" +
                     "The engine owns HP, stats, damage, rest, checks, and legal transitions. You narrate flair and map player prose onto listed options.\n" +
                     "Context includes the current session phase and **Options**. Call `gptcli_dnd_choose` with one of those option ids/numbers/labels.\n" +
                     "Call `gptcli_dnd_rest` only for a listed rest option. Call attack/cast/pass only in Combat.\n" +
@@ -1203,7 +1231,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             Model = ResolveModel(context, channelState),
             Temperature = string.Equals(mode, ModeDraft, StringComparison.OrdinalIgnoreCase) ? 0.3f : 0.2f,
             MaxCompletionTokens = string.Equals(mode, ModeGame, StringComparison.OrdinalIgnoreCase)
-                ? 350
+                ? 2048
                 : (compactDraftChatOnly ? 260 : 700),
             Messages = new List<ChatMessage>
             {
@@ -1500,6 +1528,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         var userCtx = new StringBuilder();
         userCtx.AppendLine("DND draft intent router");
         userCtx.AppendLine($"Active campaign: {activeCampaign}");
+        AppendPendingDraftActionContext(userCtx, dndState);
         try
         {
             await AppendPartyRosterContextAsync(userCtx, channelState, ModeDraft, activeCampaign, ct);
@@ -1529,8 +1558,9 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         var request = new ChatCompletionCreateRequest
         {
             Model = ResolveModel(context, channelState),
-            Temperature = 0.1f,
-            MaxCompletionTokens = 360,
+            // GPT-5.x reasoning tokens count against this budget; keep it large enough
+            // that a tool-call JSON payload is not truncated mid-string.
+            MaxCompletionTokens = 8192,
             ParallelToolCalls = false,
             ToolChoice = new ToolChoice { Type = "auto" },
             Tools = BuildDraftIntentRouterTools(),
@@ -1542,7 +1572,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 
         try
         {
-            var history = SnapshotRecentUserAssistantHistory(channelState, maxMessages: 8, maxChars: 2200);
+            var history = SnapshotRecentUserAssistantHistory(channelState, maxMessages: 14, maxChars: 4000);
             if (history.Count > 0)
             {
                 foreach (var h in history)
@@ -1629,7 +1659,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             }
 
             var argsJson = string.IsNullOrWhiteSpace(fn.Arguments) ? "{}" : fn.Arguments;
-            Console.WriteLine($"[dnd] draft-router: toolcall name={fn.Name.Trim()} args={argsJson}");
+            Console.WriteLine($"[dnd] draft-router: toolcall name={fn.Name.Trim()} argsLen={argsJson.Length} args={TrimToLimit(argsJson, 500)}");
             DraftIntentRouterDispatchResult dispatch;
             try
             {
@@ -1700,8 +1730,16 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             replyLines.AddRange(errors.Take(8).Select(e => $"- {e}"));
         }
 
-        var finalReply = TrimToLimit(string.Join("\n", replyLines).Trim(), 3500);
-        try { await SendChunkedAsync(message.Channel, finalReply); } catch { return false; }
+        var finalReply = TrimToLimit(string.Join("\n", replyLines).Trim(), 8000);
+        try
+        {
+            await SendChunkedAsync(message.Channel, finalReply);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[dnd] draft-router: send failed {ex.GetType().Name} {ex.Message}");
+            return false;
+        }
         if (TryRecordAssistantReply(channelState, finalReply))
         {
             try { await context.Host.SaveCachedChannelStateAsync(message.Channel.Id); } catch { }
@@ -1726,8 +1764,10 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             RouteToolDraftUpdate => await HandleDraftRouteDraftUpdateAsync(context, channelState, message, dndState, argsJson, strippedText, ct),
             RouteToolPartyEdit => await HandleDraftRoutePartyEditAsync(context, channelState, message, dndState, argsJson, strippedText, ct),
             RouteToolSheetCreate => await HandleDraftRouteSheetCreateAsync(context, channelState, message, dndState, argsJson, strippedText, ct),
+            RouteToolProposeContent => await HandleDraftRouteProposeContentAsync(context, channelState, message, dndState, argsJson, strippedText, ct),
+            RouteToolPendingReply => await HandleDraftRoutePendingReplyAsync(context, channelState, message, dndState, argsJson, ct),
             RouteToolPassTimeout => await HandleDraftRoutePassTimeoutAsync(context, channelState, message, dndState, argsJson, strippedText, ct),
-            RouteToolChatReply => HandleDraftRouteChatReply(argsJson, strippedText),
+            RouteToolChatReply => await HandleDraftRouteChatReplyOrProposeAsync(context, channelState, message, dndState, argsJson, strippedText, ct),
             RouteToolClarify => HandleDraftRouteClarify(argsJson),
             _ => new DraftIntentRouterDispatchResult(false, Error: $"Unknown route tool '{toolName}'.")
         };
@@ -1746,44 +1786,13 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         TryGetStringArg(argsJson, "prompt", out var promptRaw);
         TryGetBoolArg(argsJson, "overwrite", out var overwrite);
 
-        var explicitCampaignCreate = TryDetectCampaignCreateIntent(strippedText, out var detectedName, out var detectedOverwrite);
-        if (!explicitCampaignCreate)
-        {
-            if (LooksLikeDraftUpdateIntent(strippedText))
-            {
-                return await HandleDraftRouteDraftUpdateAsync(
-                    context,
-                    channelState,
-                    message,
-                    dndState,
-                    "{}",
-                    strippedText,
-                    ct);
-            }
-
-            if (LooksLikeCharacterCreateIntent(strippedText) || LooksLikeNpcCreateIntentFromText(strippedText))
-            {
-                return await HandleDraftRouteSheetCreateAsync(
-                    context,
-                    channelState,
-                    message,
-                    dndState,
-                    "{}",
-                    strippedText,
-                    ct);
-            }
-
-            return new DraftIntentRouterDispatchResult(
-                true,
-                "I won't create or overwrite a campaign unless you explicitly ask for that. " +
-                "For example: `create a new campaign named ...`.");
-        }
-
+        TryDetectCampaignCreateIntent(strippedText, out var detectedName, out var detectedOverwrite);
         if (string.IsNullOrWhiteSpace(campaignNameRaw))
         {
             campaignNameRaw = detectedName;
-            overwrite = overwrite || detectedOverwrite;
         }
+
+        overwrite = overwrite || detectedOverwrite;
 
         var campaignName = string.IsNullOrWhiteSpace(campaignNameRaw)
             ? (dndState?.ActiveCampaignName ?? "default")
@@ -1842,38 +1851,6 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
     {
         TryGetStringArg(argsJson, "name", out var campaignNameRaw);
         TryGetStringArg(argsJson, "prompt", out var promptRaw);
-
-        var explicitDraftUpdate = LooksLikeDraftUpdateIntent(strippedText);
-        if (!explicitDraftUpdate)
-        {
-            if (TryDetectCampaignCreateIntent(strippedText, out _, out _))
-            {
-                return await HandleDraftRouteCampaignCreateAsync(
-                    context,
-                    channelState,
-                    message,
-                    dndState,
-                    "{}",
-                    strippedText,
-                    ct);
-            }
-
-            if (LooksLikeCharacterCreateIntent(strippedText) || LooksLikeNpcCreateIntentFromText(strippedText))
-            {
-                return await HandleDraftRouteSheetCreateAsync(
-                    context,
-                    channelState,
-                    message,
-                    dndState,
-                    "{}",
-                    strippedText,
-                    ct);
-            }
-
-            return new DraftIntentRouterDispatchResult(
-                true,
-                "I won't rewrite the campaign unless you explicitly ask to revise or update the draft story.");
-        }
 
         var campaignName = string.IsNullOrWhiteSpace(campaignNameRaw)
             ? (dndState?.ActiveCampaignName ?? "default")
@@ -2109,12 +2086,16 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             name = requestedNames[0];
         }
 
-        if (string.IsNullOrWhiteSpace(concept))
+        if (string.IsNullOrWhiteSpace(concept) || (wantsNpc && string.IsNullOrWhiteSpace(name) && requestedNames.Count == 0))
         {
-            var target = wantsNpc ? "NPC" : "character";
-            return new DraftIntentRouterDispatchResult(
-                true,
-                $"I can generate that {target}. Include a `concept` (and names if you want multiple NPCs).");
+            return await HandleDraftRouteProposeContentAsync(
+                context,
+                channelState,
+                message,
+                dndState,
+                JsonSerializer.Serialize(new { npcs = true, encounters = LooksLikeMonsterGenerateIntent(strippedText), locations = LooksLikeLocationGenerateIntent(strippedText) }),
+                strippedText,
+                ct);
         }
 
         var execCtx = new GptCliExecutionContext(context, channelState, message.Channel, message.Author, null, message);
@@ -2160,10 +2141,21 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 
         if (string.IsNullOrWhiteSpace(name))
         {
-            var target = wantsNpc ? "NPC" : "character";
+            if (wantsNpc)
+            {
+                return await HandleDraftRouteProposeContentAsync(
+                    context,
+                    channelState,
+                    message,
+                    dndState,
+                    JsonSerializer.Serialize(new { npcs = true }),
+                    strippedText,
+                    ct);
+            }
+
             return new DraftIntentRouterDispatchResult(
                 true,
-                $"I can generate that {target}. Include a `name` and `concept`.");
+                "I can generate that character. Include a `name` and `concept`.");
         }
 
         var singleArgs = JsonSerializer.Serialize(new { name = name.Trim(), concept = concept.Trim() });
@@ -2179,6 +2171,160 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         }
 
         return new DraftIntentRouterDispatchResult(false, Error: "Sheet generation was not applied.");
+    }
+
+    private async Task<DraftIntentRouterDispatchResult> HandleDraftRouteProposeContentAsync(
+        DiscordModuleContext context,
+        InstructionGPT.ChannelState channelState,
+        SocketMessage message,
+        DndLiteChannelState dndState,
+        string argsJson,
+        string strippedText,
+        CancellationToken ct)
+    {
+        var kinds = DetectDraftProposeKinds(strippedText);
+        if (TryGetBoolArg(argsJson, "npcs", out var npcsArg) && npcsArg)
+        {
+            kinds.Npcs = true;
+        }
+        if (TryGetBoolArg(argsJson, "encounters", out var encArg) && encArg)
+        {
+            kinds.Encounters = true;
+        }
+        if (TryGetBoolArg(argsJson, "locations", out var locArg) && locArg)
+        {
+            kinds.Locations = true;
+        }
+
+        if (TryGetIntArg(argsJson, "count", out var countArg) && countArg > 0)
+        {
+            kinds.Count = ClampProposalCount(countArg);
+        }
+        else if (TryParseRequestedProposalCount(strippedText, out var countFromText))
+        {
+            kinds.Count = countFromText;
+        }
+
+        if (!kinds.Npcs && !kinds.Encounters && !kinds.Locations)
+        {
+            InferProposalKindsFromPending(dndState, kinds);
+        }
+
+        if (!kinds.Npcs && !kinds.Encounters && !kinds.Locations)
+        {
+            kinds.Npcs = true;
+        }
+
+        var active = dndState?.ActiveCampaignName ?? "default";
+        var draft = await LoadDraftCampaignAsync(channelState, active, ct);
+        if (draft == null || string.IsNullOrWhiteSpace(draft.CampaignMarkdown))
+        {
+            return new DraftIntentRouterDispatchResult(
+                true,
+                "There's no draft story to fit yet. Sketch a campaign first (or say `create a campaign named ...`), then I can invent NPCs, monsters, and locations.");
+        }
+
+        using var typing = DiscordTyping.Begin(message.Channel);
+        var bundle = await GenerateDraftProposalsAsync(context, channelState, draft, kinds, ct);
+        if (bundle == null || bundle.ItemCount == 0)
+        {
+            return new DraftIntentRouterDispatchResult(
+                true,
+                "I couldn't invent examples just now. Ask again, or give a name and a one-line concept and I'll sheet it immediately.");
+        }
+
+        await SetPendingDraftActionAsync(
+            channelState,
+            dndState,
+            new PendingDraftActionRequest
+            {
+                ActionType = PendingActionProposeContent,
+                ArgumentsJson = JsonSerializer.Serialize(bundle),
+                RequestedByUserId = message.Author.Id,
+                RequestedUtc = DateTime.UtcNow,
+                ExpiresUtc = DateTime.UtcNow.AddMinutes(DraftPendingActionTtlMinutes),
+                Summary = "create proposed draft content"
+            },
+            ct);
+
+        return new DraftIntentRouterDispatchResult(true, RenderDraftProposalBundle(bundle));
+    }
+
+    private async Task<DraftIntentRouterDispatchResult> HandleDraftRoutePendingReplyAsync(
+        DiscordModuleContext context,
+        InstructionGPT.ChannelState channelState,
+        SocketMessage message,
+        DndLiteChannelState dndState,
+        string argsJson,
+        CancellationToken ct)
+    {
+        var pending = dndState?.PendingDraftAction;
+        if (pending == null)
+        {
+            return new DraftIntentRouterDispatchResult(
+                true,
+                "There's nothing waiting on a confirm or numbered pick. Ask me to invent examples, or say what you want to change.");
+        }
+
+        TryGetStringArg(argsJson, "decision", out var decisionRaw);
+        var decision = (decisionRaw ?? string.Empty).Trim().ToLowerInvariant();
+        var isPropose = string.Equals(pending.ActionType, PendingActionProposeContent, StringComparison.OrdinalIgnoreCase);
+
+        if (decision is "cancel" or "no")
+        {
+            dndState.PendingDraftAction = null;
+            await SaveStateAsync(channelState, dndState, ct);
+            return new DraftIntentRouterDispatchResult(true, "Canceled.");
+        }
+
+        if (pending.RequestedByUserId != 0 && message?.Author != null && pending.RequestedByUserId != message.Author.Id)
+        {
+            return new DraftIntentRouterDispatchResult(
+                true,
+                $"Only <@{pending.RequestedByUserId}> can confirm or cancel this pending draft change.");
+        }
+
+        if (isPropose)
+        {
+            List<int> selected = null;
+            var itemCount = CountDraftProposalItems(pending.ArgumentsJson);
+            if (decision is "all" or "confirm" or "yes")
+            {
+                TryParseProposalSelection("all", itemCount, out selected);
+            }
+            else if (decision is "select")
+            {
+                TryGetStringArg(argsJson, "indices", out var indicesRaw);
+                if (!TryParseProposalSelection(indicesRaw, itemCount, out selected) ||
+                    selected.Count == 0)
+                {
+                    return new DraftIntentRouterDispatchResult(
+                        true,
+                        "Tell me which numbered examples to keep (`all`, `1 and 3`, or `cancel`).");
+                }
+            }
+            else
+            {
+                return new DraftIntentRouterDispatchResult(
+                    true,
+                    "Tell me which numbered examples to keep (`all`, `1 and 3`, or `cancel`).");
+            }
+
+            dndState.PendingDraftAction = null;
+            await SaveStateAsync(channelState, dndState, ct);
+            var body = await ExecutePendingDraftProposalAsync(context, channelState, message, pending, selected, ct, sendToChannel: false);
+            return new DraftIntentRouterDispatchResult(true, string.IsNullOrWhiteSpace(body) ? "Nothing was selected." : body);
+        }
+
+        if (decision is "confirm" or "yes" or "all")
+        {
+            dndState.PendingDraftAction = null;
+            await SaveStateAsync(channelState, dndState, ct);
+            var body = await ExecutePendingDraftActionAsync(context, channelState, message, pending, ct, sendToChannel: false);
+            return new DraftIntentRouterDispatchResult(true, string.IsNullOrWhiteSpace(body) ? "Done." : body);
+        }
+
+        return new DraftIntentRouterDispatchResult(true, "Reply `confirm` or `cancel`.");
     }
 
     private async Task<DraftIntentRouterDispatchResult> HandleDraftRoutePassTimeoutAsync(
@@ -2233,13 +2379,51 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         return new DraftIntentRouterDispatchResult(false, Error: "Pass timeout update was not applied.");
     }
 
+    private async Task<DraftIntentRouterDispatchResult> HandleDraftRouteChatReplyOrProposeAsync(
+        DiscordModuleContext context,
+        InstructionGPT.ChannelState channelState,
+        SocketMessage message,
+        DndLiteChannelState dndState,
+        string argsJson,
+        string strippedText,
+        CancellationToken ct)
+    {
+        if (TryGetDraftRouterReplyText(argsJson, out var existing) && !string.IsNullOrWhiteSpace(existing))
+        {
+            Console.WriteLine($"[dnd] draft-router: chat_reply extracted chars={existing.Length}");
+            return HandleDraftRouteChatReply(argsJson, strippedText);
+        }
+
+        var kinds = DetectDraftProposeKinds(strippedText);
+        if ((kinds.Npcs || kinds.Encounters || kinds.Locations || LooksLikeBrainstormExamplesIntent(strippedText)) &&
+            !LooksLikeShortDraftTopic(strippedText))
+        {
+            Console.WriteLine("[dnd] draft-router: chat_reply empty; redirecting to propose_content");
+            return await HandleDraftRouteProposeContentAsync(
+                context,
+                channelState,
+                message,
+                dndState,
+                argsJson,
+                strippedText,
+                ct);
+        }
+
+        return HandleDraftRouteChatReply(argsJson, strippedText);
+    }
+
     private static DraftIntentRouterDispatchResult HandleDraftRouteChatReply(string argsJson, string strippedText)
     {
-        TryGetStringArg(argsJson, "reply", out var replyRaw);
-        var reply = string.IsNullOrWhiteSpace(replyRaw)
-            ? BuildDraftConversationalFallback(strippedText)
-            : replyRaw.Trim();
-        return new DraftIntentRouterDispatchResult(true, TrimToLimit(reply, 1300));
+        if (!TryGetDraftRouterReplyText(argsJson, out var replyRaw) || string.IsNullOrWhiteSpace(replyRaw))
+        {
+            Console.WriteLine($"[dnd] draft-router: chat_reply JSON missing/truncated argsLen={(argsJson ?? string.Empty).Length}");
+            return new DraftIntentRouterDispatchResult(
+                true,
+                "I started a reply but it got cut off. Ask again (for example: `give me NPC examples` or `premise`).");
+        }
+
+        Console.WriteLine($"[dnd] draft-router: chat_reply ready chars={replyRaw.Length}");
+        return new DraftIntentRouterDispatchResult(true, TrimToLimit(replyRaw.Trim(), 8000));
     }
 
     private static DraftIntentRouterDispatchResult HandleDraftRouteClarify(string argsJson)
@@ -2307,6 +2491,34 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 },
                 new[] { "kind" }),
             BuildDraftIntentRouterTool(
+                RouteToolProposeContent,
+                "Invent campaign-fitting NPC, monster/encounter, and/or location examples without rewriting the draft story. Use when the user wants generation/brainstorming/examples, including 'give me 3' or 'more than 2' after a previous list. Do not use this to persist a numbered pick from a pending list.",
+                new Dictionary<string, PropertyDefinition>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["npcs"] = new PropertyDefinition { Type = "boolean", Description = "Propose named NPCs." },
+                    ["encounters"] = new PropertyDefinition { Type = "boolean", Description = "Propose monster/encounter seeds." },
+                    ["locations"] = new PropertyDefinition { Type = "boolean", Description = "Propose locations/maps." },
+                    ["count"] = new PropertyDefinition { Type = "integer", Description = "How many examples to invent for the requested kinds (1-6)." }
+                }),
+            BuildDraftIntentRouterTool(
+                RouteToolPendingReply,
+                "Resolve a pending confirm/cancel/proposal pick. Use only when the user is answering the pending prompt (all, 1 and 3, cancel, confirm). If they want a larger or different list, use dnd_route_propose_content instead.",
+                new Dictionary<string, PropertyDefinition>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["decision"] = new PropertyDefinition
+                    {
+                        Type = "string",
+                        Description = "How to resolve the pending action.",
+                        Enum = new List<string> { "confirm", "cancel", "all", "select" }
+                    },
+                    ["indices"] = new PropertyDefinition
+                    {
+                        Type = "string",
+                        Description = "Comma-separated 1-based indexes when decision=select, e.g. 1,3."
+                    }
+                },
+                new[] { "decision" }),
+            BuildDraftIntentRouterTool(
                 RouteToolPassTimeout,
                 "Set auto-pass timeout for player turns.",
                 new Dictionary<string, PropertyDefinition>(StringComparer.OrdinalIgnoreCase)
@@ -2363,23 +2575,31 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
     private static string BuildDraftIntentRouterSystemPrompt()
     {
         return
-            "You route DND DRAFT user intent to transition tools.\n" +
-            "Choose the single best transition tool for the user message.\n" +
+            "You parse DND DRAFT user intent from the conversation, then call exactly one transition tool.\n" +
+            "Read the pending-action block and recent chat. Isolated keywords are not enough; \"2\" after a proposal might mean pick item 2 OR ask for two more examples.\n" +
             "Use tools only; do not answer in plain text unless no tool applies.\n" +
             "Priorities:\n" +
-            "1) Campaign creation/start requests -> dnd_route_campaign_create.\n" +
-            "2) Rewrite/update existing draft story -> dnd_route_draft_update.\n" +
-            "3) Add/remove party members -> dnd_route_party_edit.\n" +
-            "4) Create sheets -> dnd_route_sheet_create.\n" +
-            "5) Pass timeout changes -> dnd_route_passtimeout.\n" +
-            "6) If no state mutation requested -> dnd_route_chat_reply.\n" +
-            "7) If mutation intent is clear but missing required details -> dnd_route_clarify.\n" +
+            "1) If a pending proposal/confirm is listed AND the user is answering it (all, 1 and 3, cancel, confirm, yes) -> dnd_route_pending_reply.\n" +
+            "2) If they want more/different examples (\"give me 3\", \"more monsters\", \"one more time\") -> dnd_route_propose_content with count. Do not treat that as selecting a numbered item.\n" +
+            "3) Campaign creation/start requests -> dnd_route_campaign_create.\n" +
+            "4) Rewrite/update existing draft story -> dnd_route_draft_update.\n" +
+            "5) Add/remove party members -> dnd_route_party_edit.\n" +
+            "6) Create a sheet when the user already gave a name AND concept -> dnd_route_sheet_create.\n" +
+            "7) Generate/brainstorm NPCs, monsters, locations, or maps without exact names -> dnd_route_propose_content.\n" +
+            "8) Pass timeout changes -> dnd_route_passtimeout.\n" +
+            "9) If no state mutation requested -> dnd_route_chat_reply.\n" +
+            "10) If mutation intent is clear but missing required details AND it is not a generate/brainstorm request -> dnd_route_clarify.\n" +
             "Hard rules:\n" +
             "- Use dnd_route_campaign_create ONLY when the user explicitly asks to create/start/begin a campaign.\n" +
-            "- If the request is about character/NPC/sheet/party/roster, never call dnd_route_campaign_create.\n" +
-            "- If the request is about character/NPC/sheet creation, never call dnd_route_draft_update.\n" +
-            "- Match response scope to request; do not trigger broad campaign rewrites for narrow sheet/party tasks.\n" +
-            "- For requests like \"create 3 NPCs\", call dnd_route_sheet_create with kind=npc and count set (and names when provided).\n" +
+            "- If the user says no rewrite / don't rewrite / just generate X, NEVER call dnd_route_draft_update.\n" +
+            "- If the request is about character/NPC/sheet/party/roster/monster/location/map, never call dnd_route_campaign_create.\n" +
+            "- If the request is about generating NPCs/monsters/locations/maps, never call dnd_route_draft_update.\n" +
+            "- Do not ask the user to fill name:/concept: forms. Invent campaign-fitting examples via dnd_route_propose_content.\n" +
+            "- \"examples\", \"come up with\", \"brainstorm\", \"that fit the campaign\", \"try again\" + examples -> dnd_route_propose_content.\n" +
+            "- If the user asks for a number of examples (\"give me 3\", \"more than 2\", \"more monsters\"), call dnd_route_propose_content with count and the same content kind. Do not treat that as picking an existing numbered example.\n" +
+            "- Do NOT put long example lists in dnd_route_chat_reply; that tool is for short collaborative chat (premise/tone/hook questions).\n" +
+            "- Keep dnd_route_chat_reply under ~800 characters. Longer lists must use dnd_route_propose_content.\n" +
+            "- For requests like \"create NPC name: Roland concept: gunslinger\", call dnd_route_sheet_create.\n" +
             "Never call gptcli_dnd_* tools directly in this step.\n" +
             "Keep tool arguments minimal and explicit. For overwrite=true, only set when user explicitly asked to overwrite/replace.";
     }
@@ -2552,6 +2772,18 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 
         var t = text.Trim();
         var lower = t.ToLowerInvariant();
+
+        if (LooksLikeNoRewriteIntent(lower))
+        {
+            return false;
+        }
+
+        if (LooksLikeLocationGenerateIntent(lower) ||
+            LooksLikeMonsterGenerateIntent(lower) ||
+            LooksLikeBrainstormExamplesIntent(lower))
+        {
+            return false;
+        }
 
         // Don't treat "new campaign" as an update.
         if (lower.Contains("new campaign", StringComparison.OrdinalIgnoreCase) ||
@@ -2820,7 +3052,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                lower.Contains("charactercreate", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static bool LooksLikeNpcCreateIntentFromText(string text)
+    internal static bool LooksLikeNpcCreateIntentFromText(string text)
     {
         if (string.IsNullOrWhiteSpace(text))
         {
@@ -2829,9 +3061,320 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 
         var lower = text.Trim().ToLowerInvariant();
         return lower.Contains("create npc", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("create npcs", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("generate npc", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("generate npcs", StringComparison.OrdinalIgnoreCase) ||
                lower.Contains("make npc", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("make npcs", StringComparison.OrdinalIgnoreCase) ||
                lower.Contains("new npc", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("some npc", StringComparison.OrdinalIgnoreCase) ||
                lower.Contains("npccreate", StringComparison.OrdinalIgnoreCase);
+    }
+
+    internal static bool LooksLikeNoRewriteIntent(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        var lower = text.Trim().ToLowerInvariant();
+        return lower.Contains("no rewrite", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("don't rewrite", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("dont rewrite", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("do not rewrite", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("just generate", StringComparison.OrdinalIgnoreCase);
+    }
+
+    internal static bool LooksLikeMonsterGenerateIntent(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        var lower = text.Trim().ToLowerInvariant();
+        return lower.Contains("monster", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("monsters", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("generate encounter", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("create encounter", StringComparison.OrdinalIgnoreCase);
+    }
+
+    internal static bool LooksLikeLocationGenerateIntent(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        var lower = text.Trim().ToLowerInvariant();
+        return lower.Contains("location", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("locations", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("maps", StringComparison.OrdinalIgnoreCase) ||
+               Regex.IsMatch(lower, @"\bmap\b", RegexOptions.CultureInvariant);
+    }
+
+    internal static bool LooksLikeBrainstormExamplesIntent(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        var lower = text.Trim().ToLowerInvariant();
+        return lower.Contains("example", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("examples", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("come up with", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("brainstorm", StringComparison.OrdinalIgnoreCase) ||
+               lower.Contains("fit the campaign", StringComparison.OrdinalIgnoreCase);
+    }
+
+    internal static DraftProposeKinds DetectDraftProposeKinds(string text)
+    {
+        var kinds = new DraftProposeKinds();
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return kinds;
+        }
+
+        kinds.Npcs = LooksLikeNpcCreateIntentFromText(text) ||
+                     Regex.IsMatch(text, @"\bnpcs?\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        kinds.Encounters = LooksLikeMonsterGenerateIntent(text);
+        kinds.Locations = LooksLikeLocationGenerateIntent(text);
+        if (!kinds.Npcs && !kinds.Encounters && !kinds.Locations && LooksLikeBrainstormExamplesIntent(text))
+        {
+            kinds.Npcs = true;
+        }
+
+        if (TryParseRequestedProposalCount(text, out var count))
+        {
+            kinds.Count = count;
+        }
+
+        return kinds;
+    }
+
+    internal static bool LooksLikeShortDraftTopic(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        var t = text.Trim().ToLowerInvariant();
+        if (LooksLikeBrainstormExamplesIntent(t) ||
+            LooksLikeNpcCreateIntentFromText(t) ||
+            LooksLikeMonsterGenerateIntent(t) ||
+            LooksLikeLocationGenerateIntent(t))
+        {
+            return false;
+        }
+
+        if (t is "premise" or "tone" or "hook" or "vibe" or "theme")
+        {
+            return true;
+        }
+
+        return t.Contains("opening scene", StringComparison.OrdinalIgnoreCase) ||
+               t.Contains("first scene", StringComparison.OrdinalIgnoreCase);
+    }
+
+    internal static bool TryParseProposalSelection(string raw, int itemCount, out List<int> indices)
+    {
+        indices = new List<int>();
+        if (string.IsNullOrWhiteSpace(raw) || itemCount <= 0)
+        {
+            return false;
+        }
+
+        if (LooksLikeProposalRevisionRequest(raw))
+        {
+            return false;
+        }
+
+        var t = Regex.Replace(raw.Trim().ToLowerInvariant(), @"<@!?\d+>", string.Empty).Trim();
+        if (t is "all" or "all of them" or "create all" or "make them all" or "create them" or "confirm" or "yes" or "y")
+        {
+            for (var i = 1; i <= itemCount; i++)
+            {
+                indices.Add(i);
+            }
+
+            return true;
+        }
+
+        foreach (Match m in Regex.Matches(t, @"\b(\d+)\b", RegexOptions.CultureInvariant))
+        {
+            if (!int.TryParse(m.Groups[1].Value, out var n) || n < 1 || n > itemCount)
+            {
+                continue;
+            }
+
+            if (!indices.Contains(n))
+            {
+                indices.Add(n);
+            }
+        }
+
+        return indices.Count > 0;
+    }
+
+    internal static bool LooksLikeProposalRevisionRequest(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text) || IsBareProposalSelectionPhrase(text))
+        {
+            return false;
+        }
+
+        if (LooksLikeMonsterGenerateIntent(text) ||
+            LooksLikeNpcCreateIntentFromText(text) ||
+            LooksLikeLocationGenerateIntent(text) ||
+            LooksLikeBrainstormExamplesIntent(text))
+        {
+            return true;
+        }
+
+        var t = Regex.Replace(text.Trim().ToLowerInvariant(), @"<@!?\d+>", string.Empty).Trim();
+        if (Regex.IsMatch(t, @"\b(more|another|again)\b", RegexOptions.CultureInvariant))
+        {
+            return true;
+        }
+
+        return TryParseRequestedProposalCount(t, out _);
+    }
+
+    internal static bool IsBareProposalSelectionPhrase(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        var t = Regex.Replace(text.Trim().ToLowerInvariant(), @"<@!?\d+>", string.Empty).Trim();
+        t = Regex.Replace(t, @"[!.?]+$", string.Empty).Trim();
+        if (t is "all" or "all of them" or "create all" or "make them all" or "create them" or "confirm" or "yes" or "y")
+        {
+            return true;
+        }
+
+        return Regex.IsMatch(
+            t,
+            @"^(?:create|make|pick|choose|add)?\s*\d+(?:\s*(?:and|,|&|/)\s*\d+)*$",
+            RegexOptions.CultureInvariant);
+    }
+
+    internal static bool TryParseRequestedProposalCount(string text, out int count)
+    {
+        count = 0;
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        var t = Regex.Replace(text.Trim().ToLowerInvariant(), @"<@!?\d+>", string.Empty).Trim();
+        var token = @"(?<n>\d+|one|two|three|four|five|six)";
+
+        var moreThan = Regex.Match(
+            t,
+            @"\bmore(?:\s+(?:monsters?|encounters?|npcs?|examples?|ideas?))?\s+than " + token + @"\b",
+            RegexOptions.CultureInvariant);
+        if (moreThan.Success && TryParseProposalCountToken(moreThan.Groups["n"].Value, out var moreThanN))
+        {
+            count = ClampProposalCount(moreThanN + 1);
+            return true;
+        }
+
+        var atLeast = Regex.Match(t, @"\bat least " + token + @"\b", RegexOptions.CultureInvariant);
+        if (atLeast.Success && TryParseProposalCountToken(atLeast.Groups["n"].Value, out var atLeastN))
+        {
+            count = ClampProposalCount(atLeastN);
+            return true;
+        }
+
+        var giveMe = Regex.Match(t, @"\bgive me " + token + @"\b", RegexOptions.CultureInvariant);
+        if (giveMe.Success && TryParseProposalCountToken(giveMe.Groups["n"].Value, out var giveMeN))
+        {
+            count = ClampProposalCount(giveMeN);
+            return true;
+        }
+
+        var nMore = Regex.Match(t, @"\b" + token + @" more\b", RegexOptions.CultureInvariant);
+        if (nMore.Success && TryParseProposalCountToken(nMore.Groups["n"].Value, out var nMoreN))
+        {
+            count = ClampProposalCount(nMoreN);
+            return true;
+        }
+
+        var nKind = Regex.Match(
+            t,
+            @"\b" + token + @"\s+(?:monsters?|encounters?|npcs?|examples?|ideas?)\b",
+            RegexOptions.CultureInvariant);
+        if (nKind.Success && TryParseProposalCountToken(nKind.Groups["n"].Value, out var nKindN))
+        {
+            count = ClampProposalCount(nKindN);
+            return true;
+        }
+
+        var iWant = Regex.Match(t, @"\bi want " + token + @"\b", RegexOptions.CultureInvariant);
+        if (iWant.Success && TryParseProposalCountToken(iWant.Groups["n"].Value, out var iWantN))
+        {
+            count = ClampProposalCount(iWantN);
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryParseProposalCountToken(string raw, out int count)
+    {
+        count = 0;
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return false;
+        }
+
+        if (int.TryParse(raw.Trim(), out var n) && n > 0)
+        {
+            count = n;
+            return true;
+        }
+
+        count = raw.Trim().ToLowerInvariant() switch
+        {
+            "one" => 1,
+            "two" => 2,
+            "three" => 3,
+            "four" => 4,
+            "five" => 5,
+            "six" => 6,
+            _ => 0
+        };
+        return count > 0;
+    }
+
+    private static int ClampProposalCount(int count) => Math.Clamp(count, 1, 6);
+
+    private static void InferProposalKindsFromPending(DndLiteChannelState dndState, DraftProposeKinds kinds)
+    {
+        if (kinds == null || dndState?.PendingDraftAction == null)
+        {
+            return;
+        }
+
+        if (!string.Equals(dndState.PendingDraftAction.ActionType, PendingActionProposeContent, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        var previous = DeserializeProposalBundle(dndState.PendingDraftAction.ArgumentsJson);
+        if (previous == null)
+        {
+            return;
+        }
+
+        kinds.Npcs = previous.Npcs is { Count: > 0 };
+        kinds.Encounters = previous.Encounters is { Count: > 0 };
+        kinds.Locations = previous.Locations is { Count: > 0 };
     }
 
     private static bool TryExtractNameConceptForSheetCreate(string text, out string name, out string concept)
@@ -3048,15 +3591,27 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 
         if (!TryExtractNameConceptForSheetCreate(strippedText, out var name, out var concept))
         {
-            var target = wantsCharacter ? "character" : "NPC";
-            try
+            var proposed = await HandleDraftRouteProposeContentAsync(
+                context,
+                channelState,
+                message,
+                dndState,
+                JsonSerializer.Serialize(new
+                {
+                    npcs = wantsNpc || wantsCharacter,
+                    encounters = LooksLikeMonsterGenerateIntent(strippedText),
+                    locations = LooksLikeLocationGenerateIntent(strippedText)
+                }),
+                strippedText,
+                ct);
+            if (proposed.Handled && !string.IsNullOrWhiteSpace(proposed.Reply))
             {
-                await message.Channel.SendMessageAsync(
-                    $"<@{message.Author.Id}> I can generate that {target} now. Please include both `name` and `concept` (for example: `create {target} name: Roland concept: Gunslinger haunted by ka`).");
-            }
-            catch
-            {
-                // ignore
+                var reply = $"<@{message.Author.Id}> {proposed.Reply.Trim()}";
+                await SendChunkedAsync(message.Channel, reply);
+                if (TryRecordAssistantReply(channelState, reply))
+                {
+                    try { await context.Host.SaveCachedChannelStateAsync(message.Channel.Id); } catch { }
+                }
             }
             return true;
         }
@@ -3179,6 +3734,14 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             return true;
         }
 
+        if (LooksLikeNpcCreateIntentFromText(text) ||
+            LooksLikeMonsterGenerateIntent(text) ||
+            LooksLikeLocationGenerateIntent(text) ||
+            LooksLikeBrainstormExamplesIntent(text))
+        {
+            return true;
+        }
+
         return lower.Contains("/gptcli", StringComparison.OrdinalIgnoreCase) ||
                lower.Contains("campaignlist", StringComparison.OrdinalIgnoreCase) ||
                lower.Contains("encounterlist", StringComparison.OrdinalIgnoreCase) ||
@@ -3211,7 +3774,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         => ReadBooleanConfiguration(context, "Discord:Modules:Dnd:Draft:IntentRouterLegacyFallback", defaultValue: true);
 
     private static int GetDraftIntentRouterTimeoutSeconds(DiscordModuleContext context)
-        => Math.Clamp(ReadIntConfiguration(context, "Discord:Modules:Dnd:Draft:IntentRouterTimeoutSeconds", defaultValue: 20), 8, 60);
+        => Math.Clamp(ReadIntConfiguration(context, "Discord:Modules:Dnd:Draft:IntentRouterTimeoutSeconds", defaultValue: 90), 15, 120);
 
     private static bool IsGameNarrationEnabled(DiscordModuleContext context)
         => ReadBooleanConfiguration(context, "Discord:Modules:Dnd:GameNarration:Enabled", defaultValue: true);
@@ -3292,6 +3855,1032 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
     {
         var raw = context?.Configuration?[key];
         return string.IsNullOrWhiteSpace(raw) ? defaultValue : raw.Trim();
+    }
+
+    private static int CountDraftProposalItems(string argumentsJson)
+    {
+        var bundle = DeserializeProposalBundle(argumentsJson);
+        return bundle?.ItemCount ?? 0;
+    }
+
+    private static readonly JsonSerializerOptions ProposalJsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        AllowTrailingCommas = true,
+        ReadCommentHandling = JsonCommentHandling.Skip,
+        NumberHandling = JsonNumberHandling.AllowReadingFromString
+    };
+
+    internal const string DraftProposalJsonSchema = """
+        {
+          "type": "object",
+          "properties": {
+            "npcs": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": { "type": "string" },
+                  "concept": { "type": "string" },
+                  "role": { "type": "string" }
+                },
+                "required": ["name", "concept", "role"],
+                "additionalProperties": false
+              }
+            },
+            "encounters": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "templateId": { "type": "string" },
+                  "name": { "type": "string" },
+                  "scene": { "type": "string" },
+                  "rewards": { "type": "string" },
+                  "boss": { "$ref": "#/$defs/actor" },
+                  "adds": {
+                    "type": "array",
+                    "items": { "$ref": "#/$defs/actor" }
+                  }
+                },
+                "required": ["templateId", "name", "scene", "rewards", "boss", "adds"],
+                "additionalProperties": false
+              }
+            },
+            "locations": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": { "type": "string" },
+                  "name": { "type": "string" },
+                  "summary": { "type": "string" },
+                  "mapMarkdown": { "type": "string" }
+                },
+                "required": ["id", "name", "summary", "mapMarkdown"],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": ["npcs", "encounters", "locations"],
+          "additionalProperties": false,
+          "$defs": {
+            "stats": {
+              "type": "object",
+              "properties": {
+                "str": { "type": "integer" },
+                "def": { "type": "integer" },
+                "dex": { "type": "integer" },
+                "spellPower": { "type": "integer" },
+                "luck": { "type": "integer" }
+              },
+              "required": ["str", "def", "dex", "spellPower", "luck"],
+              "additionalProperties": false
+            },
+            "actor": {
+              "type": "object",
+              "properties": {
+                "id": { "type": "string" },
+                "name": { "type": "string" },
+                "description": { "type": "string" },
+                "maxHp": { "type": "integer" },
+                "maxMp": { "type": "integer" },
+                "stats": { "$ref": "#/$defs/stats" }
+              },
+              "required": ["id", "name", "description", "maxHp", "maxMp", "stats"],
+              "additionalProperties": false
+            }
+          }
+        }
+        """;
+
+    private static DraftProposalBundle DeserializeProposalBundle(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return null;
+        }
+
+        var repaired = TryRepairJsonObject(SanitizeJsonStringControlChars(json));
+        try
+        {
+            var bundle = JsonSerializer.Deserialize<DraftProposalBundle>(repaired, ProposalJsonOptions);
+            if (bundle != null)
+            {
+                bundle.Npcs ??= new List<NpcProposalDto>();
+                bundle.Encounters ??= new List<EncounterTemplateDto>();
+                bundle.Locations ??= new List<DndLiteLocationDocument>();
+                if (bundle.ItemCount > 0)
+                {
+                    return bundle;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[dnd] draft-propose: strict JSON failed {ex.GetType().Name}: {ex.Message}");
+        }
+
+        return TryParseProposalBundleLoose(repaired) ?? SalvageProposalBundleFromPartialJson(json);
+    }
+
+    internal static string RenderDraftProposalBundle(DraftProposalBundle bundle)
+    {
+        if (bundle == null || bundle.ItemCount == 0)
+        {
+            return "I couldn't invent examples.";
+        }
+
+        var sb = new StringBuilder();
+        sb.AppendLine("Here are campaign-fitting examples. I will not rewrite the draft story.");
+        var n = 1;
+        if (bundle.Npcs is { Count: > 0 })
+        {
+            sb.AppendLine();
+            sb.AppendLine("**NPCs**");
+            foreach (var npc in bundle.Npcs)
+            {
+                var role = string.IsNullOrWhiteSpace(npc?.Role) ? string.Empty : $" ({npc.Role.Trim()})";
+                sb.AppendLine($"**{n}.** **{npc?.Name?.Trim() ?? "Unnamed"}**{role} — {npc?.Concept?.Trim() ?? "supporting character"}");
+                n++;
+            }
+        }
+
+        if (bundle.Encounters is { Count: > 0 })
+        {
+            sb.AppendLine();
+            sb.AppendLine("**Monsters / encounters**");
+            foreach (var enc in bundle.Encounters)
+            {
+                var boss = enc?.Boss?.Name ?? "foe";
+                var scene = string.IsNullOrWhiteSpace(enc?.Scene) ? $"Fight {boss}." : enc.Scene.Trim();
+                sb.AppendLine($"**{n}.** **{enc?.Name?.Trim() ?? enc?.TemplateId ?? "Encounter"}** — {TrimToLimit(scene, 800)}");
+                n++;
+            }
+        }
+
+        if (bundle.Locations is { Count: > 0 })
+        {
+            sb.AppendLine();
+            sb.AppendLine("**Locations**");
+            foreach (var loc in bundle.Locations)
+            {
+                sb.AppendLine($"**{n}.** **{loc?.Name?.Trim() ?? loc?.Id ?? "Place"}** — {TrimToLimit(loc?.Summary ?? string.Empty, 500)}");
+                if (!string.IsNullOrWhiteSpace(loc?.MapMarkdown))
+                {
+                    sb.AppendLine("```");
+                    sb.AppendLine(TrimToLimit(loc.MapMarkdown.Trim(), 400));
+                    sb.AppendLine("```");
+                }
+
+                n++;
+            }
+        }
+
+        sb.AppendLine();
+        var pickExample = bundle.ItemCount >= 3 ? "1 and 3" : bundle.ItemCount == 2 ? "1 and 2" : "1";
+        sb.AppendLine($"Reply `all`, `{pickExample}`, or `cancel`. I’ll create only what you pick.");
+        return sb.ToString().Trim();
+    }
+
+    private async Task<DraftProposalBundle> GenerateDraftProposalsAsync(
+        DiscordModuleContext context,
+        InstructionGPT.ChannelState channelState,
+        DndLiteCampaignCatalogDocument draft,
+        DraftProposeKinds kinds,
+        CancellationToken ct)
+    {
+        var wantNpcs = kinds?.Npcs == true;
+        var wantEncounters = kinds?.Encounters == true;
+        var wantLocations = kinds?.Locations == true;
+        if (!wantNpcs && !wantEncounters && !wantLocations)
+        {
+            wantNpcs = true;
+        }
+
+        var count = ClampProposalCount(kinds?.Count ?? 3);
+        var excerpt = BuildGenerationCampaignContext(draft?.CampaignMarkdown) ?? string.Empty;
+        var sb = new StringBuilder();
+        sb.AppendLine("Invent additive D&D-lite examples that fit this campaign. Do not rewrite the story.");
+        if (wantNpcs)
+        {
+            sb.AppendLine($"npcs: {count} objects. Names unique.");
+        }
+        else
+        {
+            sb.AppendLine("npcs: []");
+        }
+
+        if (wantEncounters)
+        {
+            sb.AppendLine($"encounters: {count} objects. Distinct setups. stats 8-16, maxHp 8-40.");
+        }
+        else
+        {
+            sb.AppendLine("encounters: []");
+        }
+
+        if (wantLocations)
+        {
+            sb.AppendLine($"locations: {count} objects. summary is 1-2 sentences. mapMarkdown must be a string: \"\" or one line of ASCII, no raw newlines.");
+        }
+        else
+        {
+            sb.AppendLine("locations: []");
+        }
+
+        sb.AppendLine("Campaign excerpt:");
+        sb.AppendLine(excerpt);
+
+        var request = new ChatCompletionCreateRequest
+        {
+            Model = ResolveModel(context, channelState),
+            MaxCompletionTokens = 16384,
+            Messages = new List<ChatMessage>
+            {
+                new(ChatCompletionRole.System, "You invent campaign-fitting NPCs, monsters, and locations. Follow the JSON schema. Unused arrays must be empty."),
+                new(ChatCompletionRole.User, sb.ToString())
+            }
+        };
+
+        ChatCompletionCreateResponse response;
+        try
+        {
+            response = await context.OpenAILogic.CreateStructuredJsonCompletionAsync(
+                request,
+                "dnd_draft_proposals",
+                BinaryData.FromString(DraftProposalJsonSchema));
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[dnd] draft-propose: llm failed {ex.GetType().Name} {ex.Message}");
+            return null;
+        }
+
+        if (response == null || !response.Successful)
+        {
+            Console.WriteLine($"[dnd] draft-propose: unsuccessful {response?.Error?.Message}");
+            return null;
+        }
+
+        var text = ExtractChatMessageText(response.Choices?.FirstOrDefault()?.Message);
+        Console.WriteLine($"[dnd] draft-propose: httpOk textLen={(text ?? string.Empty).Length} preview={TrimToLimit((text ?? string.Empty).Replace('\n', ' '), 240)}");
+        var parsed = TryParseProposalBundleFromModelText(text);
+        if (parsed == null)
+        {
+            Console.WriteLine($"[dnd] draft-propose: could not parse proposal JSON textLen={(text ?? string.Empty).Length} head={TrimToLimit((text ?? string.Empty).Replace('\n', ' '), 400)}");
+            return null;
+        }
+
+        if (!wantNpcs)
+        {
+            parsed.Npcs.Clear();
+        }
+
+        if (!wantEncounters)
+        {
+            parsed.Encounters.Clear();
+        }
+
+        if (!wantLocations)
+        {
+            parsed.Locations.Clear();
+        }
+
+        NormalizeProposalBundle(parsed);
+        return parsed.ItemCount == 0 ? null : parsed;
+    }
+
+    internal static DraftProposalBundle TryParseProposalBundleFromModelText(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return null;
+        }
+
+        var json = text.Trim();
+        var fence = Regex.Match(json, @"```(?:json)?\s*([\s\S]*?)```", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        if (fence.Success)
+        {
+            json = fence.Groups[1].Value.Trim();
+        }
+        else
+        {
+            json = Regex.Replace(json, @"^```(?:json)?\s*", string.Empty, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        }
+
+        var start = json.IndexOf('{');
+        if (start < 0)
+        {
+            return null;
+        }
+
+        json = json[start..];
+        return DeserializeProposalBundle(json);
+    }
+
+    internal static string SanitizeJsonStringControlChars(string json)
+    {
+        if (string.IsNullOrEmpty(json))
+        {
+            return json;
+        }
+
+        var sb = new StringBuilder(json.Length + 16);
+        var inString = false;
+        var escape = false;
+        foreach (var c in json)
+        {
+            if (!inString)
+            {
+                if (c == '"')
+                {
+                    inString = true;
+                }
+
+                sb.Append(c);
+                continue;
+            }
+
+            if (escape)
+            {
+                sb.Append(c);
+                escape = false;
+                continue;
+            }
+
+            if (c == '\\')
+            {
+                sb.Append(c);
+                escape = true;
+                continue;
+            }
+
+            if (c == '"')
+            {
+                inString = false;
+                sb.Append(c);
+                continue;
+            }
+
+            if (c == '\n' || c == '\r')
+            {
+                sb.Append('\\').Append('n');
+                continue;
+            }
+
+            if (c == '\t')
+            {
+                sb.Append('\\').Append('t');
+                continue;
+            }
+
+            if (char.IsControl(c))
+            {
+                continue;
+            }
+
+            sb.Append(c);
+        }
+
+        return sb.ToString();
+    }
+
+    internal static string TryRepairJsonObject(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return json;
+        }
+
+        var sb = new StringBuilder(json.Trim());
+        var inString = false;
+        var escape = false;
+        var stack = new Stack<char>();
+        for (var i = 0; i < sb.Length; i++)
+        {
+            var c = sb[i];
+            if (inString)
+            {
+                if (escape)
+                {
+                    escape = false;
+                    continue;
+                }
+
+                if (c == '\\')
+                {
+                    escape = true;
+                    continue;
+                }
+
+                if (c == '"')
+                {
+                    inString = false;
+                }
+
+                continue;
+            }
+
+            if (c == '"')
+            {
+                inString = true;
+                continue;
+            }
+
+            if (c is '{' or '[')
+            {
+                stack.Push(c);
+            }
+            else if (c == '}' && stack.Count > 0 && stack.Peek() == '{')
+            {
+                stack.Pop();
+            }
+            else if (c == ']' && stack.Count > 0 && stack.Peek() == '[')
+            {
+                stack.Pop();
+            }
+        }
+
+        if (inString)
+        {
+            if (escape)
+            {
+                sb.Length--;
+            }
+
+            sb.Append('"');
+        }
+
+        while (stack.Count > 0)
+        {
+            var open = stack.Pop();
+            var last = sb.Length == 0 ? '\0' : sb[^1];
+            if (last is ',' or ':')
+            {
+                sb.Length--;
+            }
+
+            sb.Append(open == '{' ? '}' : ']');
+        }
+
+        return sb.ToString();
+    }
+
+    private static DraftProposalBundle TryParseProposalBundleLoose(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json, new JsonDocumentOptions
+            {
+                AllowTrailingCommas = true,
+                CommentHandling = JsonCommentHandling.Skip
+            });
+            var root = doc.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                return null;
+            }
+
+            var bundle = new DraftProposalBundle();
+            if (TryGetJsonPropertyIgnoreCase(root, "npcs", out var npcs) && npcs.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var el in npcs.EnumerateArray())
+                {
+                    var name = ReadJsonString(el, "name");
+                    var concept = ReadJsonString(el, "concept");
+                    if (string.IsNullOrWhiteSpace(name) && string.IsNullOrWhiteSpace(concept))
+                    {
+                        continue;
+                    }
+
+                    bundle.Npcs.Add(new NpcProposalDto
+                    {
+                        Name = name,
+                        Concept = concept,
+                        Role = ReadJsonString(el, "role")
+                    });
+                }
+            }
+
+            if (TryGetJsonPropertyIgnoreCase(root, "encounters", out var encounters) && encounters.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var el in encounters.EnumerateArray())
+                {
+                    var name = ReadJsonString(el, "name");
+                    var templateId = ReadJsonString(el, "templateId");
+                    if (string.IsNullOrWhiteSpace(name) && string.IsNullOrWhiteSpace(templateId))
+                    {
+                        continue;
+                    }
+
+                    bundle.Encounters.Add(new EncounterTemplateDto
+                    {
+                        TemplateId = templateId,
+                        Name = name,
+                        Scene = ReadJsonString(el, "scene"),
+                        Rewards = ReadJsonString(el, "rewards"),
+                        Boss = ReadLooseActor(el, "boss")
+                    });
+                }
+            }
+
+            if (TryGetJsonPropertyIgnoreCase(root, "locations", out var locations) && locations.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var el in locations.EnumerateArray())
+                {
+                    var name = ReadJsonString(el, "name");
+                    if (string.IsNullOrWhiteSpace(name))
+                    {
+                        continue;
+                    }
+
+                    bundle.Locations.Add(new DndLiteLocationDocument
+                    {
+                        Id = ReadJsonString(el, "id"),
+                        Name = name,
+                        Summary = ReadJsonString(el, "summary"),
+                        MapMarkdown = ReadJsonString(el, "mapMarkdown")
+                    });
+                }
+            }
+
+            return bundle.ItemCount == 0 ? null : bundle;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[dnd] draft-propose: loose JSON failed {ex.GetType().Name}: {ex.Message}");
+            return null;
+        }
+    }
+
+    internal static DraftProposalBundle SalvageProposalBundleFromPartialJson(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return null;
+        }
+
+        var bundle = new DraftProposalBundle();
+        foreach (var obj in EnumerateJsonObjectSlices(json, "npcs"))
+        {
+            var name = ReadPartialJsonStringField(obj, "name");
+            var concept = ReadPartialJsonStringField(obj, "concept");
+            if (string.IsNullOrWhiteSpace(name) && string.IsNullOrWhiteSpace(concept))
+            {
+                continue;
+            }
+
+            bundle.Npcs.Add(new NpcProposalDto
+            {
+                Name = name,
+                Concept = concept,
+                Role = ReadPartialJsonStringField(obj, "role")
+            });
+        }
+
+        foreach (var obj in EnumerateJsonObjectSlices(json, "encounters"))
+        {
+            var name = ReadPartialJsonStringField(obj, "name");
+            var templateId = ReadPartialJsonStringField(obj, "templateId");
+            if (string.IsNullOrWhiteSpace(name) && string.IsNullOrWhiteSpace(templateId))
+            {
+                continue;
+            }
+
+            bundle.Encounters.Add(new EncounterTemplateDto
+            {
+                TemplateId = templateId,
+                Name = name,
+                Scene = ReadPartialJsonStringField(obj, "scene"),
+                Rewards = ReadPartialJsonStringField(obj, "rewards")
+            });
+        }
+
+        foreach (var obj in EnumerateJsonObjectSlices(json, "locations"))
+        {
+            var name = ReadPartialJsonStringField(obj, "name");
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                continue;
+            }
+
+            bundle.Locations.Add(new DndLiteLocationDocument
+            {
+                Id = ReadPartialJsonStringField(obj, "id"),
+                Name = name,
+                Summary = ReadPartialJsonStringField(obj, "summary"),
+                MapMarkdown = ReadPartialJsonStringField(obj, "mapMarkdown")
+            });
+        }
+
+        return bundle.ItemCount == 0 ? null : bundle;
+    }
+
+    private static IEnumerable<string> EnumerateJsonObjectSlices(string json, string arrayName)
+    {
+        if (string.IsNullOrWhiteSpace(json) || string.IsNullOrWhiteSpace(arrayName))
+        {
+            yield break;
+        }
+
+        var key = $"\"{arrayName}\"";
+        var keyIdx = json.IndexOf(key, StringComparison.OrdinalIgnoreCase);
+        if (keyIdx < 0)
+        {
+            yield break;
+        }
+
+        var bracket = json.IndexOf('[', keyIdx + key.Length);
+        if (bracket < 0)
+        {
+            yield break;
+        }
+
+        var i = bracket + 1;
+        while (i < json.Length)
+        {
+            var open = json.IndexOf('{', i);
+            if (open < 0)
+            {
+                yield break;
+            }
+
+            var close = json.IndexOf('}', open + 1);
+            if (close < 0)
+            {
+                yield return json[open..];
+                yield break;
+            }
+
+            yield return json[open..(close + 1)];
+            i = close + 1;
+        }
+    }
+
+    private static string ReadPartialJsonStringField(string jsonObject, string fieldName)
+    {
+        if (string.IsNullOrWhiteSpace(jsonObject) || string.IsNullOrWhiteSpace(fieldName))
+        {
+            return null;
+        }
+
+        var match = Regex.Match(
+            jsonObject,
+            "\"" + Regex.Escape(fieldName) + "\"\\s*:\\s*\"(?<v>(?:\\\\.|[^\"\\\\])*)",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        if (!match.Success)
+        {
+            return null;
+        }
+
+        var raw = match.Groups["v"].Value;
+        if (string.IsNullOrEmpty(raw))
+        {
+            return string.Empty;
+        }
+
+        try
+        {
+            return Regex.Unescape(raw);
+        }
+        catch
+        {
+            return raw.Replace("\\n", "\n").Replace("\\\"", "\"");
+        }
+    }
+
+    private static bool TryGetJsonPropertyIgnoreCase(JsonElement obj, string name, out JsonElement value)
+    {
+        value = default;
+        if (obj.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        foreach (var prop in obj.EnumerateObject())
+        {
+            if (string.Equals(prop.Name, name, StringComparison.OrdinalIgnoreCase))
+            {
+                value = prop.Value;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static string ReadJsonString(JsonElement obj, string name)
+    {
+        if (!TryGetJsonPropertyIgnoreCase(obj, name, out var el))
+        {
+            return null;
+        }
+
+        return el.ValueKind switch
+        {
+            JsonValueKind.String => el.GetString(),
+            JsonValueKind.Number => el.ToString(),
+            JsonValueKind.True => "true",
+            JsonValueKind.False => "false",
+            _ => null
+        };
+    }
+
+    private static ActorDto ReadLooseActor(JsonElement parent, string name)
+    {
+        if (!TryGetJsonPropertyIgnoreCase(parent, name, out var el) || el.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        var hp = 0;
+        if (TryGetJsonPropertyIgnoreCase(el, "maxHp", out var hpEl) && hpEl.ValueKind == JsonValueKind.Number)
+        {
+            hpEl.TryGetInt32(out hp);
+        }
+
+        return new ActorDto
+        {
+            Name = ReadJsonString(el, "name"),
+            Description = ReadJsonString(el, "description"),
+            MaxHp = hp
+        };
+    }
+
+    private static void NormalizeProposalBundle(DraftProposalBundle bundle)
+    {
+        if (bundle == null)
+        {
+            return;
+        }
+
+        bundle.Npcs = (bundle.Npcs ?? new List<NpcProposalDto>())
+            .Where(n => n != null && !string.IsNullOrWhiteSpace(n.Name) && !string.IsNullOrWhiteSpace(n.Concept))
+            .Take(6)
+            .ToList();
+        foreach (var npc in bundle.Npcs)
+        {
+            npc.Name = TrimToLimit(npc.Name.Trim(), 80);
+            npc.Concept = TrimToLimit(npc.Concept.Trim(), 220);
+            npc.Role = string.IsNullOrWhiteSpace(npc.Role) ? "supporting" : TrimToLimit(npc.Role.Trim(), 40);
+        }
+
+        bundle.Encounters = (bundle.Encounters ?? new List<EncounterTemplateDto>())
+            .Where(e => e != null && (!string.IsNullOrWhiteSpace(e.Name) || !string.IsNullOrWhiteSpace(e.TemplateId)))
+            .Take(6)
+            .ToList();
+        foreach (var enc in bundle.Encounters)
+        {
+            enc.Name = string.IsNullOrWhiteSpace(enc.Name) ? enc.TemplateId : enc.Name.Trim();
+            enc.TemplateId = string.IsNullOrWhiteSpace(enc.TemplateId) ? SlugifySegment(enc.Name) : SlugifySegment(enc.TemplateId);
+            enc.Scene ??= $"The party faces {enc.Name}.";
+            enc.Rewards ??= "A clue and a poultice.";
+            enc.Boss = NormalizeProposedActor(enc.Boss, enc.Name + " boss", boss: true);
+            enc.Adds = (enc.Adds ?? new List<ActorDto>()).Where(a => a != null).Take(4).Select(a => NormalizeProposedActor(a, "add", boss: false)).ToList();
+        }
+
+        bundle.Locations = (bundle.Locations ?? new List<DndLiteLocationDocument>())
+            .Where(l => l != null && !string.IsNullOrWhiteSpace(l.Name))
+            .Take(6)
+            .ToList();
+        foreach (var loc in bundle.Locations)
+        {
+            loc.Name = TrimToLimit(loc.Name.Trim(), 80);
+            loc.Id = string.IsNullOrWhiteSpace(loc.Id) ? SlugifySegment(loc.Name) : SlugifySegment(loc.Id);
+            loc.Summary = TrimToLimit(loc.Summary?.Trim() ?? string.Empty, 400);
+            loc.MapMarkdown = string.IsNullOrWhiteSpace(loc.MapMarkdown) ? null : TrimToLimit(loc.MapMarkdown.Trim(), 500);
+        }
+    }
+
+    private static ActorDto NormalizeProposedActor(ActorDto actor, string fallbackName, bool boss)
+    {
+        actor ??= new ActorDto();
+        actor.Name = string.IsNullOrWhiteSpace(actor.Name) ? fallbackName : actor.Name.Trim();
+        actor.Description ??= string.Empty;
+        actor.Stats ??= new DndStats(boss ? 14 : 12, 11, 10, 8, 8);
+        actor.MaxHp = actor.MaxHp <= 0 ? (boss ? 28 : 14) : Math.Clamp(actor.MaxHp, 1, 200);
+        actor.MaxMp = Math.Max(0, actor.MaxMp);
+        return actor;
+    }
+
+    private async Task<string> ExecutePendingDraftProposalAsync(
+        DiscordModuleContext context,
+        InstructionGPT.ChannelState channelState,
+        SocketMessage message,
+        PendingDraftActionRequest pending,
+        List<int> selected,
+        CancellationToken ct,
+        bool sendToChannel = true)
+    {
+        var bundle = DeserializeProposalBundle(pending?.ArgumentsJson);
+        if (bundle == null || bundle.ItemCount == 0)
+        {
+            const string empty = "Pending proposals expired or were empty.";
+            if (sendToChannel)
+            {
+                try { await message.Channel.SendMessageAsync($"<@{message.Author.Id}> {empty}"); } catch { }
+            }
+
+            return empty;
+        }
+
+        var itemCount = bundle.ItemCount;
+        if (selected == null || selected.Count == 0)
+        {
+            selected = Enumerable.Range(1, itemCount).ToList();
+        }
+
+        var selectedSet = selected.Where(i => i >= 1 && i <= itemCount).ToHashSet();
+        var execCtx = new GptCliExecutionContext(context, channelState, message.Channel, message.Author, null, message);
+        var lines = new List<string>();
+        var n = 1;
+
+        foreach (var npc in bundle.Npcs ?? new List<NpcProposalDto>())
+        {
+            if (selectedSet.Contains(n))
+            {
+                var argsJson = JsonSerializer.Serialize(new { name = npc.Name, concept = npc.Concept });
+                var res = await ExecuteNpcCreateAsync(execCtx, argsJson, ct);
+                lines.Add(res is { Handled: true }
+                    ? $"- NPC {npc.Name}: created"
+                    : $"- NPC {npc.Name}: failed");
+            }
+
+            n++;
+        }
+
+        var draft = await LoadDraftCampaignAsync(channelState, (await GetOrLoadStateAsync(channelState, ct)).ActiveCampaignName ?? "default", ct);
+        if (draft != null)
+        {
+            var doc = ToCampaignDocument(draft);
+            var addedEncounters = 0;
+            var addedLocations = 0;
+            foreach (var enc in bundle.Encounters ?? new List<EncounterTemplateDto>())
+            {
+                if (selectedSet.Contains(n))
+                {
+                    if (TryAddEncounterTemplateFromDto(doc, enc))
+                    {
+                        addedEncounters++;
+                        lines.Add($"- Encounter {enc.Name}: added");
+                    }
+                    else
+                    {
+                        lines.Add($"- Encounter {enc.Name}: skipped");
+                    }
+                }
+
+                n++;
+            }
+
+            foreach (var loc in bundle.Locations ?? new List<DndLiteLocationDocument>())
+            {
+                if (selectedSet.Contains(n))
+                {
+                    addedLocations += AddLocationToDraft(doc, loc) ? 1 : 0;
+                    lines.Add($"- Location {loc.Name}: added");
+                }
+
+                n++;
+            }
+
+            if (addedEncounters > 0 || addedLocations > 0)
+            {
+                doc.UpdatedUtc = DateTime.UtcNow;
+                await SaveDraftCampaignAsync(channelState, doc, ct);
+            }
+        }
+
+        var header = lines.Count == 0
+            ? "Nothing was selected."
+            : "Created selected draft content (story markdown unchanged):";
+        var body = $"{header}\n{string.Join("\n", lines)}";
+        if (sendToChannel)
+        {
+            var reply = $"<@{message.Author.Id}>\n{body}";
+            await SendChunkedAsync(message.Channel, TrimToLimit(reply, 1800));
+            if (TryRecordAssistantReply(channelState, reply))
+            {
+                try { await context.Host.SaveCachedChannelStateAsync(message.Channel.Id); } catch { }
+            }
+        }
+
+        return body;
+    }
+
+    private static DndLiteCampaignDocument ToCampaignDocument(DndLiteCampaignCatalogDocument draft)
+    {
+        return new DndLiteCampaignDocument
+        {
+            CampaignName = draft.CampaignName,
+            CampaignMarkdown = draft.CampaignMarkdown ?? string.Empty,
+            UpdatedUtc = draft.UpdatedUtc,
+            EncounterTemplates = draft.EncounterTemplates ?? new List<DndLiteEncounterTemplateDocument>(),
+            Locations = draft.Locations ?? new List<DndLiteLocationDocument>()
+        };
+    }
+
+    private static bool AddLocationToDraft(DndLiteCampaignDocument doc, DndLiteLocationDocument loc)
+    {
+        if (doc == null || loc == null || string.IsNullOrWhiteSpace(loc.Name))
+        {
+            return false;
+        }
+
+        doc.Locations ??= new List<DndLiteLocationDocument>();
+        loc.Id = string.IsNullOrWhiteSpace(loc.Id) ? SlugifySegment(loc.Name) : SlugifySegment(loc.Id);
+        var existing = doc.Locations.FirstOrDefault(x =>
+            string.Equals(x.Id, loc.Id, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(x.Name, loc.Name, StringComparison.OrdinalIgnoreCase));
+        if (existing != null)
+        {
+            existing.Summary = loc.Summary ?? existing.Summary;
+            existing.MapMarkdown = loc.MapMarkdown ?? existing.MapMarkdown;
+            existing.LinkedEncounterTemplateId = loc.LinkedEncounterTemplateId ?? existing.LinkedEncounterTemplateId;
+            return true;
+        }
+
+        doc.Locations.Add(loc);
+        return true;
+    }
+
+    private static bool TryAddEncounterTemplateFromDto(DndLiteCampaignDocument doc, EncounterTemplateDto e)
+    {
+        if (doc == null || e == null)
+        {
+            return false;
+        }
+
+        doc.EncounterTemplates ??= new List<DndLiteEncounterTemplateDocument>();
+        var templateId = SlugifySegment(string.IsNullOrWhiteSpace(e.TemplateId) ? e.Name : e.TemplateId);
+        if (string.IsNullOrWhiteSpace(templateId))
+        {
+            return false;
+        }
+
+        if (doc.EncounterTemplates.Any(t => string.Equals(t.TemplateId, templateId, StringComparison.OrdinalIgnoreCase)))
+        {
+            templateId = $"{templateId}-{doc.EncounterTemplates.Count + 1}";
+        }
+
+        e.Boss = NormalizeProposedActor(e.Boss, "boss", boss: true);
+        var usedEnemyIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var bossEnemyId = MakeUniqueSlug(
+            firstChoice: SlugifyOptionalSegment(e.Boss.Id),
+            used: usedEnemyIds,
+            fallback: SlugifyOptionalSegment(e.Boss.Name),
+            defaultValue: "boss");
+        var bossActorId = $"{templateId}:{bossEnemyId}";
+        var boss = ToEnemyDef(bossActorId, e.Boss.Name, isBoss: true, e.Boss.Stats, e.Boss.MaxHp, e.Boss.MaxMp);
+
+        var adds = new List<DndActorDefinition>();
+        var addDescs = new List<DndLiteActorDescriptor>();
+        foreach (var add in e.Adds ?? new List<ActorDto>())
+        {
+            if (add == null)
+            {
+                continue;
+            }
+
+            var normalized = NormalizeProposedActor(add, "add", boss: false);
+            var addEnemyId = MakeUniqueSlug(
+                firstChoice: SlugifyOptionalSegment(normalized.Id),
+                used: usedEnemyIds,
+                fallback: SlugifyOptionalSegment(normalized.Name),
+                defaultValue: "add");
+            var addActorId = $"{templateId}:{addEnemyId}";
+            adds.Add(ToEnemyDef(addActorId, normalized.Name, isBoss: false, normalized.Stats, normalized.MaxHp, normalized.MaxMp));
+            addDescs.Add(new DndLiteActorDescriptor
+            {
+                ActorId = addActorId,
+                Name = normalized.Name,
+                Description = normalized.Description ?? string.Empty
+            });
+        }
+
+        doc.EncounterTemplates.Add(new DndLiteEncounterTemplateDocument
+        {
+            TemplateId = templateId,
+            Name = string.IsNullOrWhiteSpace(e.Name) ? templateId : e.Name.Trim(),
+            Scene = e.Scene ?? string.Empty,
+            Rewards = e.Rewards ?? string.Empty,
+            Boss = new DndLiteActorDescriptor
+            {
+                ActorId = bossActorId,
+                Name = e.Boss.Name ?? "Boss",
+                Description = e.Boss.Description ?? string.Empty
+            },
+            Adds = addDescs,
+            Mechanics = new DndEncounterTemplate(
+                TemplateId: templateId,
+                Name: string.IsNullOrWhiteSpace(e.Name) ? templateId : e.Name.Trim(),
+                Boss: boss,
+                Adds: adds,
+                Scene: e.Scene ?? string.Empty,
+                Rewards: e.Rewards ?? string.Empty)
+        });
+        return true;
     }
 
     private static string BuildDraftConversationalFallback(string userText)
@@ -3841,7 +5430,33 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         }
 
         var raw = (message.Content ?? string.Empty).Trim();
-        if (!TryParseDraftConfirmationResponse(raw, out var isConfirm, out var isCancel))
+        var isPropose = string.Equals(pending.ActionType, PendingActionProposeContent, StringComparison.OrdinalIgnoreCase);
+        List<int> selected = null;
+        var looksLikePendingReply = false;
+        var isCancel = false;
+        if (isPropose)
+        {
+            if (LooksLikeProposalRevisionRequest(raw))
+            {
+                return false;
+            }
+
+            var itemCount = CountDraftProposalItems(pending.ArgumentsJson);
+            if (TryParseDraftConfirmationResponse(raw, out _, out isCancel))
+            {
+                looksLikePendingReply = true;
+            }
+            else if (TryParseProposalSelection(raw, itemCount, out selected))
+            {
+                looksLikePendingReply = true;
+            }
+        }
+        else if (TryParseDraftConfirmationResponse(raw, out _, out isCancel))
+        {
+            looksLikePendingReply = true;
+        }
+
+        if (!looksLikePendingReply)
         {
             return false;
         }
@@ -3870,26 +5485,49 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 
         dndState.PendingDraftAction = null;
         await SaveStateAsync(channelState, dndState, ct);
-        return await ExecutePendingDraftActionAsync(context, channelState, message, pending, ct);
+        if (isPropose)
+        {
+            await ExecutePendingDraftProposalAsync(context, channelState, message, pending, selected, ct);
+            return true;
+        }
+
+        await ExecutePendingDraftActionAsync(context, channelState, message, pending, ct);
+        return true;
     }
 
-    private async Task<bool> ExecutePendingDraftActionAsync(
+    private async Task<string> ExecutePendingDraftActionAsync(
         DiscordModuleContext context,
         InstructionGPT.ChannelState channelState,
         SocketMessage message,
         PendingDraftActionRequest pending,
-        CancellationToken ct)
+        CancellationToken ct,
+        bool sendToChannel = true)
     {
+        async Task<string> FinishAsync(string body)
+        {
+            body = string.IsNullOrWhiteSpace(body) ? "Done." : body.Trim();
+            if (sendToChannel)
+            {
+                var reply = $"<@{message.Author.Id}>\n{body}";
+                await SendChunkedAsync(message.Channel, reply);
+                if (TryRecordAssistantReply(channelState, reply))
+                {
+                    try { await context.Host.SaveCachedChannelStateAsync(message.Channel.Id); } catch { }
+                }
+            }
+
+            return body;
+        }
+
         if (context == null || channelState == null || message == null || pending == null)
         {
-            return false;
+            return await FinishAsync("Pending draft action is invalid.");
         }
 
         var actionType = (pending.ActionType ?? string.Empty).Trim();
         if (string.IsNullOrWhiteSpace(actionType))
         {
-            try { await message.Channel.SendMessageAsync($"<@{message.Author.Id}> Pending draft action is invalid."); } catch { }
-            return true;
+            return await FinishAsync("Pending draft action is invalid.");
         }
 
         var execCtx = new GptCliExecutionContext(context, channelState, message.Channel, message.Author, null, message);
@@ -3900,46 +5538,32 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             {
                 var argsJson = string.IsNullOrWhiteSpace(pending.ArgumentsJson) ? "{}" : pending.ArgumentsJson;
                 var res = await ExecuteCampaignCreateAsync(execCtx, argsJson, ct);
-                var reply = res is { Handled: true } && !string.IsNullOrWhiteSpace(res.Response)
-                    ? $"<@{message.Author.Id}>\n{res.Response.Trim()}"
-                    : $"<@{message.Author.Id}> Sorry, campaign creation failed. Try `/gptcli dnd campaigncreate`.";
-                await SendChunkedAsync(message.Channel, reply);
-                if (TryRecordAssistantReply(channelState, reply))
-                {
-                    try { await context.Host.SaveCachedChannelStateAsync(message.Channel.Id); } catch { }
-                }
-                return true;
+                return await FinishAsync(res is { Handled: true } && !string.IsNullOrWhiteSpace(res.Response)
+                    ? res.Response.Trim()
+                    : "Sorry, campaign creation failed. Try `/gptcli dnd campaigncreate`.");
             }
 
             if (string.Equals(actionType, PendingActionDraftUpdate, StringComparison.OrdinalIgnoreCase))
             {
                 var argsJson = string.IsNullOrWhiteSpace(pending.ArgumentsJson) ? "{}" : pending.ArgumentsJson;
                 var res = await ExecuteDraftUpdateAsync(execCtx, argsJson, ct);
-                var reply = res is { Handled: true } && !string.IsNullOrWhiteSpace(res.Response)
-                    ? $"<@{message.Author.Id}>\n{res.Response.Trim()}"
-                    : $"<@{message.Author.Id}> Sorry, draft update failed.";
-                await SendChunkedAsync(message.Channel, reply);
-                if (TryRecordAssistantReply(channelState, reply))
-                {
-                    try { await context.Host.SaveCachedChannelStateAsync(message.Channel.Id); } catch { }
-                }
-                return true;
+                return await FinishAsync(res is { Handled: true } && !string.IsNullOrWhiteSpace(res.Response)
+                    ? res.Response.Trim()
+                    : "Sorry, draft update failed.");
             }
 
             if (string.Equals(actionType, PendingActionPartyEdit, StringComparison.OrdinalIgnoreCase))
             {
                 if (!TryParseJsonElement(pending.ArgumentsJson, out var root))
                 {
-                    try { await message.Channel.SendMessageAsync($"<@{message.Author.Id}> Pending party change is invalid JSON."); } catch { }
-                    return true;
+                    return await FinishAsync("Pending party change is invalid JSON.");
                 }
 
                 var wantsAdd = TryGetPropertyIgnoreCase(root, "add", out var addEl) && addEl.ValueKind is JsonValueKind.True or JsonValueKind.False && addEl.GetBoolean();
                 var wantsRemove = TryGetPropertyIgnoreCase(root, "remove", out var remEl) && remEl.ValueKind is JsonValueKind.True or JsonValueKind.False && remEl.GetBoolean();
                 if (wantsAdd == wantsRemove)
                 {
-                    try { await message.Channel.SendMessageAsync($"<@{message.Author.Id}> Pending party change was ambiguous."); } catch { }
-                    return true;
+                    return await FinishAsync("Pending party change was ambiguous.");
                 }
 
                 var userIds = new List<ulong>();
@@ -3983,7 +5607,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                     npcIds,
                     ct);
 
-                var replyLines = new List<string> { $"<@{message.Author.Id}> Updated the draft party roster." };
+                var replyLines = new List<string> { "Updated the draft party roster." };
                 if (applied.Count > 0)
                 {
                     replyLines.Add("Applied:");
@@ -3995,24 +5619,16 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                     replyLines.AddRange(errors.Take(8).Select(e => $"- {e}"));
                 }
 
-                var reply = TrimToLimit(string.Join("\n", replyLines), 3500);
-                await SendChunkedAsync(message.Channel, reply);
-                if (TryRecordAssistantReply(channelState, reply))
-                {
-                    try { await context.Host.SaveCachedChannelStateAsync(message.Channel.Id); } catch { }
-                }
-                return true;
+                return await FinishAsync(TrimToLimit(string.Join("\n", replyLines), 3500));
             }
         }
         catch (Exception ex)
         {
             Console.WriteLine($"[dnd] pending action failed type={actionType}: {ex.GetType().Name} {ex.Message}");
-            try { await message.Channel.SendMessageAsync($"<@{message.Author.Id}> Pending draft action failed: {ex.Message}"); } catch { }
-            return true;
+            return await FinishAsync($"Pending draft action failed: {ex.Message}");
         }
 
-        try { await message.Channel.SendMessageAsync($"<@{message.Author.Id}> Unknown pending draft action type `{actionType}`."); } catch { }
-        return true;
+        return await FinishAsync($"Unknown pending draft action type `{actionType}`.");
     }
 
     private async Task<GptCliExecutionResult> ExecuteStatusAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)
@@ -4460,6 +6076,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             CampaignMarkdown = draft.CampaignMarkdown ?? string.Empty,
             UpdatedUtc = DateTime.UtcNow,
             EncounterTemplates = draft.EncounterTemplates ?? new List<DndLiteEncounterTemplateDocument>(),
+            Locations = draft.Locations ?? new List<DndLiteLocationDocument>(),
             RunnerState = null,
             LiveRuntime = new DndLiteEncounterLiveRuntime()
         };
@@ -9699,12 +11316,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
     }
 
     private static string ResolveCampaignBootstrapModel(DiscordModuleContext context, InstructionGPT.ChannelState channelState)
-    {
-        // Responses-based campaign generation should use the primary text model, not the vision model.
-        // Some saved channel states still carry older vision defaults (e.g. gpt-5.2-nano) that are invalid.
-        var model = ResolveModel(context, channelState);
-        return string.IsNullOrWhiteSpace(model) ? "gpt-6-astra" : model.Trim();
-    }
+        => ResolveModel(context, channelState);
 
     private static string ResolveResponsesApiKey(DiscordModuleContext context, InstructionGPT.ChannelState channelState)
     {
@@ -11649,7 +13261,8 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                         CampaignName = legacyFull.CampaignName,
                         CampaignMarkdown = legacyFull.CampaignMarkdown ?? string.Empty,
                         UpdatedUtc = legacyFull.UpdatedUtc,
-                        EncounterTemplates = legacyFull.EncounterTemplates ?? new List<DndLiteEncounterTemplateDocument>()
+                        EncounterTemplates = legacyFull.EncounterTemplates ?? new List<DndLiteEncounterTemplateDocument>(),
+                        Locations = legacyFull.Locations ?? new List<DndLiteLocationDocument>()
                     };
                 }
             }
@@ -11667,6 +13280,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         catalog.CampaignName = string.IsNullOrWhiteSpace(catalog.CampaignName) ? campaignName : catalog.CampaignName.Trim();
         catalog.CampaignMarkdown ??= string.Empty;
         catalog.EncounterTemplates ??= new List<DndLiteEncounterTemplateDocument>();
+        catalog.Locations ??= new List<DndLiteLocationDocument>();
 
         // Load per-run (runtime) state.
         var runPath = ResolveRunPath(channelState, catalog.CampaignName);
@@ -11708,6 +13322,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             CampaignMarkdown = catalog.CampaignMarkdown,
             UpdatedUtc = catalog.UpdatedUtc,
             EncounterTemplates = catalog.EncounterTemplates,
+            Locations = catalog.Locations ?? new List<DndLiteLocationDocument>(),
             RunnerState = run?.RunnerState,
             LiveRuntime = run?.LiveRuntime ?? new DndLiteEncounterLiveRuntime(),
             RunUpdatedUtc = run?.UpdatedUtc ?? default
@@ -11740,7 +13355,8 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             CampaignName = doc.CampaignName,
             CampaignMarkdown = doc.CampaignMarkdown,
             UpdatedUtc = doc.UpdatedUtc,
-            EncounterTemplates = doc.EncounterTemplates
+            EncounterTemplates = doc.EncounterTemplates,
+            Locations = doc.Locations ?? new List<DndLiteLocationDocument>()
         };
         await SaveCampaignCatalogAsync(channelState, catalog, ct);
 
@@ -11801,6 +13417,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             draft.CampaignName = string.IsNullOrWhiteSpace(draft.CampaignName) ? campaignName : draft.CampaignName.Trim();
             draft.CampaignMarkdown ??= string.Empty;
             draft.EncounterTemplates ??= new List<DndLiteEncounterTemplateDocument>();
+            draft.Locations ??= new List<DndLiteLocationDocument>();
             return draft;
         }
         catch
@@ -11821,7 +13438,8 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             CampaignName = doc.CampaignName.Trim(),
             CampaignMarkdown = doc.CampaignMarkdown ?? string.Empty,
             UpdatedUtc = doc.UpdatedUtc == default ? DateTime.UtcNow : doc.UpdatedUtc,
-            EncounterTemplates = doc.EncounterTemplates ?? new List<DndLiteEncounterTemplateDocument>()
+            EncounterTemplates = doc.EncounterTemplates ?? new List<DndLiteEncounterTemplateDocument>(),
+            Locations = doc.Locations ?? new List<DndLiteLocationDocument>()
         };
 
         var path = ResolveDraftCampaignPath(channelState, draft.CampaignName);
@@ -11916,6 +13534,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         catalog.CampaignName = catalog.CampaignName.Trim();
         catalog.CampaignMarkdown ??= string.Empty;
         catalog.EncounterTemplates ??= new List<DndLiteEncounterTemplateDocument>();
+        catalog.Locations ??= new List<DndLiteLocationDocument>();
 
         // If a campaign is being created/imported and doesn't have an UpdatedUtc, stamp it once.
         if (catalog.UpdatedUtc == default)
@@ -12156,9 +13775,9 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 
     private static string ResolveModel(DiscordModuleContext context, InstructionGPT.ChannelState channelState)
     {
-        return channelState?.InstructionChat?.ChatBotState?.Parameters?.Model
-               ?? context.DefaultParameters?.Model
-               ?? "gpt-6-astra";
+        var requested = channelState?.InstructionChat?.ChatBotState?.Parameters?.Model;
+        var fallback = context?.DefaultParameters?.Model ?? "gpt-5.6-sol";
+        return OpenAILogic.ResolveCurrentTextModel(requested, fallback);
     }
 
     private static string NormalizeMode(string value)
@@ -12334,6 +13953,98 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 
     private static string ResolveNpcProfilePath(InstructionGPT.ChannelState channelState, string actorId)
         => Path.Combine(GetLiteRootDirectory(channelState), "profiles", "npcs", $"{SanitizeActorIdForPath(actorId)}.json");
+
+    internal static bool TryGetDraftRouterReplyText(string argsJson, out string value)
+    {
+        if (TryGetStringArg(argsJson, "reply", out value))
+        {
+            return true;
+        }
+
+        value = TryExtractTruncatedJsonString(argsJson, "reply");
+        return !string.IsNullOrWhiteSpace(value);
+    }
+
+    internal static string TryExtractTruncatedJsonString(string argsJson, string name)
+    {
+        if (string.IsNullOrWhiteSpace(argsJson) || string.IsNullOrWhiteSpace(name))
+        {
+            return null;
+        }
+
+        var pattern = $"\"{Regex.Escape(name)}\"\\s*:\\s*\"";
+        var match = Regex.Match(argsJson, pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        if (!match.Success)
+        {
+            // Last resort: take everything after "name": even if quotes/braces are broken.
+            var idx = argsJson.IndexOf($"\"{name}\"", StringComparison.OrdinalIgnoreCase);
+            if (idx < 0)
+            {
+                return null;
+            }
+
+            var colon = argsJson.IndexOf(':', idx);
+            if (colon < 0 || colon + 1 >= argsJson.Length)
+            {
+                return null;
+            }
+
+            var rest = argsJson[(colon + 1)..].Trim().TrimStart('"').TrimEnd('}', '"', ' ', '\n', '\r');
+            if (string.IsNullOrWhiteSpace(rest))
+            {
+                return null;
+            }
+
+            return rest
+                .Replace("\\n", "\n", StringComparison.Ordinal)
+                .Replace("\\t", "\t", StringComparison.Ordinal)
+                .Replace("\\\"", "\"", StringComparison.Ordinal)
+                .Replace("\\\\", "\\", StringComparison.Ordinal);
+        }
+
+        var sb = new StringBuilder();
+        for (var i = match.Index + match.Length; i < argsJson.Length; i++)
+        {
+            var c = argsJson[i];
+            if (c == '\\' && i + 1 < argsJson.Length)
+            {
+                i++;
+                var next = argsJson[i];
+                sb.Append(next switch
+                {
+                    'n' => '\n',
+                    'r' => '\r',
+                    't' => '\t',
+                    '"' => '"',
+                    '\\' => '\\',
+                    '/' => '/',
+                    _ => next
+                });
+                continue;
+            }
+
+            if (c == '"')
+            {
+                break;
+            }
+
+            sb.Append(c);
+        }
+
+        var text = sb.ToString().Trim();
+        if (text.Length == 0)
+        {
+            return null;
+        }
+
+        var lastBreak = Math.Max(text.LastIndexOf('\n'), text.LastIndexOf('.'));
+        if (lastBreak >= 80 && lastBreak < text.Length - 1 && !argsJson.TrimEnd().EndsWith("}", StringComparison.Ordinal))
+        {
+            text = text[..(lastBreak + 1)].TrimEnd() + "\n\n_(cut off — ask me to continue)_";
+        }
+
+        return text;
+    }
 
     private static bool TryGetStringArg(string argsJson, string name, out string value)
     {
@@ -12655,6 +14366,56 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         }
 
         return compact;
+    }
+
+    private static void AppendPendingDraftActionContext(StringBuilder userCtx, DndLiteChannelState dndState)
+    {
+        if (userCtx == null)
+        {
+            return;
+        }
+
+        var pending = dndState?.PendingDraftAction;
+        if (pending == null)
+        {
+            userCtx.AppendLine("Pending draft action: none.");
+            return;
+        }
+
+        if (pending.ExpiresUtc != default && pending.ExpiresUtc <= DateTime.UtcNow)
+        {
+            userCtx.AppendLine("Pending draft action: none (expired).");
+            return;
+        }
+
+        userCtx.AppendLine($"Pending draft action: type={pending.ActionType} summary={pending.Summary ?? "(none)"}");
+        if (string.Equals(pending.ActionType, PendingActionProposeContent, StringComparison.OrdinalIgnoreCase))
+        {
+            var bundle = DeserializeProposalBundle(pending.ArgumentsJson);
+            var n = 1;
+            userCtx.AppendLine($"Pending numbered examples ({bundle?.ItemCount ?? 0}). If the user is picking from this list, call {RouteToolPendingReply}. If they want more or different examples, call {RouteToolProposeContent}.");
+            foreach (var npc in bundle?.Npcs ?? new List<NpcProposalDto>())
+            {
+                userCtx.AppendLine($"{n}. NPC {npc?.Name}");
+                n++;
+            }
+
+            foreach (var enc in bundle?.Encounters ?? new List<EncounterTemplateDto>())
+            {
+                userCtx.AppendLine($"{n}. Encounter {enc?.Name}");
+                n++;
+            }
+
+            foreach (var loc in bundle?.Locations ?? new List<DndLiteLocationDocument>())
+            {
+                userCtx.AppendLine($"{n}. Location {loc?.Name}");
+                n++;
+            }
+        }
+        else
+        {
+            userCtx.AppendLine($"If the user is confirming or canceling this pending change, call {RouteToolPendingReply}.");
+        }
     }
 
     private async Task AppendPartyRosterContextAsync(
@@ -13209,6 +14970,39 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         public string PersonalityNotes { get; set; }
     }
 
+    internal sealed class DraftProposeKinds
+    {
+        public bool Npcs { get; set; }
+        public bool Encounters { get; set; }
+        public bool Locations { get; set; }
+        public int? Count { get; set; }
+    }
+
+    internal sealed class NpcProposalDto
+    {
+        public string Name { get; set; }
+        public string Concept { get; set; }
+        public string Role { get; set; }
+    }
+
+    internal sealed class DraftProposalBundle
+    {
+        public List<NpcProposalDto> Npcs { get; set; } = new();
+        public List<EncounterTemplateDto> Encounters { get; set; } = new();
+        public List<DndLiteLocationDocument> Locations { get; set; } = new();
+
+        public int ItemCount => (Npcs?.Count ?? 0) + (Encounters?.Count ?? 0) + (Locations?.Count ?? 0);
+    }
+
+    internal sealed class DndLiteLocationDocument
+    {
+        public string Id { get; set; }
+        public string Name { get; set; }
+        public string Summary { get; set; }
+        public string MapMarkdown { get; set; }
+        public string LinkedEncounterTemplateId { get; set; }
+    }
+
     // Catalog-only campaign definition (replayable, no party/runtime state).
     private sealed class DndLiteCampaignCatalogDocument
     {
@@ -13216,6 +15010,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         public string CampaignMarkdown { get; set; } = string.Empty;
         public DateTime UpdatedUtc { get; set; }
         public List<DndLiteEncounterTemplateDocument> EncounterTemplates { get; set; } = new();
+        public List<DndLiteLocationDocument> Locations { get; set; } = new();
     }
 
     // Per-channel per-campaign runtime state (party progress + active encounter pointers).
@@ -13234,6 +15029,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         public string CampaignMarkdown { get; set; } = string.Empty;
         public DateTime UpdatedUtc { get; set; }
         public List<DndLiteEncounterTemplateDocument> EncounterTemplates { get; set; } = new();
+        public List<DndLiteLocationDocument> Locations { get; set; } = new();
         public DndCampaignRunnerState RunnerState { get; set; }
         public DndLiteEncounterLiveRuntime LiveRuntime { get; set; } = new();
         public DateTime RunUpdatedUtc { get; set; }
@@ -13308,7 +15104,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         public string Concept { get; set; }
     }
 
-    private sealed class EncounterTemplateDto
+    internal sealed class EncounterTemplateDto
     {
         public string TemplateId { get; set; }
         public string Name { get; set; }
@@ -13318,7 +15114,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         public List<ActorDto> Adds { get; set; } = new();
     }
 
-    private sealed class ActorDto
+    internal sealed class ActorDto
     {
         public string Id { get; set; }
         public string Name { get; set; }

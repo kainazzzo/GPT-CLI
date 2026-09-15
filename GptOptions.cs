@@ -12,9 +12,9 @@ public record GptOptions
 
     public string Prompt { get; set; }
 
-    public string Model { get; set; } = "gpt-6-astra";
+    public string Model { get; set; } = "gpt-5.6-sol";
 
-    public string VisionModel { get; set; } = "gpt-6-astra";
+    public string VisionModel { get; set; } = "gpt-5.6-sol";
 
     public int? MaxTokens { get; set; } = 64000;
 

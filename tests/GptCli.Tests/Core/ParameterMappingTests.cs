@@ -1,5 +1,4 @@
 using System.Text;
-using Betalgo.Ranul.OpenAI.Contracts.Enums;
 using GPT.CLI;
 using Xunit;
 
@@ -10,7 +9,7 @@ public sealed class ParameterMappingTests
     private static GptOptions Options() => new()
     {
         Prompt = "write a haiku",
-        Model = "gpt-6-astra",
+        Model = "gpt-5.6-sol",
         MaxTokens = 1234,
         Temperature = 0.4,
         N = 1,
@@ -21,7 +20,7 @@ public sealed class ParameterMappingTests
     public async Task MapChatCreate_sets_system_prompt_and_max_completion_tokens()
     {
         var request = await ParameterMapping.MapChatCreate(Options(), openAILogic: null);
-        Assert.Equal("gpt-6-astra", request.Model);
+        Assert.Equal("gpt-5.6-sol", request.Model);
         Assert.Equal(1234, request.MaxCompletionTokens);
         Assert.Null(request.MaxTokens);
         Assert.Contains(request.Messages, m =>
@@ -34,7 +33,7 @@ public sealed class ParameterMappingTests
     {
         using var input = new MemoryStream(Encoding.UTF8.GetBytes("original text"));
         var request = await ParameterMapping.MapChatEdit(Options(), openAILogic: null, input);
-        Assert.Equal("gpt-6-astra", request.Model);
+        Assert.Equal("gpt-5.6-sol", request.Model);
         Assert.Equal(1234, request.MaxCompletionTokens);
         Assert.Contains(request.Messages, m =>
             m.Role == ChatCompletionRole.User &&

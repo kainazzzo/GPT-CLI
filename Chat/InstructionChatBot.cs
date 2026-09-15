@@ -1,8 +1,4 @@
 ﻿using System.Text.Json.Serialization;
-using Betalgo.Ranul.OpenAI.ObjectModels;
-using Betalgo.Ranul.OpenAI.ObjectModels.RequestModels;
-using Betalgo.Ranul.OpenAI.Contracts.Enums;
-using Betalgo.Ranul.OpenAI.ObjectModels.ResponseModels;
 
 namespace GPT.CLI.Chat;
 

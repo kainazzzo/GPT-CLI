@@ -4,7 +4,7 @@ using Discord;
 using Discord.WebSocket;
 using GPT.CLI.Chat.Discord.Commands;
 using Microsoft.Extensions.DependencyInjection;
-using Betalgo.Ranul.OpenAI.ObjectModels.RequestModels;
+
 
 namespace GPT.CLI.Chat.Discord.Modules;
 

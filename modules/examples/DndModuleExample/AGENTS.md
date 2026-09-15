@@ -9,8 +9,8 @@ Adapter between Discord and the engine in `Chat/Dnd/` (read that `AGENTS.md` fir
 | Mode | Behavior |
 |---|---|
 | `off` | Enabled but ignores messages. Only `/gptcli dnd mode` to leave. |
-| `draft` | GM prep. Deterministic handlers first; LLM is conversation + optional tools for persisted edits. Does **not** write the catalog. |
-| `game` | Live play. Finalizes draft on entry. Starts session FSM. Core bot is muted. Leave via slash only. |
+| `draft` | GM prep. The GPT intent router parses conversation (including pending proposals) and dispatches to draft handlers. Does **not** write the catalog. |
+| `game` | Live play. Finalizes draft on entry. Starts session FSM. Core bot is muted. Leave via slash only. Natural language is parsed by the GPT auto-router onto listed options/tools first. |
 
 Natural language cannot switch away from game (in-character safety).
 
@@ -27,10 +27,9 @@ Every later game reply should keep that footer (`RenderTurnResult` / `WithSessio
 Player text mapping, in order:
 
 1. Bang commands (`!state`, `!attack`, …) in game only.
-2. `TryHandleDeterministicGameStartAsync` — ensure session; if `SessionStart` and `LooksLikeBeginIntent` (start/begin/play **without** fight/combat), `ChooseOption("begin")`. Does **not** auto-start the first combat template.
-3. `TryHandleNaturalGameActionAsync` — if an encounter is live, combat verbs; else `TryMatchSessionOption` + `ChooseOption`.
-4. LLM auto-route with **listed options in context**. Prefer `gptcli_dnd_choose`. `gptcli_dnd_encounterstart` is excluded from auto-route (slash override still exists).
-5. Short fallback if nothing handled.
+2. LLM auto-route with conversation + **listed options in context**. Prefer `gptcli_dnd_choose`. `gptcli_dnd_encounterstart` is excluded from auto-route (slash override still exists).
+3. Deterministic fallback: session start / natural combat verbs / `TryMatchSessionOption`.
+4. Short fallback if nothing handled.
 
 LLM may narrate 1–4 sentences and pick a listed option or check. LLM must not invent HP, hit/miss, damage, or extra options.
 
@@ -73,7 +72,15 @@ Under the channel state dir:
 
 ## Draft notes
 
-Deterministic first: pending `confirm`/`cancel`, party add/remove, campaign create overwrite, pass-timeout parse. Risky edits use `PendingDraftAction`. Campaign/sheet generation uses a bounded Responses API tool loop, not freeform JSON in assistant content. Do not leak tool JSON into user replies (`SanitizeDraftToolNarration`).
+GPT intent router first (conversation + pending-action context). It dispatches to draft handlers (`dnd_route_*`). Regex pending-pick / campaign-create paths are fallback only if the router does not handle the message. Risky edits use `PendingDraftAction`. Campaign/sheet generation uses a bounded Responses API tool loop, not freeform JSON in assistant content. Do not leak tool JSON into user replies (`SanitizeDraftToolNarration`).
+
+**Additive generate (do not rewrite the story):** if the user asks to generate NPCs/monsters/locations/maps, or “examples that fit the campaign”, without `name` + `concept`, **propose** numbered examples from the draft markdown (`dnd_route_propose_content`). The proposal LLM call uses official OpenAI SDK structured outputs (`json_schema` + `strict: true`) via `OpenAILogic.CreateStructuredJsonCompletionAsync`. Never reply with the canned “Include a `concept`” form. Persist only what they pick (`all`, `1 and 3`, `cancel`).
+
+- NPCs → existing `npccreate` sheets after confirm.
+- Monsters → append encounter templates (boss/adds + stats). Does not rewrite `CampaignMarkdown`.
+- Locations/maps → `DndLiteLocationDocument` list on the draft catalog (`Id`, `Name`, `Summary`, optional ASCII `MapMarkdown`). Copied through finalize.
+
+`LooksLikeDraftUpdateIntent` must stay false for “no rewrite / just generate / locations / monsters / examples”. Sheet-create with an explicit name and concept still creates immediately.
 
 ## Live tick
 

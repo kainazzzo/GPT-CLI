@@ -1,6 +1,5 @@
-using Betalgo.Ranul.OpenAI.Contracts.Enums;
-using Betalgo.Ranul.OpenAI.ObjectModels.RequestModels;
 using Discord;
+using GPT.CLI;
 using GPT.CLI.Chat.Discord.Commands;
 using GPT.CLI.Chat.Discord.Modules;
 using GptCli.Tests.TestDoubles;

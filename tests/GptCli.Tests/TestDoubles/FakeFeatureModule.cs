@@ -1,6 +1,6 @@
-using Betalgo.Ranul.OpenAI.ObjectModels.RequestModels;
 using Discord;
 using Discord.WebSocket;
+using GPT.CLI;
 using GPT.CLI.Chat.Discord;
 using GPT.CLI.Chat.Discord.Commands;
 using GPT.CLI.Chat.Discord.Modules;
