@@ -7,13 +7,11 @@ services:
     volumes:
       - ./deploy/appsettings.json:/app/appsettings.json:ro
       - /usr/local/discord/channels:/app/channels
-      - /usr/local/discord/modules:/app/modules
   builder:
     image: mcr.microsoft.com/dotnet/sdk:10.0
     working_dir: /src
     volumes:
       - ./:/src
-      - /usr/local/discord/modules:/usr/local/discord/modules
       # Persist NuGet caches across builder runs so module builds/publish don't re-download packages.
       - nuget_packages:/root/.nuget/packages
       - nuget_v3_cache:/root/.local/share/NuGet/v3-cache

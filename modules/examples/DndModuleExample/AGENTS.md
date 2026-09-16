@@ -19,17 +19,18 @@ Natural language cannot switch away from game (in-character safety).
 On `/gptcli dnd mode value:game`:
 
 1. Finalize draft → catalog if needed (`TryFinalizeDraftOnGameSwitchAsync`).
-2. `EnsureGameSessionAsync` → `DndCampaignRunner.StartSession()` if needed.
-3. Reply with `RenderSessionPrompt`: **State**, scene summary, **Party** HP/MP, **Options**.
+2. `EnsureGameSessionAsync` → `DndCampaignRunner.StartSession()` if needed (empty party is allowed; session starts in `PartyFormation`).
+3. Reply with `RenderSessionPrompt`: **State**, scene summary, **Party** HP/MP, **Options**, table-round footer.
 
 Every later game reply should keep that footer (`RenderTurnResult` / `WithSessionFooter`).
 
 Player text mapping, in order:
 
 1. Bang commands (`!state`, `!attack`, …) in game only.
-2. LLM auto-route with conversation + **listed options in context**. Prefer `gptcli_dnd_choose`. `gptcli_dnd_encounterstart` is excluded from auto-route (slash override still exists).
-3. Deterministic fallback: session start / natural combat verbs / `TryMatchSessionOption`.
-4. Short fallback if nothing handled.
+2. Table control (`I'll join` / `I'll play` / `ready` / `done`) before the LLM — `HandleJoinOrReadyAsync`. Do not let auto-route map join onto `gptcli_dnd_ready`.
+3. LLM auto-route with conversation + **listed options in context**. Prefer `gptcli_dnd_choose`. Sit-down paraphrases use `gptcli_dnd_join`. `gptcli_dnd_encounterstart` is excluded from auto-route (slash override still exists).
+4. Deterministic fallback: session start / natural combat verbs / `TryMatchSessionOption`.
+5. Short fallback if nothing handled.
 
 LLM may narrate 1–4 sentences and pick a listed option or check. LLM must not invent HP, hit/miss, damage, or extra options.
 
@@ -48,9 +49,9 @@ Combat rolls auto-resolve (`AutoResolvePendingRolls`) according to liveconfig `a
 
 ## Tools
 
-Draft (subset): `campaigncreate`, `draftupdate`, `campaignfinalize`, party add/remove, character/NPC sheets, `campaignlist`/`start`, `encounterlist`, `passtimeout`, `status`, `mode`.
+Draft (subset): `campaigncreate`, `draftupdate`, `campaignfinalize`, character/NPC sheets, `campaignlist`/`start`, `encounterlist`, `passtimeout`, `status`, `mode`. No draft party roster — seating is game-mode `I'll join`.
 
-Game (subset): `choose`, `rest`, `attack`, `cast`, `pass`, `rollall`, encounter status/end, `ledger`, `liveconfig`, `passtimeout`, `status`, party show, sheets. **Not** `campaigncreate`.
+Game (subset): `choose`, `rest`, `attack`, `cast`, `pass`, `join`, `ready`, `rollall`, encounter status/end, `ledger`, `liveconfig`, `passtimeout`, `status`, party show, sheets. **Not** `campaigncreate`.
 
 Allow-lists are duplicated:
 
@@ -63,10 +64,10 @@ Update both. Mention-routing also refuses `gptcli_dnd_mode` while in game.
 
 Under the channel state dir:
 
-- Draft: `dnd-lite/drafts/<slug>/draft.json` + `party.json`
+- Draft: `dnd-lite/drafts/<slug>/draft.json`
 - Catalog: `dnd-lite/campaigns/<slug>/campaign.json`
 - Run: `dnd-lite/runs/<slug>/…` including `DndCampaignRunnerState` (party, templates, active encounter, **session**)
-- Sheets: PC/NPC profiles beside the campaign (actor ids `pc:<discordUserId>`, `npc:<slug>`)
+- Sheets: PC/NPC profiles beside the campaign (actor ids `u:{discordUserId}`, `npc:<slug>`). Live party starts empty; players sit down with `I'll join` / `I'll play`. Draft `party.json` is not copied into the run.
 
 `BuildRunnerTemplates` must copy `Scene` and `Rewards` onto `DndEncounterTemplate` so synthesis has flavor text.
 
@@ -80,7 +81,7 @@ GPT intent router first (conversation + pending-action context). It dispatches t
 - Monsters → append encounter templates (boss/adds + stats). Does not rewrite `CampaignMarkdown`.
 - Locations/maps → `DndLiteLocationDocument` list on the draft catalog (`Id`, `Name`, `Summary`, optional ASCII `MapMarkdown`). Copied through finalize.
 
-After a draft lock-in (proposal pick, campaign create, sheet, party, story update), the reply appends a short **Next:** prompt from current draft inventory (story / locations / encounters / party) so the GM is not left to ask “what’s next?”. Game replies already include session **Options** / next-request via `RenderSessionPrompt`.
+After a draft lock-in (proposal pick, campaign create, sheet, story update), the reply appends a short **Next:** prompt from current draft inventory (story / locations / encounters) so the GM is not left to ask “what’s next?”. Game replies already include session **Options** / next-request via `RenderSessionPrompt`.
 
 **Finish the rest:** `dnd_route_finish_draft` fills remaining locations/encounters/NPCs, missing roster sheets, and an additive endgame/finale appendix. It should leave **What's left** empty except optional tweaks. Does not rewrite existing story prose.
 
@@ -103,4 +104,6 @@ No live OpenAI/Discord.
 
 ## Build
 
-`modules/examples/DndModuleExample/build-module.sh` → `modules/DndModuleExample.dll`. Restart the bot.
+Local: `modules/examples/DndModuleExample/build-module.sh` → `modules/DndModuleExample.dll`, then restart.
+
+Docker: `docker compose build` (or `up --build`) compiles this module into the image at `/app/modules`. The discord service does not mount host module DLLs.

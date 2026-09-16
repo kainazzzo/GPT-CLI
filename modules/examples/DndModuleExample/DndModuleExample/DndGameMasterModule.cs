@@ -45,6 +45,8 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
     private const string RouteToolChatReply = "dnd_route_chat_reply";
     private const string RouteToolDraftStatus = "dnd_route_draft_status";
     private const string RouteToolClarify = "dnd_route_clarify";
+    private const string DraftPartyFormsInGame =
+        "There's no draft party roster. Players sit down in game with a character sheet and `I'll join` / `I'll play`.";
     private const string GameNarrationModeLlm = "llm";
     private const string GameNarrationModeDeterministic = "deterministic";
     private const string GameNarrationModeOff = "off";
@@ -143,12 +145,13 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             {
                 BuildModulePreambleMessage(
                     "Sub-Prime Directive (DRAFT / GM Prep):\n" +
-                    "- Draft mode is the preparatory phase a GM would normally do before play: define premise/tone, write hooks, outline scenes, sketch key NPCs, pick encounters, and set up the party.\n" +
+                    "- Draft mode is the preparatory phase a GM would normally do before play: define premise/tone, write hooks, outline scenes, sketch key NPCs, pick encounters.\n" +
+                    "- The live party is not chosen here. Players sit down in game with a sheet and I'll join / I'll play.\n" +
                     "- Default to conversational GM collaboration first: brainstorm, refine, and ask concise follow-up questions.\n" +
                     "- Only call `gptcli_dnd_*` functions when the user clearly asks for a persistent state change.\n" +
                     "- Do not finalize/save the campaign into the catalog until game mode.\n" +
                     "When To Engage (triggers):\n" +
-                    "- new campaign, rewrite/update draft, add/remove party members, create/show NPC/PC sheets, list encounters/campaigns, set pass timeout\n")
+                    "- new campaign, rewrite/update draft, create/show NPC/PC sheets, list encounters/campaigns, set pass timeout\n")
             };
         }
 
@@ -241,8 +244,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             {
                 ToolName = "gptcli_dnd_partyaddpc",
                 ModuleId = Id,
-                Description = "Add an existing Discord user to the draft party roster (does not create a sheet)",
-                Slash = new GptCliSlashBinding(GptCliSlashBindingKind.GroupSubCommand, "dnd", dndGroupDescription, "partyaddpc"),
+                Description = "Party seating happens in game with I'll join; kept as a tool so old prompts can be answered",
                 Parameters = new[] { new GptCliParamSpec("user", GptCliParamType.User, "Discord user", Required: true) },
                 ExecuteAsync = ExecutePartyAddPcAsync
             },
@@ -250,8 +252,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             {
                 ToolName = "gptcli_dnd_partyremovepc",
                 ModuleId = Id,
-                Description = "Remove a Discord user from the draft party roster",
-                Slash = new GptCliSlashBinding(GptCliSlashBindingKind.GroupSubCommand, "dnd", dndGroupDescription, "partyremovepc"),
+                Description = "Party seating happens in game; kept as a tool so old prompts can be answered",
                 Parameters = new[] { new GptCliParamSpec("user", GptCliParamType.User, "Discord user", Required: true) },
                 ExecuteAsync = ExecutePartyRemovePcAsync
             },
@@ -259,8 +260,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             {
                 ToolName = "gptcli_dnd_partyaddnpc",
                 ModuleId = Id,
-                Description = "Add an existing NPC profile (npc:...) to the draft party roster",
-                Slash = new GptCliSlashBinding(GptCliSlashBindingKind.GroupSubCommand, "dnd", dndGroupDescription, "partyaddnpc"),
+                Description = "Party seating happens in game; kept as a tool so old prompts can be answered",
                 Parameters = new[] { new GptCliParamSpec("id", GptCliParamType.String, "NPC actor id (npc:...)", Required: true) },
                 ExecuteAsync = ExecutePartyAddNpcAsync
             },
@@ -378,7 +378,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 	                Parameters = new[]
 	                {
 	                    new GptCliParamSpec("tick_seconds", GptCliParamType.Integer, "Tick interval seconds (1-30)", MinInt: 1, MaxInt: 30),
-	                    new GptCliParamSpec("player_turn_timeout_seconds", GptCliParamType.Integer, "Player turn timeout seconds (5-3600)", MinInt: 5, MaxInt: 3600),
+	                    new GptCliParamSpec("player_turn_timeout_seconds", GptCliParamType.Integer, "Table idle timeout seconds (5-3600)", MinInt: 5, MaxInt: 3600),
 	                    new GptCliParamSpec("encounter_timeout_seconds", GptCliParamType.Integer, "Encounter timeout seconds (30-3600)", MinInt: 30, MaxInt: 3600),
 	                    new GptCliParamSpec("npc_autoplay", GptCliParamType.Boolean, "Autoplay NPC turns"),
 	                    new GptCliParamSpec("autoroll_policy", GptCliParamType.String, "npc-only, all, or never",
@@ -396,7 +396,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 	            {
 	                ToolName = "gptcli_dnd_passtimeout",
 	                ModuleId = Id,
-	                Description = "Set the auto-pass timeout (player turn timeout) for this campaign; defaults to 30 minutes",
+	                Description = "Set the table idle timeout for this campaign; remaining players sit out when it fires (default 30 minutes)",
 	                Slash = new GptCliSlashBinding(GptCliSlashBindingKind.GroupSubCommand, "dnd", dndGroupDescription, "passtimeout"),
 	                Parameters = new[]
 	                {
@@ -463,6 +463,21 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 ModuleId = Id,
                 Description = "In game mode, pass your turn",
                 ExecuteAsync = ExecutePassAsync
+            },
+            new()
+            {
+                ToolName = "gptcli_dnd_join",
+                ModuleId = Id,
+                Description = "In game mode, sit down at the table with your linked character sheet (I'll join / I'll play / I'm in)",
+                ExecuteAsync = ExecuteJoinAsync
+            },
+            new()
+            {
+                ToolName = "gptcli_dnd_ready",
+                ModuleId = Id,
+                Description = "In game mode, after joining: start play from formation, or close the current table/combat round (must have acted)",
+                Slash = new GptCliSlashBinding(GptCliSlashBindingKind.GroupSubCommand, "dnd", dndGroupDescription, "ready"),
+                ExecuteAsync = ExecuteReadyAsync
             },
             new()
             {
@@ -754,43 +769,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                     }
                 }
 
-                // Confirm destructive or bulk party changes before writing state.
-                if (confirmRiskyEditsEnabled && IsRiskyDraftPartyEdit(partyIntent))
-                {
-                    var op = partyIntent.WantsRemove ? "remove" : "add";
-                    var argsJson = JsonSerializer.Serialize(new
-                    {
-                        add = partyIntent.WantsAdd,
-                        remove = partyIntent.WantsRemove,
-                        userIds = partyIntent.MentionedUserIds,
-                        npcIds = partyIntent.NpcActorIds
-                    });
-                    await SetPendingDraftActionAsync(
-                        channelState,
-                        dndState,
-                        new PendingDraftActionRequest
-                        {
-                            ActionType = PendingActionPartyEdit,
-                            ArgumentsJson = argsJson,
-                            RequestedByUserId = message.Author.Id,
-                            RequestedUtc = DateTime.UtcNow,
-                            ExpiresUtc = DateTime.UtcNow.AddMinutes(DraftPendingActionTtlMinutes),
-                            Summary = $"{op} {partyIntent.TargetCount} party member(s)"
-                        },
-                        cancellationToken);
-                    try
-                    {
-                        await message.Channel.SendMessageAsync(
-                            $"<@{message.Author.Id}> This will {op} {partyIntent.TargetCount} party member(s). Reply `confirm` to apply, or `cancel`.");
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"[dnd] send failed (party confirm prompt): {ex.GetType().Name} {ex.Message}");
-                    }
-                    return;
-                }
-
-                // Draft mode: high-confidence deterministic party edits (mentions + npc: ids).
+                // Draft mode: party seating happens in game, not via a draft roster.
                 if (await TryHandleDeterministicDraftPartyEditsAsync(context, channelState, message, dndState, stripped, cancellationToken))
                 {
                     return;
@@ -969,6 +948,11 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 try { await context.Host.SaveCachedChannelStateAsync(message.Channel.Id); } catch { }
             }
 
+            if (await TryHandleTableControlBeforeRouteAsync(context, channelState, message, dndState, cancellationToken))
+            {
+                return;
+            }
+
             var handled = await TryHandleAutoRoutedMessageAsync(context, channelState, message, dndState, cancellationToken);
             Console.WriteLine($"[dnd] auto-route: handled={handled} mode=game (channel={message.Channel?.Id})");
             if (handled)
@@ -998,10 +982,10 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 return;
             }
 
-            // Avoid silent failures in game mode; keep it brief.
             try
             {
-                await message.Channel.SendMessageAsync($"<@{message.Author.Id}> Sorry, I couldn't process that right now. Try again.");
+                await message.Channel.SendMessageAsync(
+                    $"<@{message.Author.Id}> Got it. When the party is ready, search, talk, travel, rest, or pick a fight — or say `I'll join` if you're sitting down.");
             }
             catch (Exception ex)
             {
@@ -1019,6 +1003,11 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         {
             Console.WriteLine($"[dnd] processing: mode=game tagged (channel={message.Channel?.Id})");
             EnsureTickLoopRunning(message.Channel.Id);
+
+            if (await TryHandleTableControlBeforeRouteAsync(context, channelState, message, dndState, cancellationToken))
+            {
+                return;
+            }
 
             var routed = await TryHandleAutoRoutedMessageAsync(context, channelState, message, dndState, cancellationToken);
             if (routed)
@@ -1195,17 +1184,15 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                           "No tool calls. Give a concise response (1-3 sentences) and one actionable follow-up question.\n" +
                           "Do not output JSON or mention internal commands.\n"
                         : "You are the D&D game master assistant operating in DRAFT mode.\n" +
-                          "Draft mode is GM prep: build the campaign premise/tone, hooks, scenes, NPCs, encounter templates, and party composition.\n" +
+                          "Draft mode is GM prep: build the campaign premise/tone, hooks, scenes, NPCs, and encounter templates.\n" +
+                          "There is no draft party roster. Players sit down in game with a character sheet and `I'll join` / `I'll play`.\n" +
+                          "If the user asks to add people to the party in draft, tell them that seating happens in game mode.\n" +
                           "Default to conversational collaboration first: brief, practical, and co-design oriented.\n" +
                           "Call `gptcli_dnd_*` tools only when the user explicitly asks for a persistent state change or command-like action.\n" +
                           "If intent is ambiguous, ask one short clarifying question instead of mutating state.\n" +
                           "Do not call `gptcli_dnd_mode` unless the user explicitly asks to change modes.\n" +
-                          "Party roster is provided in context under \"Party roster (actors)\".\n" +
-                          "If the user asks to add/remove party members:\n" +
-                          "- PCs: use `gptcli_dnd_partyaddpc` / `gptcli_dnd_partyremovepc`.\n" +
-                          "- NPCs: use `gptcli_dnd_partyremovenpc` (or `gptcli_dnd_npcremove`).\n" +
                           "If the user asks to change the auto-pass / player turn timeout / pass timeout, call `gptcli_dnd_passtimeout`.\n" +
-                          "If the user specifies party members: create NPCs via tools; for PCs, only create a sheet for the author unless you have an explicit Discord user reference.\n" +
+                          "NPC sheets are world characters, not a party. Create them with `gptcli_dnd_npccreate` when asked.\n" +
                           "In DRAFT mode, do not finalize/save campaigns to the catalog. Build drafts only; finalization happens when entering game mode or via campaignfinalize.\n" +
                           "If the message is discussion/brainstorming, respond as a GM collaborator with concrete suggestions.\n" +
                           "Format for Discord markdown: **bold** section headings, `- ` bullets for any list of 2+ items, blank lines between sections. Do not bury lists in a comma-separated paragraph.\n" +
@@ -1215,7 +1202,11 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                     "Parse the player's intent from the conversation, then call the matching tool. Do not rely on isolated keywords.\n" +
                     "The engine owns HP, stats, damage, rest, checks, and legal transitions. You narrate flair and map player prose onto listed options.\n" +
                     "Context includes the current session phase and **Options**. Call `gptcli_dnd_choose` with one of those option ids/numbers/labels.\n" +
-                    "Call `gptcli_dnd_rest` only for a listed rest option. Call attack/cast/pass only in Combat.\n" +
+                    "Call `gptcli_dnd_rest` only for a listed rest option. Call attack/cast/pass only in Combat, and only for the speaker.\n" +
+                    "If the session phase is PartyFormation, call `gptcli_dnd_join` when they sit down (`I'll play` / `I'll join` / `I'm in`). Do not call `gptcli_dnd_ready` for join.\n" +
+                    "Call `gptcli_dnd_ready` only for ready/done after they have joined, or to close a table/combat round.\n" +
+                    "Combat is an open party round: anyone who has not acted may act. After an action resolves, invite the next player. Do not wait on initiative order.\n" +
+                    "If the line is flavor, not an action, do not call tools. Narrate briefly and invite search, talk, travel, rest, or a fight.\n" +
                     "Do not call `gptcli_dnd_encounterstart` unless the user explicitly names a template id.\n" +
                     "Never require `!` commands. Resolve pending combat rolls automatically.\n" +
                     "Do not call `gptcli_dnd_mode`. If the user asks to change modes, tell them to use `/gptcli dnd mode value:draft` (or `off`).\n" +
@@ -1909,7 +1900,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         return new DraftIntentRouterDispatchResult(false, Error: "Draft update was not applied.");
     }
 
-    private async Task<DraftIntentRouterDispatchResult> HandleDraftRoutePartyEditAsync(
+    private Task<DraftIntentRouterDispatchResult> HandleDraftRoutePartyEditAsync(
         DiscordModuleContext context,
         InstructionGPT.ChannelState channelState,
         SocketMessage message,
@@ -1918,115 +1909,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         string strippedText,
         CancellationToken ct)
     {
-        TryGetStringArg(argsJson, "operation", out var opRaw);
-        var op = (opRaw ?? string.Empty).Trim().ToLowerInvariant();
-        var wantsAdd = op is "add" or "include" or "invite";
-        var wantsRemove = op is "remove" or "drop" or "kick";
-        if (!wantsAdd && !wantsRemove)
-        {
-            return new DraftIntentRouterDispatchResult(
-                true,
-                "For party edits, specify whether to add or remove members.");
-        }
-
-        var userIds = TryGetUlongListArg(argsJson, "pc_user_ids");
-        var npcIds = TryGetStringListArg(argsJson, "npc_actor_ids");
-        if (userIds.Count == 0 && npcIds.Count == 0)
-        {
-            var inferred = AnalyzeDraftPartyEditIntent(context, message, strippedText);
-            if (inferred.MentionedUserIds.Count > 0)
-            {
-                userIds.AddRange(inferred.MentionedUserIds);
-            }
-            if (inferred.NpcActorIds.Count > 0)
-            {
-                npcIds.AddRange(inferred.NpcActorIds);
-            }
-        }
-
-        userIds = userIds.Where(x => x != 0).Distinct().ToList();
-        npcIds = npcIds
-            .Where(s => !string.IsNullOrWhiteSpace(s))
-            .Select(s => s.Trim())
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
-
-        if (userIds.Count == 0 && npcIds.Count == 0)
-        {
-            return new DraftIntentRouterDispatchResult(
-                true,
-                "Tag PC users (`@user`) and/or include NPC ids like `npc:roland` so I can update the party.");
-        }
-
-        var intent = new DraftPartyEditIntent
-        {
-            WantsAdd = wantsAdd,
-            WantsRemove = wantsRemove,
-            MentionedUserIds = userIds,
-            NpcActorIds = npcIds
-        };
-
-        if (IsDraftConfirmRiskyEditsEnabled(context) && IsRiskyDraftPartyEdit(intent))
-        {
-            var opLabel = wantsRemove ? "remove" : "add";
-            var pendingArgs = JsonSerializer.Serialize(new
-            {
-                add = wantsAdd,
-                remove = wantsRemove,
-                userIds,
-                npcIds
-            });
-            await SetPendingDraftActionAsync(
-                channelState,
-                dndState,
-                new PendingDraftActionRequest
-                {
-                    ActionType = PendingActionPartyEdit,
-                    ArgumentsJson = pendingArgs,
-                    RequestedByUserId = message.Author.Id,
-                    RequestedUtc = DateTime.UtcNow,
-                    ExpiresUtc = DateTime.UtcNow.AddMinutes(DraftPendingActionTtlMinutes),
-                    Summary = $"{opLabel} {intent.TargetCount} party member(s)"
-                },
-                ct);
-            return new DraftIntentRouterDispatchResult(
-                true,
-                $"This will {opLabel} {intent.TargetCount} party member(s). Reply `confirm` to apply, or `cancel`.");
-        }
-
-        var (applied, errors) = await ExecuteDraftPartyEditCoreAsync(
-            context,
-            channelState,
-            message,
-            wantsAdd,
-            userIds,
-            npcIds,
-            ct);
-
-        if (applied.Count == 0 && errors.Count == 0)
-        {
-            return new DraftIntentRouterDispatchResult(true, "No party changes were applied.");
-        }
-
-        var lines = new List<string> { "Updated the draft party roster." };
-        if (applied.Count > 0)
-        {
-            lines.Add("Applied:");
-            lines.AddRange(applied.Select(x => $"- {x}"));
-        }
-        if (errors.Count > 0)
-        {
-            lines.Add("Some requests were ignored:");
-            lines.AddRange(errors.Take(8).Select(e => $"- {e}"));
-        }
-
-        var partyReply = string.Join("\n", lines);
-        if (applied.Count > 0)
-        {
-            partyReply = await WithDraftNextStepsAsync(channelState, dndState, partyReply, "party", null, ct);
-        }
-
-        return new DraftIntentRouterDispatchResult(true, partyReply);
+        return Task.FromResult(new DraftIntentRouterDispatchResult(true, DraftPartyFormsInGame));
     }
 
     private async Task<DraftIntentRouterDispatchResult> HandleDraftRouteSheetCreateAsync(
@@ -2293,16 +2176,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         const int targetEach = 3;
         var locationHave = draft.Locations?.Count(l => l != null && !string.IsNullOrWhiteSpace(l.Name)) ?? 0;
         var encounterHave = draft.EncounterTemplates?.Count(e => e != null && !string.IsNullOrWhiteSpace(e.TemplateId ?? e.Name)) ?? 0;
-        var npcHave = 0;
-        try
-        {
-            var roster = await LoadDraftPartyAsync(channelState, active, ct);
-            npcHave = roster?.NpcActorIds?.Count ?? 0;
-        }
-        catch
-        {
-            // ignore
-        }
+        var npcHave = CountNpcProfileFiles(channelState);
 
         var locationNeed = Math.Max(0, targetEach - locationHave);
         var encounterNeed = Math.Max(0, targetEach - encounterHave);
@@ -2388,15 +2262,10 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         }
 
         draft = await LoadDraftCampaignAsync(channelState, active, ct) ?? draft;
-        var party = await LoadDraftPartyAsync(channelState, active, ct);
-        var missingSheets = await CountMissingRosterSheetsAsync(channelState, active, ct);
         var remaining = BuildDraftRemainingGaps(
             hasStory: !string.IsNullOrWhiteSpace(draft?.CampaignMarkdown) && draft.CampaignMarkdown.Trim().Length >= 40,
             locationCount: draft?.Locations?.Count(l => l != null && !string.IsNullOrWhiteSpace(l.Name)) ?? 0,
             encounterCount: draft?.EncounterTemplates?.Count(e => e != null && !string.IsNullOrWhiteSpace(e.TemplateId ?? e.Name)) ?? 0,
-            partyPcs: party?.PlayerUserIds?.Count ?? 0,
-            partyNpcs: party?.NpcActorIds?.Count ?? 0,
-            missingSheets: missingSheets,
             hasFinale: CampaignMarkdownHasFinale(draft?.CampaignMarkdown));
 
         var header = remaining.Count == 0
@@ -2487,9 +2356,6 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         bool hasStory,
         int locationCount,
         int encounterCount,
-        int partyPcs,
-        int partyNpcs,
-        int missingSheets,
         bool hasFinale)
     {
         var remaining = new List<string>();
@@ -2506,16 +2372,6 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         if (encounterCount == 0)
         {
             remaining.Add("Investigation or combat encounters");
-        }
-
-        if (partyPcs + partyNpcs == 0)
-        {
-            remaining.Add("Party roster (PCs and/or companion NPCs)");
-        }
-
-        if (missingSheets > 0)
-        {
-            remaining.Add($"{missingSheets} character sheet(s) for named roster members");
         }
 
         if (hasStory && !hasFinale)
@@ -3108,7 +2964,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             "3) If they want more/different examples (\"give me 3\", \"more monsters\", \"one more time\") -> dnd_route_propose_content with count. Do not treat that as selecting a numbered item.\n" +
             "4) Campaign creation/start requests -> dnd_route_campaign_create.\n" +
             "5) Rewrite/update existing draft story -> dnd_route_draft_update.\n" +
-            "6) Add/remove party members -> dnd_route_party_edit.\n" +
+            "6) Add/remove party members -> dnd_route_party_edit (explain that the party forms in game; do not mutate a draft roster).\n" +
             "7) Create a sheet when the user already gave a name AND concept -> dnd_route_sheet_create.\n" +
             "8) Generate/brainstorm NPCs, monsters, locations, or maps without exact names -> dnd_route_propose_content.\n" +
             "9) Pass timeout changes -> dnd_route_passtimeout.\n" +
@@ -3169,10 +3025,6 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 	                   toolName.Equals("gptcli_dnd_campaignlist", StringComparison.OrdinalIgnoreCase) ||
 	                   toolName.Equals("gptcli_dnd_campaignstart", StringComparison.OrdinalIgnoreCase) ||
 	                   toolName.Equals("gptcli_dnd_partyshow", StringComparison.OrdinalIgnoreCase) ||
-	                   toolName.Equals("gptcli_dnd_partyaddpc", StringComparison.OrdinalIgnoreCase) ||
-	                   toolName.Equals("gptcli_dnd_partyremovepc", StringComparison.OrdinalIgnoreCase) ||
-	                   toolName.Equals("gptcli_dnd_partyaddnpc", StringComparison.OrdinalIgnoreCase) ||
-	                   toolName.Equals("gptcli_dnd_partyremovenpc", StringComparison.OrdinalIgnoreCase) ||
 	                   toolName.Equals("gptcli_dnd_charactercreate", StringComparison.OrdinalIgnoreCase) ||
 	                   toolName.Equals("gptcli_dnd_charactershow", StringComparison.OrdinalIgnoreCase) ||
 	                   toolName.Equals("gptcli_dnd_npccreate", StringComparison.OrdinalIgnoreCase) ||
@@ -3203,6 +3055,8 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 	                   toolName.Equals("gptcli_dnd_attack", StringComparison.OrdinalIgnoreCase) ||
 	                   toolName.Equals("gptcli_dnd_cast", StringComparison.OrdinalIgnoreCase) ||
 	                   toolName.Equals("gptcli_dnd_pass", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_join", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_ready", StringComparison.OrdinalIgnoreCase) ||
 	                   toolName.Equals("gptcli_dnd_choose", StringComparison.OrdinalIgnoreCase) ||
 	                   toolName.Equals("gptcli_dnd_rest", StringComparison.OrdinalIgnoreCase) ||
 	                   toolName.Equals("gptcli_dnd_rollall", StringComparison.OrdinalIgnoreCase) ||
@@ -4638,8 +4492,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         string justLockedName,
         bool hasStory,
         int locationCount,
-        int encounterCount,
-        int partyMemberCount)
+        int encounterCount)
     {
         var locked = string.IsNullOrWhiteSpace(justLockedName) ? null : justLockedName.Trim();
         var kind = (justLockedKind ?? string.Empty).Trim().ToLowerInvariant();
@@ -4670,7 +4523,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 return FormatDraftMarkdownSection("Next",
                     $"A map for {Locked("that encounter")}",
                     "More monsters",
-                    "The party roster");
+                    "More NPCs");
             }
 
             return FormatDraftMarkdownSection("Next",
@@ -4682,24 +4535,16 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         if (kind is "npc")
         {
             return FormatDraftMarkdownSection("Next",
-                $"Add {Locked("that NPC")} to the party",
                 "Invent more people",
-                "Sketch a place they hang out");
+                "Sketch a place they hang out",
+                "`/gptcli dnd mode value:game` when you're ready to play");
         }
 
         if (kind is "party")
         {
-            if (locationCount == 0 && encounterCount == 0)
-            {
-                return FormatDraftMarkdownSection("Next",
-                    "Opening locations",
-                    "Monsters / encounters",
-                    "More party members");
-            }
-
             return FormatDraftMarkdownSection("Next",
                 "More prep in natural language",
-                "`/gptcli dnd mode value:game` to start");
+                "`/gptcli dnd mode value:game` — players sit down with `I'll join`");
         }
 
         if (kind is "story" or "campaign")
@@ -4709,14 +4554,13 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 return FormatDraftMarkdownSection("Next",
                     "Opening locations / maps",
                     "Monsters / encounters",
-                    "The party roster");
+                    "NPCs");
             }
 
             return FormatDraftMarkdownSection("Next",
                 "Locations",
                 "Encounters",
-                "NPCs",
-                "The party");
+                "NPCs");
         }
 
         if (!hasStory)
@@ -4724,15 +4568,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             return FormatDraftMarkdownSection("Next",
                 "A campaign premise",
                 "A starting location",
-                "The party roster");
-        }
-
-        if (partyMemberCount == 0)
-        {
-            return FormatDraftMarkdownSection("Next",
-                "Add PCs/NPCs to the party",
-                "Invent locations",
-                "Sketch encounters");
+                "Encounters");
         }
 
         if (locationCount == 0)
@@ -4779,8 +4615,6 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         bool hasStory,
         IReadOnlyList<string> locations,
         IReadOnlyList<string> encounters,
-        int partyPcs,
-        int partyNpcs,
         IReadOnlyList<string> remaining,
         bool hasFinale = false,
         bool includeNext = true,
@@ -4810,7 +4644,6 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             sb.AppendLine("- Encounters: *none yet*");
         }
 
-        sb.AppendLine($"- Party: {partyPcs} PC(s), {partyNpcs} NPC(s)");
         sb.AppendLine(hasFinale ? "- Finale / endgame outline" : "- Finale / endgame outline: *missing*");
         sb.AppendLine();
         var left = (remaining ?? Array.Empty<string>()).Where(s => !string.IsNullOrWhiteSpace(s)).Select(s => s.Trim()).ToList();
@@ -4886,19 +4719,16 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         {
             var campaignName = dndState?.ActiveCampaignName ?? "default";
             var draft = await LoadDraftCampaignAsync(channelState, campaignName, ct);
-            var party = await LoadDraftPartyAsync(channelState, campaignName, ct);
             var hasStory = !string.IsNullOrWhiteSpace(draft?.CampaignMarkdown) &&
                            draft.CampaignMarkdown.Trim().Length >= 40;
             var locationCount = draft?.Locations?.Count(l => l != null && !string.IsNullOrWhiteSpace(l.Name)) ?? 0;
             var encounterCount = draft?.EncounterTemplates?.Count(e => e != null && !string.IsNullOrWhiteSpace(e.TemplateId ?? e.Name)) ?? 0;
-            var partyMemberCount = (party?.PlayerUserIds?.Count ?? 0) + (party?.NpcActorIds?.Count ?? 0);
             var next = BuildDraftNextStepsPrompt(
                 justLockedKind,
                 justLockedName,
                 hasStory,
                 locationCount,
-                encounterCount,
-                partyMemberCount);
+                encounterCount);
             var snapshot = await RenderDraftSnapshotMarkdownAsync(
                 channelState,
                 dndState,
@@ -4936,7 +4766,6 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
     {
         var campaignName = dndState?.ActiveCampaignName ?? "default";
         var draft = await LoadDraftCampaignAsync(channelState, campaignName, ct);
-        var party = await LoadDraftPartyAsync(channelState, campaignName, ct);
         var hasStory = !string.IsNullOrWhiteSpace(draft?.CampaignMarkdown) &&
                        draft.CampaignMarkdown.Trim().Length >= 40;
         var locations = (draft?.Locations ?? new List<DndLiteLocationDocument>())
@@ -4951,25 +4780,17 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .Take(12)
             .ToList();
-        var pcs = party?.PlayerUserIds?.Count ?? 0;
-        var npcs = party?.NpcActorIds?.Count ?? 0;
-        var missingSheets = await CountMissingRosterSheetsAsync(channelState, campaignName, ct);
         var hasFinale = CampaignMarkdownHasFinale(draft?.CampaignMarkdown);
         var remaining = BuildDraftRemainingGaps(
             hasStory,
             locations.Count,
             encounters.Count,
-            pcs,
-            npcs,
-            missingSheets,
             hasFinale);
         return BuildDraftStatusMarkdown(
             campaignName,
             hasStory,
             locations,
             encounters,
-            pcs,
-            npcs,
             remaining,
             hasFinale,
             includeNext,
@@ -6006,6 +5827,48 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         return LooksLikeBeginIntent(text);
     }
 
+    internal static bool LooksLikeTableJoin(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        var lower = text.Trim().ToLowerInvariant();
+        if (string.Equals(lower, "!join", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(lower, "join", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return Regex.IsMatch(
+            lower,
+            @"\bi(?:'m| am|’m)?\s+in\b|\bi(?:'ll| will|’ll)?\s+(?:play|join)\b|\bcount me in\b|\bjoin the party\b|\bi'm playing\b|\bim playing\b",
+            RegexOptions.CultureInvariant);
+    }
+
+    internal static bool LooksLikeRoundDone(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        var lower = text.Trim().ToLowerInvariant();
+        if (string.Equals(lower, "done", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(lower, "ready", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(lower, "!done", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(lower, "!ready", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return Regex.IsMatch(
+            lower,
+            @"\bthat'?s all\b|\bwe(?:'re| are) done\b|\bend the round\b|\bround over\b|\bi(?:'m| am) done\b",
+            RegexOptions.CultureInvariant);
+    }
+
     internal static bool LooksLikeBeginIntent(string text)
     {
         if (string.IsNullOrWhiteSpace(text))
@@ -6064,59 +5927,20 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             return false;
         }
 
-        var intent = AnalyzeDraftPartyEditIntent(context, message, strippedText);
-
-        // If no obvious party signals, skip.
-        if (!intent.HasTargets)
+        if (!LooksLikePartyAdd(strippedText) && !LooksLikePartyRemove(strippedText))
         {
             return false;
         }
 
-        // If both add and remove words exist, it's ambiguous; let the LLM router handle it.
-        if (intent.IsAmbiguous)
+        try
         {
-            return false;
+            await message.Channel.SendMessageAsync($"<@{message.Author.Id}> {DraftPartyFormsInGame}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[dnd] send failed (draft party forms in game): {ex.GetType().Name} {ex.Message}");
         }
 
-        if (!intent.WantsAdd && !intent.WantsRemove)
-        {
-            // Mentions without add/remove: let the LLM handle (could just be addressing someone).
-            return false;
-        }
-
-        var (applied, errors) = await ExecuteDraftPartyEditCoreAsync(
-            context,
-            channelState,
-            message,
-            wantsAdd: intent.WantsAdd,
-            mentionedUserIds: intent.MentionedUserIds,
-            npcActorIds: intent.NpcActorIds,
-            ct);
-
-        if (applied.Count == 0 && errors.Count == 0)
-        {
-            return false;
-        }
-
-        var replyLines = new List<string> { $"<@{message.Author.Id}> Updated the draft party roster." };
-        if (applied.Count > 0)
-        {
-            replyLines.Add("Applied:");
-            replyLines.AddRange(applied.Select(x => $"- {x}"));
-        }
-        if (errors.Count > 0)
-        {
-            replyLines.Add("Some requests were ignored:");
-            replyLines.AddRange(errors.Take(8).Select(e => $"- {e}"));
-        }
-
-        var reply = TrimToLimit(string.Join("\n", replyLines), 3500);
-        try { await SendChunkedAsync(message.Channel, reply); }
-        catch (Exception ex) { Console.WriteLine($"[dnd] send failed (draft party deterministic): {ex.GetType().Name} {ex.Message}"); }
-        if (TryRecordAssistantReply(channelState, reply))
-        {
-            try { await context.Host.SaveCachedChannelStateAsync(message.Channel.Id); } catch { }
-        }
         return true;
     }
 
@@ -6542,79 +6366,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 
             if (string.Equals(actionType, PendingActionPartyEdit, StringComparison.OrdinalIgnoreCase))
             {
-                if (!TryParseJsonElement(pending.ArgumentsJson, out var root))
-                {
-                    return await FinishAsync("Pending party change is invalid JSON.");
-                }
-
-                var wantsAdd = TryGetPropertyIgnoreCase(root, "add", out var addEl) && addEl.ValueKind is JsonValueKind.True or JsonValueKind.False && addEl.GetBoolean();
-                var wantsRemove = TryGetPropertyIgnoreCase(root, "remove", out var remEl) && remEl.ValueKind is JsonValueKind.True or JsonValueKind.False && remEl.GetBoolean();
-                if (wantsAdd == wantsRemove)
-                {
-                    return await FinishAsync("Pending party change was ambiguous.");
-                }
-
-                var userIds = new List<ulong>();
-                if (TryGetPropertyIgnoreCase(root, "userIds", out var usersEl) && usersEl.ValueKind == JsonValueKind.Array)
-                {
-                    foreach (var el in usersEl.EnumerateArray())
-                    {
-                        if (el.ValueKind == JsonValueKind.Number && el.TryGetUInt64(out var uid) && uid != 0)
-                        {
-                            userIds.Add(uid);
-                        }
-                        else if (el.ValueKind == JsonValueKind.String && ulong.TryParse(el.GetString(), out uid) && uid != 0)
-                        {
-                            userIds.Add(uid);
-                        }
-                    }
-                }
-
-                var npcIds = new List<string>();
-                if (TryGetPropertyIgnoreCase(root, "npcIds", out var npcsEl) && npcsEl.ValueKind == JsonValueKind.Array)
-                {
-                    foreach (var el in npcsEl.EnumerateArray())
-                    {
-                        if (el.ValueKind == JsonValueKind.String)
-                        {
-                            var id = (el.GetString() ?? string.Empty).Trim();
-                            if (!string.IsNullOrWhiteSpace(id))
-                            {
-                                npcIds.Add(id);
-                            }
-                        }
-                    }
-                }
-
-                var (applied, errors) = await ExecuteDraftPartyEditCoreAsync(
-                    context,
-                    channelState,
-                    message,
-                    wantsAdd,
-                    userIds,
-                    npcIds,
-                    ct);
-
-                var replyLines = new List<string> { "Updated the draft party roster." };
-                if (applied.Count > 0)
-                {
-                    replyLines.Add("Applied:");
-                    replyLines.AddRange(applied.Select(x => $"- {x}"));
-                }
-                if (errors.Count > 0)
-                {
-                    replyLines.Add("Some requests were ignored:");
-                    replyLines.AddRange(errors.Take(8).Select(e => $"- {e}"));
-                }
-
-                var partyBody = TrimToLimit(string.Join("\n", replyLines), 3500);
-                if (applied.Count > 0)
-                {
-                    var st = await GetOrLoadStateAsync(channelState, ct);
-                    partyBody = await WithDraftNextStepsAsync(channelState, st, partyBody, "party", null, ct);
-                }
-
-                return await FinishAsync(partyBody);
+                return await FinishAsync(DraftPartyFormsInGame);
             }
         }
         catch (Exception ex)
@@ -6983,7 +6735,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             {
                 var sessionText = await TryStartGameSessionAsync(ctx, st, ct);
                 extra = string.IsNullOrWhiteSpace(sessionText)
-                    ? "\nSession cannot start until the party has at least one character sheet."
+                    ? "\nGame is open. Create a sheet with `/gptcli dnd charactercreate`, then say `I'll join`."
                     : "\n" + TrimToLimit(sessionText, 1400);
             }
             return new GptCliExecutionResult(true, TrimToLimit($"DND mode set to `{mode}` for campaign \"{st.ActiveCampaignName}\".{extra}", DiscordMessageLimit), channelStateChanged);
@@ -7061,9 +6813,12 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 false);
         }
 
-        // Write run roster from draft party so runner bootstrap and live mode are consistent.
-        var partyDraft = await LoadDraftPartyAsync(ctx.ChannelState, campaignName, ct) ?? new DndLitePartyDocument();
-        await SavePartyAsync(ctx.ChannelState, campaignName, partyDraft, ct);
+        // Live party starts empty; draft roster is prep only. Players sit down in game with I'll join.
+        await SavePartyAsync(ctx.ChannelState, campaignName, new DndLitePartyDocument
+        {
+            PlayerUserIds = new List<ulong>(),
+            NpcActorIds = new List<string>()
+        }, ct);
 
         var doc = new DndLiteCampaignDocument
         {
@@ -7122,14 +6877,11 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 ? campaignNameRaw.Trim()
                 : (st.ActiveCampaignName ?? "default");
 
-            var partyDoc = await LoadDraftPartyAsync(ctx.ChannelState, campaignName.Trim(), ct) ?? new DndLitePartyDocument();
-            partyDoc.PlayerUserIds ??= new List<ulong>();
-            partyDoc.NpcActorIds ??= new List<string>();
-            if (ctx.User?.Id != 0 && !partyDoc.PlayerUserIds.Contains(ctx.User.Id))
+            var partyDoc = new DndLitePartyDocument
             {
-                // In draft mode, default the author into the roster so the campaign generator can map at least one PC.
-                partyDoc.PlayerUserIds.Add(ctx.User.Id);
-            }
+                PlayerUserIds = new List<ulong>(),
+                NpcActorIds = new List<string>()
+            };
 
             var pcRosterContext = await BuildPcRosterContextAsync(ctx.ChannelState, partyDoc, ct);
             Console.WriteLine(
@@ -7244,7 +6996,6 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             // Apply party-related sheets from the campaign create response (if any),
             // then persist the party roster as a draft roster so the user can iterate before finalizing.
             var (npcsWritten, pcsWritten) = await ApplyCampaignCreatePartyEditsAsync(ctx.ChannelState, doc.CampaignName, partyDoc, pkg, ct);
-            await SaveDraftPartyAsync(ctx.ChannelState, doc.CampaignName, partyDoc, ct);
 
             var summary = BuildDraftCampaignSummary(doc);
             if (npcsWritten.Count > 0 || pcsWritten.Count > 0 || (pkg.UnassignedPcs?.Count ?? 0) > 0)
@@ -7424,16 +7175,18 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 
             var st = await GetOrLoadStateAsync(ctx.ChannelState, ct);
             var mode = NormalizeMode(st.Mode);
-            if (!string.Equals(mode, ModeDraft, StringComparison.OrdinalIgnoreCase) &&
-                !string.Equals(mode, ModeGame, StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(mode, ModeDraft, StringComparison.OrdinalIgnoreCase))
+            {
+                return new GptCliExecutionResult(true, DraftPartyFormsInGame, false);
+            }
+
+            if (!string.Equals(mode, ModeGame, StringComparison.OrdinalIgnoreCase))
             {
                 return new GptCliExecutionResult(true, "Not in draft/game mode. Use `/gptcli dnd mode value:draft` or `/gptcli dnd mode value:game`.", false);
             }
 
             var campaignName = st.ActiveCampaignName ?? "default";
-            var party = string.Equals(mode, ModeDraft, StringComparison.OrdinalIgnoreCase)
-                ? (await LoadDraftPartyAsync(ctx.ChannelState, campaignName, ct) ?? new DndLitePartyDocument())
-                : (await LoadPartyAsync(ctx.ChannelState, campaignName, ct) ?? new DndLitePartyDocument());
+            var party = await LoadPartyAsync(ctx.ChannelState, campaignName, ct) ?? new DndLitePartyDocument();
             party.PlayerUserIds ??= new List<ulong>();
             party.NpcActorIds ??= new List<string>();
 
@@ -7492,144 +7245,14 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         return await ExecuteNpcRemoveAsync(ctx, argsJson, ct);
     }
 
-    private async Task<GptCliExecutionResult> ExecutePartyAddPcAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)
-    {
-        if (!TryGetUlongArg(argsJson, "user", out var userId) || userId == 0)
-        {
-            return new GptCliExecutionResult(true, "Provide `user`.", false);
-        }
+    private Task<GptCliExecutionResult> ExecutePartyAddPcAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)
+        => Task.FromResult(new GptCliExecutionResult(true, DraftPartyFormsInGame, false));
 
-        var lockHandle = _channelLocks.GetOrAdd(ctx.Channel.Id, _ => new SemaphoreSlim(1, 1));
-        await lockHandle.WaitAsync(ct);
-        try
-        {
-            var off = await RejectWhenOffAsync(ctx, ct);
-            if (off != null)
-            {
-                return off;
-            }
+    private Task<GptCliExecutionResult> ExecutePartyRemovePcAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)
+        => Task.FromResult(new GptCliExecutionResult(true, DraftPartyFormsInGame, false));
 
-            var st = await GetOrLoadStateAsync(ctx.ChannelState, ct);
-            var mode = NormalizeMode(st.Mode);
-            if (!string.Equals(mode, ModeDraft, StringComparison.OrdinalIgnoreCase))
-            {
-                return new GptCliExecutionResult(true, "Not in draft mode. Use `/gptcli dnd mode value:draft`.", false);
-            }
-
-            var campaignName = st.ActiveCampaignName ?? "default";
-            var party = await LoadDraftPartyAsync(ctx.ChannelState, campaignName, ct) ?? new DndLitePartyDocument();
-            party.PlayerUserIds ??= new List<ulong>();
-            if (!party.PlayerUserIds.Contains(userId))
-            {
-                party.PlayerUserIds.Add(userId);
-                await SaveDraftPartyAsync(ctx.ChannelState, campaignName, party, ct);
-            }
-
-            var pc = await LoadPcProfileAsync(ctx.ChannelState, userId, ct);
-            var note = pc == null ? " (sheet missing; ask them to run `/gptcli dnd charactercreate`)" : $" ({pc.Name})";
-            return new GptCliExecutionResult(true, $"Added PC to draft party: <@{userId}>{note}", true);
-        }
-        finally
-        {
-            lockHandle.Release();
-        }
-    }
-
-    private async Task<GptCliExecutionResult> ExecutePartyRemovePcAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)
-    {
-        if (!TryGetUlongArg(argsJson, "user", out var userId) || userId == 0)
-        {
-            return new GptCliExecutionResult(true, "Provide `user`.", false);
-        }
-
-        var lockHandle = _channelLocks.GetOrAdd(ctx.Channel.Id, _ => new SemaphoreSlim(1, 1));
-        await lockHandle.WaitAsync(ct);
-        try
-        {
-            var off = await RejectWhenOffAsync(ctx, ct);
-            if (off != null)
-            {
-                return off;
-            }
-
-            var st = await GetOrLoadStateAsync(ctx.ChannelState, ct);
-            var mode = NormalizeMode(st.Mode);
-            if (!string.Equals(mode, ModeDraft, StringComparison.OrdinalIgnoreCase))
-            {
-                return new GptCliExecutionResult(true, "Not in draft mode. Use `/gptcli dnd mode value:draft`.", false);
-            }
-
-            var campaignName = st.ActiveCampaignName ?? "default";
-            var party = await LoadDraftPartyAsync(ctx.ChannelState, campaignName, ct) ?? new DndLitePartyDocument();
-            party.PlayerUserIds ??= new List<ulong>();
-            var before = party.PlayerUserIds.Count;
-            party.PlayerUserIds = party.PlayerUserIds.Where(x => x != userId).ToList();
-            var changed = party.PlayerUserIds.Count != before;
-            if (changed)
-            {
-                await SaveDraftPartyAsync(ctx.ChannelState, campaignName, party, ct);
-            }
-
-            return new GptCliExecutionResult(true, $"Removed PC from draft party: <@{userId}>", changed);
-        }
-        finally
-        {
-            lockHandle.Release();
-        }
-    }
-
-    private async Task<GptCliExecutionResult> ExecutePartyAddNpcAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)
-    {
-        if (!TryGetStringArg(argsJson, "id", out var actorIdRaw) || string.IsNullOrWhiteSpace(actorIdRaw))
-        {
-            return new GptCliExecutionResult(true, "Provide `id`.", false);
-        }
-
-        var actorId = actorIdRaw.Trim();
-        var lockHandle = _channelLocks.GetOrAdd(ctx.Channel.Id, _ => new SemaphoreSlim(1, 1));
-        await lockHandle.WaitAsync(ct);
-        try
-        {
-            var off = await RejectWhenOffAsync(ctx, ct);
-            if (off != null)
-            {
-                return off;
-            }
-
-            var st = await GetOrLoadStateAsync(ctx.ChannelState, ct);
-            var mode = NormalizeMode(st.Mode);
-            if (!string.Equals(mode, ModeDraft, StringComparison.OrdinalIgnoreCase))
-            {
-                return new GptCliExecutionResult(true, "Not in draft mode. Use `/gptcli dnd mode value:draft`.", false);
-            }
-
-            if (!IsNpcActorId(actorId))
-            {
-                return new GptCliExecutionResult(true, "NPC id must start with `npc:`.", false);
-            }
-
-            var npc = await LoadNpcProfileAsync(ctx.ChannelState, actorId, ct);
-            if (npc == null)
-            {
-                return new GptCliExecutionResult(true, $"No NPC profile found for `{actorId}`. Create one with `/gptcli dnd npccreate`.", false);
-            }
-
-            var campaignName = st.ActiveCampaignName ?? "default";
-            var party = await LoadDraftPartyAsync(ctx.ChannelState, campaignName, ct) ?? new DndLitePartyDocument();
-            party.NpcActorIds ??= new List<string>();
-            if (!party.NpcActorIds.Any(x => string.Equals(x, actorId, StringComparison.OrdinalIgnoreCase)))
-            {
-                party.NpcActorIds.Add(actorId);
-                await SaveDraftPartyAsync(ctx.ChannelState, campaignName, party, ct);
-            }
-
-            return new GptCliExecutionResult(true, $"Added NPC to draft party: `{actorId}` | {npc.Name}", true);
-        }
-        finally
-        {
-            lockHandle.Release();
-        }
-    }
+    private Task<GptCliExecutionResult> ExecutePartyAddNpcAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)
+        => Task.FromResult(new GptCliExecutionResult(true, DraftPartyFormsInGame, false));
 
     private async Task<(List<string> npcsWritten, List<string> pcsWritten)> ApplyCampaignCreatePartyEditsAsync(
         InstructionGPT.ChannelState channelState,
@@ -7691,11 +7314,6 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 };
 
                 await SaveNpcProfileAsync(channelState, npc, ct);
-                if (!partyDoc.NpcActorIds.Any(x => string.Equals(x, npc.ActorId, StringComparison.OrdinalIgnoreCase)))
-                {
-                    partyDoc.NpcActorIds.Add(npc.ActorId);
-                }
-
                 npcsWritten.Add($"{npc.ActorId} | {npc.Name}");
                 continue;
             }
@@ -7732,11 +7350,6 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 };
 
                 await SavePcProfileAsync(channelState, pc, ct);
-                if (!partyDoc.PlayerUserIds.Contains(userId))
-                {
-                    partyDoc.PlayerUserIds.Add(userId);
-                }
-
                 pcsWritten.Add($"{userId} | {pc.Name}");
             }
         }
@@ -7769,11 +7382,6 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             };
 
             await SaveNpcProfileAsync(channelState, npc, ct);
-            if (!partyDoc.NpcActorIds.Any(x => string.Equals(x, npc.ActorId, StringComparison.OrdinalIgnoreCase)))
-            {
-                partyDoc.NpcActorIds.Add(npc.ActorId);
-            }
-
             npcsWritten.Add($"{npc.ActorId} | {npc.Name} (from unassigned PC)");
         }
 
@@ -8264,56 +7872,9 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 
             await SavePcProfileAsync(ctx.ChannelState, profile, ct);
 
-            var party = string.Equals(mode, ModeDraft, StringComparison.OrdinalIgnoreCase)
-                ? await LoadDraftPartyAsync(ctx.ChannelState, active, ct)
-                : (await LoadPartyAsync(ctx.ChannelState, active, ct) ?? new DndLitePartyDocument());
-            if (!party.PlayerUserIds.Contains(ctx.User.Id))
-            {
-                party.PlayerUserIds.Add(ctx.User.Id);
-                if (string.Equals(mode, ModeDraft, StringComparison.OrdinalIgnoreCase))
-                {
-                    await SaveDraftPartyAsync(ctx.ChannelState, active, party, ct);
-                }
-                else
-                {
-                    await SavePartyAsync(ctx.ChannelState, active, party, ct);
-                }
-            }
 
-            // Only game mode mutates runner state; draft mode is draft-only.
-            if (string.Equals(mode, ModeGame, StringComparison.OrdinalIgnoreCase) && campaign != null)
-            {
-                // If campaign already has a runner state, inject the new party member (only when no active encounter).
-                if (campaign.RunnerState != null && campaign.RunnerState.ActiveEncounter != null && campaign.RunnerState.ActiveEncounter.Completed == false)
-                {
-                    // Active encounter: don't attempt to merge party membership.
-                }
-                else
-                {
-                    var runnerState = campaign.RunnerState ?? new DndCampaignRunnerState();
-                    runnerState.Party ??= new List<DndCampaignPartyMember>();
-                    if (runnerState.Party.All(p => !string.Equals(p.ActorId, profile.ActorId, StringComparison.OrdinalIgnoreCase)))
-                    {
-                        runnerState.Party.Add(new DndCampaignPartyMember(
-                            ActorId: profile.ActorId,
-                            Name: profile.Name,
-                            Stats: profile.Stats,
-                            MaxHp: profile.MaxHp,
-                            Hp: profile.MaxHp,
-                            MaxMp: profile.MaxMp,
-                            Mp: profile.MaxMp));
-                    }
 
-                    // Keep templates from the campaign doc.
-                    runnerState.Templates = (campaign.EncounterTemplates ?? new List<DndLiteEncounterTemplateDocument>())
-                        .Where(t => t?.Mechanics != null)
-                        .Select(t => t.Mechanics)
-                        .ToList();
-
-                    campaign.RunnerState = runnerState;
-                    await SaveCampaignAsync(ctx.ChannelState, campaign, ct);
-                }
-            }
+            // Game seating is explicit (`I'll join`); creating a sheet does not sit the player down.
 
             return new GptCliExecutionResult(true, BuildCharacterSummary(profile), true);
         }
@@ -8433,19 +7994,13 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 
             await SaveNpcProfileAsync(ctx.ChannelState, npc, ct);
 
-            var party = string.Equals(mode, ModeDraft, StringComparison.OrdinalIgnoreCase)
-                ? await LoadDraftPartyAsync(ctx.ChannelState, active, ct)
-                : (await LoadPartyAsync(ctx.ChannelState, active, ct) ?? new DndLitePartyDocument());
-            party.NpcActorIds ??= new List<string>();
-            if (!party.NpcActorIds.Any(x => string.Equals(x, actorId, StringComparison.OrdinalIgnoreCase)))
+            if (string.Equals(mode, ModeGame, StringComparison.OrdinalIgnoreCase))
             {
-                party.NpcActorIds.Add(actorId);
-                if (string.Equals(mode, ModeDraft, StringComparison.OrdinalIgnoreCase))
+                var party = await LoadPartyAsync(ctx.ChannelState, active, ct) ?? new DndLitePartyDocument();
+                party.NpcActorIds ??= new List<string>();
+                if (!party.NpcActorIds.Any(x => string.Equals(x, actorId, StringComparison.OrdinalIgnoreCase)))
                 {
-                    await SaveDraftPartyAsync(ctx.ChannelState, active, party, ct);
-                }
-                else
-                {
+                    party.NpcActorIds.Add(actorId);
                     await SavePartyAsync(ctx.ChannelState, active, party, ct);
                 }
             }
@@ -8959,6 +8514,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             var actorId = ToActorId(ctx.User.Id);
             var r = await RunEncounterActionAsync(ctx.Context, ctx.ChannelState, st, ctx.Channel, async runner =>
             {
+                await SeatSpeakerIfPossibleAsync(ctx.ChannelState, st.ActiveCampaignName, runner, ctx.User.Id, ctx.User.Username, ct);
                 var targetId = ResolveTargetActorId(await GetActiveEncounterSnapshotAsync(ctx.ChannelState, st.ActiveCampaignName, ct), target, out var err);
                 if (string.IsNullOrWhiteSpace(targetId))
                 {
@@ -9006,6 +8562,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             var actorId = ToActorId(ctx.User.Id);
             var r = await RunEncounterActionAsync(ctx.Context, ctx.ChannelState, st, ctx.Channel, async runner =>
             {
+                await SeatSpeakerIfPossibleAsync(ctx.ChannelState, st.ActiveCampaignName, runner, ctx.User.Id, ctx.User.Username, ct);
                 var targetId = ResolveTargetActorId(await GetActiveEncounterSnapshotAsync(ctx.ChannelState, st.ActiveCampaignName, ct), target, out var err);
                 if (string.IsNullOrWhiteSpace(targetId))
                 {
@@ -9045,11 +8602,87 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             EnsureTickLoopRunning(ctx.Channel.Id);
 
             var actorId = ToActorId(ctx.User.Id);
+            var r = await RunEncounterActionAsync(ctx.Context, ctx.ChannelState, st, ctx.Channel, async runner =>
+            {
+                await SeatSpeakerIfPossibleAsync(ctx.ChannelState, st.ActiveCampaignName, runner, ctx.User.Id, ctx.User.Username, ct);
+                var res = runner.Pass(actorId);
+                return (res, RenderTurnResult(res));
+            }, actionLabel: "pass", postToChannel: false, ct: ct);
+
+            return new GptCliExecutionResult(true, r.responseText, r.stateChanged);
+        }
+        finally
+        {
+            lockHandle.Release();
+        }
+    }
+
+    private async Task<GptCliExecutionResult> ExecuteJoinAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)
+    {
+        var lockHandle = _channelLocks.GetOrAdd(ctx.Channel.Id, _ => new SemaphoreSlim(1, 1));
+        await lockHandle.WaitAsync(ct);
+        try
+        {
+            var off = await RejectWhenOffAsync(ctx, ct);
+            if (off != null)
+            {
+                return off;
+            }
+
+            var st = await GetOrLoadStateAsync(ctx.ChannelState, ct);
+            if (!string.Equals(NormalizeMode(st.Mode), ModeGame, StringComparison.OrdinalIgnoreCase))
+            {
+                return new GptCliExecutionResult(true, "Not in game mode. Use `/gptcli dnd mode value:game`.", false);
+            }
+
+            if (ctx.Message == null)
+            {
+                return new GptCliExecutionResult(true, "Say `I'll join` in the channel after you have a character sheet.", false);
+            }
+
+            EnsureTickLoopRunning(ctx.Channel.Id);
+            var r = await HandleJoinOrReadyAsync(
+                ctx.Context, ctx.ChannelState, st, ctx.Message, join: true, ct, postToChannel: false);
+            return new GptCliExecutionResult(true, r.responseText, r.stateChanged);
+        }
+        finally
+        {
+            lockHandle.Release();
+        }
+    }
+
+    private async Task<GptCliExecutionResult> ExecuteReadyAsync(GptCliExecutionContext ctx, string argsJson, CancellationToken ct)
+    {
+        var lockHandle = _channelLocks.GetOrAdd(ctx.Channel.Id, _ => new SemaphoreSlim(1, 1));
+        await lockHandle.WaitAsync(ct);
+        try
+        {
+            var off = await RejectWhenOffAsync(ctx, ct);
+            if (off != null)
+            {
+                return off;
+            }
+
+            var st = await GetOrLoadStateAsync(ctx.ChannelState, ct);
+            if (!string.Equals(NormalizeMode(st.Mode), ModeGame, StringComparison.OrdinalIgnoreCase))
+            {
+                return new GptCliExecutionResult(true, "Not in game mode. Use `/gptcli dnd mode value:game`.", false);
+            }
+
+            EnsureTickLoopRunning(ctx.Channel.Id);
+            if (ctx.Message != null)
+            {
+                var joinOrReady = await HandleJoinOrReadyAsync(
+                    ctx.Context, ctx.ChannelState, st, ctx.Message, join: false, ct, postToChannel: false);
+                return new GptCliExecutionResult(true, joinOrReady.responseText, joinOrReady.stateChanged);
+            }
+
+            var actorId = ToActorId(ctx.User.Id);
             var r = await RunEncounterActionAsync(ctx.Context, ctx.ChannelState, st, ctx.Channel, runner =>
             {
-                var res = runner.Pass(actorId);
-                return Task.FromResult((res, RenderTurnResult(res)));
-            }, actionLabel: "pass", postToChannel: false, ct: ct);
+                var res = runner.Ready(actorId);
+                return Task.FromResult((res, RenderCampaignResult(res)));
+            }, actionLabel: "ready", postToChannel: false, ct: ct);
 
             return new GptCliExecutionResult(true, r.responseText, r.stateChanged);
         }
@@ -9085,11 +8718,18 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             var (runner, campaign, _) = await EnsureGameSessionAsync(ctx, st, ct);
             if (runner == null)
             {
-                return new GptCliExecutionResult(true, "Session cannot start until the party has at least one character sheet.", false);
+                return new GptCliExecutionResult(true, "No campaign is loaded.", false);
             }
 
             var matched = TryMatchSessionOption(optionRaw, runner.GetSessionSnapshot().Options) ?? optionRaw.Trim();
-            var res = await ApplySessionChoiceAsync(ctx.ChannelState, st.ActiveCampaignName, campaign, runner, matched, ct);
+            var res = await ApplySessionChoiceAsync(
+                ctx.ChannelState,
+                st.ActiveCampaignName,
+                campaign,
+                runner,
+                matched,
+                ct,
+                ToActorId(ctx.User.Id));
             var text = await FormatGameTurnOutputAsync(ctx.Context, ctx.ChannelState, res, RenderCampaignResult(res), "choose", ct);
             return new GptCliExecutionResult(true, text, true);
         }
@@ -9137,16 +8777,17 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             var (runner, campaign, _) = await EnsureGameSessionAsync(ctx, st, ct);
             if (runner == null)
             {
-                return new GptCliExecutionResult(true, "Session cannot start until the party has at least one character sheet.", false);
+                return new GptCliExecutionResult(true, "No campaign is loaded.", false);
             }
 
+            var actorId = ToActorId(ctx.User.Id);
             var session = runner.GetSessionSnapshot();
             if (session.Phase != DndGamePhase.Rest && session.Options.Any(o => string.Equals(o.Id, "rest", StringComparison.OrdinalIgnoreCase)))
             {
-                runner.ChooseOption("rest");
+                runner.ChooseOption("rest", actorId);
             }
 
-            var res = await ApplySessionChoiceAsync(ctx.ChannelState, st.ActiveCampaignName, campaign, runner, optionId, ct);
+            var res = await ApplySessionChoiceAsync(ctx.ChannelState, st.ActiveCampaignName, campaign, runner, optionId, ct, actorId);
             var text = await FormatGameTurnOutputAsync(ctx.Context, ctx.ChannelState, res, RenderCampaignResult(res), "rest", ct);
             return new GptCliExecutionResult(true, text, true);
         }
@@ -9236,6 +8877,154 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         }
     }
 
+    private async Task SeatSpeakerIfPossibleAsync(
+        InstructionGPT.ChannelState channelState,
+        string campaignName,
+        DndCampaignRunner runner,
+        ulong userId,
+        string username,
+        CancellationToken ct)
+    {
+        if (runner == null || userId == 0)
+        {
+            return;
+        }
+
+        var pc = await LoadPcProfileAsync(channelState, userId, ct);
+        if (pc == null || pc.Stats == null || pc.MaxHp <= 0)
+        {
+            return;
+        }
+
+        runner.JoinParty(new DndCampaignPartyMember(
+            ActorId: pc.ActorId ?? ToActorId(userId),
+            Name: string.IsNullOrWhiteSpace(pc.Name) ? (username ?? ToActorId(userId)) : pc.Name.Trim(),
+            Stats: pc.Stats,
+            MaxHp: pc.MaxHp,
+            Hp: runner.GetState().Party.TryGetValue(pc.ActorId ?? ToActorId(userId), out var existing) ? existing.Hp : pc.MaxHp,
+            MaxMp: pc.MaxMp,
+            Mp: runner.GetState().Party.TryGetValue(pc.ActorId ?? ToActorId(userId), out var existingMp) ? existingMp.Mp : pc.MaxMp));
+    }
+
+    private async Task<bool> TryHandleTableControlBeforeRouteAsync(
+        DiscordModuleContext context,
+        InstructionGPT.ChannelState channelState,
+        SocketMessage message,
+        DndLiteChannelState dndState,
+        CancellationToken ct)
+    {
+        var text = StripBotMentions(message?.Content ?? string.Empty, context.Client.CurrentUser.Id).Trim();
+        if (!LooksLikeTableJoin(text) && !LooksLikeRoundDone(text))
+        {
+            return false;
+        }
+
+        var lockHandle = _channelLocks.GetOrAdd(message.Channel.Id, _ => new SemaphoreSlim(1, 1));
+        await lockHandle.WaitAsync(ct);
+        try
+        {
+            EnsureTickLoopRunning(message.Channel.Id);
+            var handled = await HandleJoinOrReadyAsync(
+                context,
+                channelState,
+                dndState,
+                message,
+                join: LooksLikeTableJoin(text),
+                ct);
+            if (handled.stateChanged)
+            {
+                await SaveStateAsync(channelState, dndState, ct);
+            }
+
+            return handled.handled;
+        }
+        finally
+        {
+            lockHandle.Release();
+        }
+    }
+
+    private async Task<(bool handled, bool stateChanged, string responseText)> HandleJoinOrReadyAsync(
+        DiscordModuleContext context,
+        InstructionGPT.ChannelState channelState,
+        DndLiteChannelState dndState,
+        SocketMessage message,
+        bool join,
+        CancellationToken ct,
+        bool postToChannel = true)
+    {
+        var campaign = await LoadCampaignAsync(channelState, dndState.ActiveCampaignName, ct);
+        var runner = await LoadOrCreateRunnerAsync(channelState, dndState.ActiveCampaignName, ct);
+        if (runner == null || campaign == null)
+        {
+            var missing = $"<@{message.Author.Id}> No campaign is loaded.";
+            if (postToChannel)
+            {
+                await message.Channel.SendMessageAsync(missing);
+            }
+
+            return (true, false, missing);
+        }
+
+        if (!runner.IsSessionStarted)
+        {
+            runner.StartSession();
+        }
+
+        var actorId = ToActorId(message.Author.Id);
+        DndCampaignResult res;
+        if (join)
+        {
+            var pc = await LoadPcProfileAsync(channelState, message.Author.Id, ct);
+            if (pc == null || pc.Stats == null || pc.MaxHp <= 0)
+            {
+                var needSheet =
+                    $"<@{message.Author.Id}> Create a character sheet first with `/gptcli dnd charactercreate`.";
+                if (postToChannel)
+                {
+                    await message.Channel.SendMessageAsync(needSheet);
+                }
+
+                return (true, false, needSheet);
+            }
+
+            var snap = runner.GetState();
+            var existing = snap?.Party != null && snap.Party.TryGetValue(pc.ActorId ?? actorId, out var seated)
+                ? seated
+                : null;
+            res = runner.JoinParty(new DndCampaignPartyMember(
+                ActorId: pc.ActorId ?? actorId,
+                Name: string.IsNullOrWhiteSpace(pc.Name) ? message.Author.Username : pc.Name.Trim(),
+                Stats: pc.Stats,
+                MaxHp: pc.MaxHp,
+                Hp: existing?.Hp ?? pc.MaxHp,
+                MaxMp: pc.MaxMp,
+                Mp: existing?.Mp ?? pc.MaxMp));
+            var party = await LoadPartyAsync(channelState, dndState.ActiveCampaignName, ct) ?? new DndLitePartyDocument();
+            party.PlayerUserIds ??= new List<ulong>();
+            if (!party.PlayerUserIds.Contains(message.Author.Id))
+            {
+                party.PlayerUserIds.Add(message.Author.Id);
+                await SavePartyAsync(channelState, dndState.ActiveCampaignName, party, ct);
+            }
+        }
+        else
+        {
+            res = runner.Ready(actorId);
+        }
+
+        await PersistRunnerAsync(channelState, dndState.ActiveCampaignName, campaign, runner, ct);
+        var body = string.IsNullOrWhiteSpace(res.Error) ? RenderCampaignResult(res) : res.Error;
+        var reply = $"<@{message.Author.Id}>\n{body}";
+        if (postToChannel)
+        {
+            await SendChunkedAsync(message.Channel, reply);
+            TryRecordAssistantReply(channelState, reply);
+        }
+
+        return (true, res.Ok, reply);
+    }
+
     private async Task<(bool handled, bool stateChanged)> TryHandleBangCommandAsync(
         DiscordModuleContext context,
         InstructionGPT.ChannelState channelState,
@@ -9277,6 +9066,21 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 
             await SendChunkedAsync(message.Channel, TrimToLimit(sb.ToString().Trim(), 3500));
             return (true, false);
+        }
+
+        if (string.Equals(content, "!join", StringComparison.OrdinalIgnoreCase) ||
+            LooksLikeTableJoin(content))
+        {
+            var joinHandled = await HandleJoinOrReadyAsync(context, channelState, dndState, message, join: true, ct);
+            return (joinHandled.handled, joinHandled.stateChanged);
+        }
+
+        if (string.Equals(content, "!done", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(content, "!ready", StringComparison.OrdinalIgnoreCase) ||
+            LooksLikeRoundDone(content))
+        {
+            var readyHandled = await HandleJoinOrReadyAsync(context, channelState, dndState, message, join: false, ct);
+            return (readyHandled.handled, readyHandled.stateChanged);
         }
 
         if (string.Equals(content, "!state", StringComparison.OrdinalIgnoreCase))
@@ -9398,6 +9202,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             var actorId = ToActorId(message.Author.Id);
             var r = await RunEncounterActionAsync(context, channelState, dndState, message.Channel, async runner =>
             {
+                await SeatSpeakerIfPossibleAsync(channelState, dndState.ActiveCampaignName, runner, message.Author.Id, message.Author.Username, ct);
                 var targetId = ResolveTargetActorId(await GetActiveEncounterSnapshotAsync(channelState, dndState.ActiveCampaignName, ct), tail, out var err);
                 if (string.IsNullOrWhiteSpace(targetId))
                 {
@@ -9498,6 +9303,13 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             return false;
         }
 
+        if (LooksLikeTableJoin(text) || LooksLikeRoundDone(text))
+        {
+            var handled = await HandleJoinOrReadyAsync(
+                context, channelState, dndState, message, join: LooksLikeTableJoin(text), ct);
+            return handled.handled;
+        }
+
         var campaign = await LoadCampaignAsync(channelState, dndState.ActiveCampaignName, ct);
         if (campaign?.RunnerState == null)
         {
@@ -9578,10 +9390,11 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             return false;
         }
 
-        if (!string.Equals(currentActorId, actorId, StringComparison.OrdinalIgnoreCase))
+        if (!string.IsNullOrWhiteSpace(currentActorId) &&
+            !string.Equals(currentActorId, actorId, StringComparison.OrdinalIgnoreCase))
         {
             await message.Channel.SendMessageAsync(
-                $"{authorMention} It's {currentActorName}'s turn right now. Once their turn resolves, I'll map your action.");
+                $"{authorMention} {currentActorName}'s action is still resolving.");
             return true;
         }
 
@@ -10479,7 +10292,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                     continue;
                 }
 
-                if (isPc && timedOut)
+                if (isPc && timedOut && !string.IsNullOrWhiteSpace(currentActorId))
                 {
                     var res = runner.Pass(currentActorId);
                     await PersistRunnerAsync(channelState, dndState.ActiveCampaignName, campaign, runner, ct);
@@ -10492,6 +10305,23 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                         "auto-pass",
                         ct,
                         forcedLead: "⏱️ **Turn timer hits zero.** Auto-pass kicks in and the fight keeps moving.");
+                    try { await SendChunkedAsync(discordChannel, TrimToLimit(text, 3500)); } catch { }
+                    continue;
+                }
+
+                if (timedOut && string.IsNullOrWhiteSpace(currentActorId))
+                {
+                    var res = runner.TimeoutIdle();
+                    await PersistRunnerAsync(channelState, dndState.ActiveCampaignName, campaign, runner, ct);
+                    var legacyText = RenderCampaignResult(res);
+                    var text = await FormatGameTurnOutputAsync(
+                        _moduleContext,
+                        channelState,
+                        res,
+                        legacyText,
+                        "idle-timeout",
+                        ct,
+                        forcedLead: "⏱️ **The table went quiet.** Remaining fighters sit out and the round resolves.");
                     try { await SendChunkedAsync(discordChannel, TrimToLimit(text, 3500)); } catch { }
                     continue;
                 }
@@ -10692,67 +10522,17 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             return null;
         }
 
-        if (campaign.RunnerState != null && campaign.RunnerState.Party is { Count: > 0 })
+        if (campaign.RunnerState != null)
         {
+            campaign.RunnerState.Party ??= new List<DndCampaignPartyMember>();
             campaign.RunnerState.Templates = BuildRunnerTemplates(campaign.EncounterTemplates);
-            var runner1 = RestoreCampaignRunner(channelState.ChannelId, campaign.RunnerState);
-            return runner1;
-        }
-
-        // Bootstrap runner from party profiles.
-        var partyDoc = await LoadPartyAsync(channelState, campaignName, ct);
-        partyDoc ??= new DndLitePartyDocument();
-        partyDoc.PlayerUserIds ??= new List<ulong>();
-        partyDoc.NpcActorIds ??= new List<string>();
-        if (partyDoc.PlayerUserIds.Count == 0 && partyDoc.NpcActorIds.Count == 0)
-        {
-            return null;
-        }
-
-        var members = new List<DndCampaignPartyMember>();
-        foreach (var userId in partyDoc.PlayerUserIds.Distinct().OrderBy(id => id))
-        {
-            var pc = await LoadPcProfileAsync(channelState, userId, ct);
-            if (pc == null || string.IsNullOrWhiteSpace(pc.ActorId) || pc.Stats == null || pc.MaxHp <= 0)
-            {
-                continue;
-            }
-
-            members.Add(new DndCampaignPartyMember(
-                ActorId: pc.ActorId,
-                Name: pc.Name,
-                Stats: pc.Stats,
-                MaxHp: pc.MaxHp,
-                Hp: pc.MaxHp,
-                MaxMp: pc.MaxMp,
-                Mp: pc.MaxMp));
-        }
-
-        foreach (var npcId in partyDoc.NpcActorIds.Where(s => !string.IsNullOrWhiteSpace(s)).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(s => s, StringComparer.OrdinalIgnoreCase))
-        {
-            var npc = await LoadNpcProfileAsync(channelState, npcId.Trim(), ct);
-            if (npc == null || string.IsNullOrWhiteSpace(npc.ActorId) || npc.Stats == null || npc.MaxHp <= 0)
-            {
-                continue;
-            }
-
-            members.Add(new DndCampaignPartyMember(
-                ActorId: npc.ActorId,
-                Name: npc.Name,
-                Stats: npc.Stats,
-                MaxHp: npc.MaxHp,
-                Hp: npc.MaxHp,
-                MaxMp: npc.MaxMp,
-                Mp: npc.MaxMp));
-        }
-
-        if (members.Count == 0)
-        {
-            return null;
+            return RestoreCampaignRunner(channelState.ChannelId, campaign.RunnerState);
         }
 
         var dice = _diceByChannel.GetOrAdd(channelState.ChannelId, _ => new RandomDiceRoller());
-        var runner = new DndCampaignRunner(new DndCampaignDefinition(members), diceRoller: dice);
+        var runner = new DndCampaignRunner(
+            new DndCampaignDefinition(Array.Empty<DndCampaignPartyMember>()),
+            diceRoller: dice);
 
         foreach (var template in BuildRunnerTemplates(campaign.EncounterTemplates))
         {
@@ -11680,9 +11460,10 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         DndLiteCampaignDocument campaign,
         DndCampaignRunner runner,
         string option,
-        CancellationToken ct)
+        CancellationToken ct,
+        string actorId = null)
     {
-        var res = runner.ChooseOption(option);
+        var res = runner.ChooseOption(option, actorId);
         var (autoChanged, autoResult) = AutoResolvePendingRolls(runner);
         if (autoChanged && autoResult != null)
         {
@@ -11727,7 +11508,14 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             return false;
         }
 
-        var res = await ApplySessionChoiceAsync(channelState, dndState.ActiveCampaignName, campaign, runner, optionId, ct);
+        var res = await ApplySessionChoiceAsync(
+            channelState,
+            dndState.ActiveCampaignName,
+            campaign,
+            runner,
+            optionId,
+            ct,
+            ToActorId(message.Author.Id));
         var body = RenderCampaignResult(res);
         var reply = $"<@{message.Author.Id}>\n{body}";
         await SendChunkedAsync(message.Channel, reply);
@@ -11768,7 +11556,16 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             ? session.Phase.ToString()
             : session.CurrentSceneTitle;
         sb.AppendLine($"**State:** {session.Phase} — {title}");
-        if (!string.IsNullOrWhiteSpace(session.CurrentSceneSummary) &&
+        if (session.Phase == DndGamePhase.PartyFormation)
+        {
+            sb.AppendLine("The table is forming. Need a character sheet, then say `I'll join`. When you're ready, say `ready` or start playing.");
+            var seated = session.SeatedActorIds;
+            if (seated is { Count: > 0 })
+            {
+                sb.AppendLine("Seated: " + string.Join(", ", seated));
+            }
+        }
+        else if (!string.IsNullOrWhiteSpace(session.CurrentSceneSummary) &&
             session.Phase is not (DndGamePhase.Combat or DndGamePhase.Check))
         {
             sb.AppendLine(TrimToLimit(session.CurrentSceneSummary, 280));
@@ -11795,11 +11592,13 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 DndTurnResult.BuildNextRequest(snap.ActiveEncounterState, Array.Empty<DndPendingRoll>()),
                 snap.ActiveEncounterState));
             sb.AppendLine(RenderTargets(snap.ActiveEncounterState));
+            sb.AppendLine(RenderTableRoundFooter(snap.ActiveEncounterState.ActedThisRoundActorIds, snap.ActiveEncounterState.ReadyActorIds, snap.ActiveEncounterState.ReadyQuorumNeeded, snap.ActiveEncounterState.CurrentActorId));
         }
-        else if (session.Options is { Count: > 0 })
+        else if (session.Phase != DndGamePhase.PartyFormation && session.Options is { Count: > 0 })
         {
             sb.AppendLine("**Options:**");
             sb.AppendLine(DndCampaignRunner.FormatOptionList(session.Options));
+            sb.AppendLine(RenderTableRoundFooter(session.ActedThisRoundActorIds, session.ReadyActorIds, session.ReadyQuorumNeeded, session.TableCurrentActorId));
         }
 
         return TrimToLimit(sb.ToString().Trim(), 1800);
@@ -11928,6 +11727,18 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         return TrimToLimit(string.Join("\n", lines), 1700);
     }
 
+    private static string RenderTableRoundFooter(
+        IReadOnlyList<string> acted,
+        IReadOnlyList<string> ready,
+        int quorumNeeded,
+        string currentActorId)
+    {
+        var actedText = acted == null || acted.Count == 0 ? "(none)" : string.Join(", ", acted);
+        var readyText = ready == null || ready.Count == 0 ? "0" : ready.Count.ToString();
+        var lockText = string.IsNullOrWhiteSpace(currentActorId) ? "open floor" : $"{currentActorId} resolving";
+        return $"**Table:** {lockText}. Acted: {actedText}. Done votes: {readyText}/{Math.Max(1, quorumNeeded)}. Say `done` after you act.";
+    }
+
     private static string RenderNextRequest(DndNextRequest next, DndEncounterSnapshot encounter = null)
     {
         if (next == null)
@@ -11942,8 +11753,13 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 
         if (next.Kind == DndNextRequestKind.NeedAction)
         {
+            if (string.IsNullOrWhiteSpace(next.CurrentActorId))
+            {
+                return "Next: party round is open. Anyone who hasn't acted can attack, cast, or pass. Say `done` after you act if the table is finished.";
+            }
+
             var actor = RenderActorReference(next.CurrentActorId, encounter);
-            return $"Next: {actor} to act. Describe the move naturally (attack, cast, or pass).";
+            return $"Next: {actor}'s action is resolving.";
         }
 
         if (next.RequiredRolls == null || next.RequiredRolls.Count == 0)
@@ -14949,6 +14765,24 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
     private static string ResolveNpcProfilePath(InstructionGPT.ChannelState channelState, string actorId)
         => Path.Combine(GetLiteRootDirectory(channelState), "profiles", "npcs", $"{SanitizeActorIdForPath(actorId)}.json");
 
+    private static int CountNpcProfileFiles(InstructionGPT.ChannelState channelState)
+    {
+        try
+        {
+            var dir = Path.Combine(GetLiteRootDirectory(channelState), "profiles", "npcs");
+            if (!Directory.Exists(dir))
+            {
+                return 0;
+            }
+
+            return Directory.GetFiles(dir, "*.json").Length;
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+
     internal static bool TryGetDraftRouterReplyText(string argsJson, out string value)
     {
         if (TryGetStringArg(argsJson, "reply", out value))
@@ -15431,7 +15265,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         DndLitePartyDocument party = null;
         if (string.Equals(mode, ModeDraft, StringComparison.OrdinalIgnoreCase))
         {
-            party = await LoadDraftPartyAsync(channelState, campaignName, ct);
+            return;
         }
         else if (string.Equals(mode, ModeGame, StringComparison.OrdinalIgnoreCase))
         {

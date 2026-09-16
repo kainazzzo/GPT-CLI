@@ -57,7 +57,15 @@ public sealed record DndSessionSnapshot(
     bool LastCheckSuccess,
     string LastCheckSummary,
     IReadOnlyList<DndSceneDefinition> Scenes,
-    IReadOnlyList<DndSceneOption> Options);
+    IReadOnlyList<DndSceneOption> Options,
+    IReadOnlyList<string> SeatedActorIds = null,
+    IReadOnlyList<string> SittingOutActorIds = null,
+    IReadOnlyList<string> ActedThisRoundActorIds = null,
+    IReadOnlyList<string> ReadyActorIds = null,
+    string TableCurrentActorId = "",
+    int TableRoundNumber = 1,
+    int ReadyQuorumNeeded = 0,
+    int DoneVoteCount = 0);
 
 public sealed record DndCampaignSnapshot(
     bool IsFailed,

@@ -28,7 +28,8 @@ public enum DndGamePhase
     Combat = 7,
     Aftermath = 8,
     Failed = 9,
-    Complete = 10
+    Complete = 10,
+    PartyFormation = 11
 }
 
 public enum DndSceneKind
@@ -97,7 +98,13 @@ public sealed record DndEncounterSnapshot(
     IReadOnlyList<string> TurnOrder,
     IReadOnlyDictionary<string, DndActorSnapshot> Actors,
     bool IsCompleted,
-    string CompletionReason);
+    string CompletionReason,
+    IReadOnlyList<string> ActedThisRoundActorIds = null,
+    IReadOnlyList<string> ReadyActorIds = null,
+    IReadOnlyList<string> SittingOutActorIds = null,
+    IReadOnlyList<string> ParticipatingActorIds = null,
+    int ReadyQuorumNeeded = 0,
+    int DoneVoteCount = 0);
 
 public enum DndPendingRollKind
 {
@@ -135,7 +142,11 @@ public enum DndLedgerKind
     ActionResolved = 4,
     DamageApplied = 5,
     MpSpent = 6,
-    EncounterCompleted = 7
+    EncounterCompleted = 7,
+    PartyMemberJoined = 8,
+    ActorReady = 9,
+    PartyRoundEnded = 10,
+    ActorAfkSkipped = 11
 }
 
 public sealed record DndLedgerDetails(

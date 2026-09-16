@@ -9,6 +9,11 @@ RUN --mount=type=cache,id=nuget,target=/root/.nuget/packages \
 COPY . .
 RUN --mount=type=cache,id=nuget,target=/root/.nuget/packages \
     dotnet publish gpt.csproj -c Release -r linux-x64 -o /app/publish --self-contained true -p:PublishSingleFile=true -p:GptSkipModuleDeploy=true --no-restore
+# Example modules are separate DLLs (gpt.csproj excludes modules/**/*.cs). Bake them into the image
+# so `docker compose build` is a full bot+plugin build and the container does not need host-mounted DLLs.
+RUN --mount=type=cache,id=nuget,target=/root/.nuget/packages \
+    mkdir -p /app/publish/modules && \
+    bash modules/build-deploy-modules.sh /app/publish/modules
 
 FROM redhat/ubi9
 WORKDIR /app

@@ -22,6 +22,7 @@ Started with `StartSession()` (idempotent). Scenes are synthesized if empty.
 | Phase | Meaning | Typical options (ids) |
 |---|---|---|
 | `NotStarted` | No session | — |
+| `PartyFormation` | Empty table / everyone sat out | `party` only; sit down via `JoinParty`, start via `Ready` |
 | `SessionStart` | Intro/recap | `begin`, `recap`, `party` |
 | `Exploration` | Location play | `check:search`, `social`, `travel`, `rest`, `combat:{templateId}`, `continue` |
 | `Social` | Overlay talk | `check:persuade`, `return`, combat, `continue` |
@@ -63,15 +64,16 @@ No templates → `intro` + `finale` only.
 
 Actors have `DndStats`, `MaxHp`/`Hp`, `MaxMp`/`Mp`. Sides: Party vs Enemy (one boss + adds).
 
-Phases: `NotStarted → NeedInitiative → InCombat → Completed`.
+Phases: `NotStarted → InCombat → Completed` (initiative is no longer an action gate).
 
-- Start: enqueue d20+init mod for every living actor.
-- Turn order: initiative desc, Dex mod, actor id.
-- Party actions: `DeclareAttack`, `DeclareCastSpell` (costs `SpellMpCost`, default 3), `Pass`. Only current living party actor; no pending rolls; no friendly fire.
+- Start: open **party round**. `CurrentActorId` empty means anyone who has not acted may declare.
+- One attack/cast/pass per living party actor per round. Declaring locks `CurrentActorId` until rolls resolve.
+- Enemies do **not** act after each PC. `Ready(actorId)` (must have acted) or `EndPartyRound()` / `TimeoutIdle()` closes the round: unacted PCs sit out, then all enemies act vs **participating** PCs (acted or joined this round).
+- Done quorum is `max(1, ceil(activePcCount / 3))` (1 of 2). `npc:` actors do not vote.
+- `AddPartyActor` / campaign `JoinParty` seats a late joiner mid-fight (targetable this enemy phase).
 - To-hit d20 + Str or SpellPower vs `BaseDefense + Def mod + Dex mod` (default base 10). Natural 20 is a crit (extra damage die).
 - Damage: 1d8+Str (attack) or 1d10+SpellPower (spell). Applied to target HP; 0 HP = down.
-- Enemy turns auto-run after a party action (deterministic first living party member in turn order). Use `RollAll()` to resolve pending dice.
-- Completion: no living enemies → `victory`; no living party → `defeat`. Further actions rejected.
+- Completion: no living enemies → `victory`; no living party → `defeat`. Empty table is formation, not a wipe.
 
 `DndTurnResult.NextRequest` tells the adapter what is needed: `NeedInitiativeRolls`, `NeedAction`, `NeedRolls`, `Completed`.
 
@@ -83,7 +85,8 @@ Serializable DTOs in `RunnerStateModels.cs` (`DndCampaignRunnerState`, nested `D
 
 ## Public session API (`DndCampaignRunner`)
 
-- `StartSession`, `ChooseOption`, `RequestCheck`, `ResolveCheck`, `CancelCheck`, `ShortRest`, `LongRest`
+- `StartSession`, `ChooseOption(input, actorId)`, `JoinParty`, `Ready`, `BeginPlayFromFormation`, `EndPartyRound`, `TimeoutIdle`, `RequestCheck`, `ResolveCheck`, `CancelCheck`, `ShortRest`, `LongRest`
+- Empty party is legal. `StartSession` with no seated PC enters `PartyFormation`.
 - `GetSessionSnapshot` / `Campaign.Session` on `DndCampaignSnapshot`
 - `FormatOptionList` — numbered labels for Discord
 - Combat wrappers unchanged: `StartEncounter`, `Attack`, `CastSpell`, `Pass`, `RollAll`, …

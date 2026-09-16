@@ -64,6 +64,8 @@ public sealed class DndEncounterRunner
     private DndEncounterPhase _phase;
     private bool _completed;
     private string _completionReason = string.Empty;
+    private readonly DndTableRound _table = new();
+    private string _lastEnemyTargetId = string.Empty;
 
     public DndEncounterRunner(
         DndEncounterDefinition definition,
@@ -111,7 +113,8 @@ public sealed class DndEncounterRunner
                 Hit = a.Hit,
                 Critical = a.Critical
             }).ToList(),
-            Ledger = _ledger.ToList()
+            Ledger = _ledger.ToList(),
+            TableRound = _table.ToState()
         };
 
         foreach (var a in _actors.Values)
@@ -268,6 +271,29 @@ public sealed class DndEncounterRunner
             runner._ledger.AddRange(state.Ledger.Where(e => e != null));
         }
 
+        if (state.TableRound != null)
+        {
+            runner._table.LoadFrom(state.TableRound);
+        }
+        else if (runner._phase == DndEncounterPhase.InCombat)
+        {
+            runner.SeedParticipatingFromLivingParty();
+        }
+
+        // Old saves stuck in initiative become an open party round.
+        if (runner._phase == DndEncounterPhase.NeedInitiative)
+        {
+            runner._pendingRollsById.Clear();
+            runner._phase = DndEncounterPhase.InCombat;
+            if (runner._table.RoundNumber <= 0)
+            {
+                runner._table.RoundNumber = 1;
+            }
+
+            runner.SeedParticipatingFromLivingParty();
+            runner._table.CurrentActorId = string.Empty;
+        }
+
         return runner;
     }
 
@@ -284,32 +310,132 @@ public sealed class DndEncounterRunner
         }
 
         var newEntries = new List<DndLedgerEntry>();
-        _phase = DndEncounterPhase.NeedInitiative;
-        _roundNumber = 0;
+        _phase = DndEncounterPhase.InCombat;
+        _roundNumber = 1;
         _turnIndex = 0;
         _turnOrder.Clear();
         _initiativeByActorId.Clear();
         _actionsById.Clear();
         _pendingRollsById.Clear();
+        _table.RoundNumber = 1;
+        _table.ClearRoundFlags();
+        _table.SittingOut.Clear();
+        SeedParticipatingFromLivingParty();
 
         newEntries.Add(AppendLedger(
             DndLedgerKind.EncounterStarted,
-            "Encounter started. Initiative required.",
+            "Encounter started. Party round open.",
             DetailsForSystem()));
 
-        foreach (var actor in _actors.Values.Where(a => a.IsAlive))
+        return BuildOkResult(newEntries);
+    }
+
+    public DndTurnResult AddPartyActor(DndActorDefinition definition)
+    {
+        if (_completed)
         {
-            EnqueueRoll(new DndPendingRoll(
-                RollId: NewId("r"),
-                Kind: DndPendingRollKind.Initiative,
-                ActorId: actor.ActorId,
-                TargetId: string.Empty,
-                ActionId: string.Empty,
-                DiceCount: 1,
-                DiceSides: 20,
-                Modifier: _rules.GetInitiativeModifier(actor.Stats)), newEntries);
+            return DndTurnResult.ErrorResult("Encounter completed", BuildSnapshot(), GetPendingRolls());
         }
 
+        if (definition == null || string.IsNullOrWhiteSpace(definition.ActorId))
+        {
+            return DndTurnResult.ErrorResult("Party member required", BuildSnapshot(), GetPendingRolls());
+        }
+
+        if (_actors.ContainsKey(definition.ActorId))
+        {
+            _table.Seat(definition.ActorId, joinedThisRound: true);
+            var already = new List<DndLedgerEntry>
+            {
+                AppendLedger(
+                    DndLedgerKind.PartyMemberJoined,
+                    $"{ActorName(definition.ActorId)} rejoins the fight.",
+                    DetailsForSystem())
+            };
+            return BuildOkResult(already);
+        }
+
+        if (definition.MaxHp <= 0)
+        {
+            return DndTurnResult.ErrorResult("MaxHp must be > 0", BuildSnapshot(), GetPendingRolls());
+        }
+
+        var seated = new ActorState(definition with { Side = DndSide.Party, IsBoss = false });
+        _actors[seated.ActorId] = seated;
+        _table.Seat(seated.ActorId, joinedThisRound: true);
+        var newEntries = new List<DndLedgerEntry>
+        {
+            AppendLedger(
+                DndLedgerKind.PartyMemberJoined,
+                $"{seated.Name} joins the fight.",
+                DetailsForAction(seated.ActorId, string.Empty, string.Empty, DndActionType.Unknown))
+        };
+        return BuildOkResult(newEntries);
+    }
+
+    public DndTurnResult Ready(string actorId)
+    {
+        if (_completed)
+        {
+            return DndTurnResult.ErrorResult("Encounter completed", BuildSnapshot(), GetPendingRolls());
+        }
+
+        if (_phase != DndEncounterPhase.InCombat)
+        {
+            return DndTurnResult.ErrorResult("Encounter not in combat", BuildSnapshot(), GetPendingRolls());
+        }
+
+        if (_pendingRollsById.Count > 0)
+        {
+            return DndTurnResult.ErrorResult("Pending rolls must be resolved first", BuildSnapshot(), GetPendingRolls());
+        }
+
+        if (string.IsNullOrWhiteSpace(actorId) || !_actors.TryGetValue(actorId, out var actor) || actor.Side != DndSide.Party)
+        {
+            return DndTurnResult.ErrorResult("Actor not found", BuildSnapshot(), GetPendingRolls());
+        }
+
+        if (!_table.ActedThisRound.Contains(actorId))
+        {
+            return DndTurnResult.ErrorResult("Act first, then you can skip the rest of the round", BuildSnapshot(), GetPendingRolls());
+        }
+
+        _table.ReadyThisRound.Add(actorId);
+        var newEntries = new List<DndLedgerEntry>
+        {
+            AppendLedger(
+                DndLedgerKind.ActorReady,
+                $"{ActorName(actorId)} is done for this round.",
+                DetailsForAction(actorId, string.Empty, string.Empty, DndActionType.Unknown))
+        };
+
+        if (ReadyQuorumMet())
+        {
+            EndPartyRound(newEntries);
+        }
+
+        return BuildOkResult(newEntries);
+    }
+
+    public DndTurnResult EndPartyRound()
+    {
+        if (_completed)
+        {
+            return DndTurnResult.ErrorResult("Encounter completed", BuildSnapshot(), GetPendingRolls());
+        }
+
+        if (_phase != DndEncounterPhase.InCombat)
+        {
+            return DndTurnResult.ErrorResult("Encounter not in combat", BuildSnapshot(), GetPendingRolls());
+        }
+
+        if (_pendingRollsById.Count > 0)
+        {
+            return DndTurnResult.ErrorResult("Pending rolls must be resolved first", BuildSnapshot(), GetPendingRolls());
+        }
+
+        var newEntries = new List<DndLedgerEntry>();
+        EndPartyRound(newEntries);
         return BuildOkResult(newEntries);
     }
 
@@ -337,7 +463,7 @@ public sealed class DndEncounterRunner
             $"{ActorName(actorId)} ends their turn.",
             DetailsForAction(actorId, targetId: string.Empty, actionId, DndActionType.Pass)));
 
-        AdvanceTurnAndAutoRunEnemies(newEntries);
+        FinishPartyAction(actorId, newEntries);
         return BuildOkResult(newEntries);
     }
 
@@ -390,12 +516,6 @@ public sealed class DndEncounterRunner
             }
         }
 
-        // If we're in combat and it's enemy's turn, keep simulating enemies until a player is up.
-        if (!_completed)
-        {
-            AdvanceTurnAndAutoRunEnemiesIfNeeded(newEntries);
-        }
-
         return BuildOkResult(newEntries);
     }
 
@@ -442,6 +562,12 @@ public sealed class DndEncounterRunner
             if (actor.Mp < _rules.SpellMpCost)
             {
                 _actionsById.Remove(actionId);
+                if (string.Equals(_table.CurrentActorId, actorId, StringComparison.OrdinalIgnoreCase) &&
+                    !_table.ActedThisRound.Contains(actorId))
+                {
+                    _table.CurrentActorId = string.Empty;
+                }
+
                 return DndTurnResult.ErrorResult("Not enough MP", BuildSnapshot(), GetPendingRolls());
             }
 
@@ -494,7 +620,6 @@ public sealed class DndEncounterRunner
             return DndTurnResult.ErrorResult("Failed to resolve roll", BuildSnapshot(), GetPendingRolls());
         }
 
-        AdvanceTurnAndAutoRunEnemiesIfNeeded(newEntries);
         return BuildOkResult(newEntries);
     }
 
@@ -564,7 +689,7 @@ public sealed class DndEncounterRunner
             if (!hit)
             {
                 _actionsById.Remove(action.ActionId);
-                AdvanceTurn(newEntries);
+                FinishResolvedAction(action.ActorId, newEntries);
                 return true;
             }
 
@@ -619,7 +744,7 @@ public sealed class DndEncounterRunner
                 return true;
             }
 
-            AdvanceTurn(newEntries);
+            FinishResolvedAction(action.ActorId, newEntries);
             return true;
         }
 
@@ -716,6 +841,7 @@ public sealed class DndEncounterRunner
             TargetId = target.ActorId
         };
 
+        _lastEnemyTargetId = target.ActorId;
         newEntries.Add(AppendLedger(
             DndLedgerKind.ActionDeclared,
             $"{ActorName(enemy.ActorId)} attacks {ActorName(target.ActorId)}.",
@@ -755,61 +881,28 @@ public sealed class DndEncounterRunner
 
     private ActorState ChooseEnemyTarget()
     {
-        // Deterministic: pick the first alive party member in current turn order.
-        foreach (var id in _turnOrder)
+        var candidates = _actors.Values
+            .Where(a => a.Side == DndSide.Party && a.IsAlive && _table.Participating.Contains(a.ActorId))
+            .OrderBy(a => a.ActorId, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (candidates.Count == 0)
         {
-            if (!_actors.TryGetValue(id, out var a) || !a.IsAlive || a.Side != DndSide.Party)
-            {
-                continue;
-            }
-
-            return a;
+            return null;
         }
 
-        // Fallback.
-        return _actors.Values.Where(a => a.Side == DndSide.Party && a.IsAlive).OrderBy(a => a.ActorId, StringComparer.OrdinalIgnoreCase).FirstOrDefault();
+        if (string.IsNullOrWhiteSpace(_lastEnemyTargetId))
+        {
+            return candidates[0];
+        }
+
+        var idx = candidates.FindIndex(a => string.Equals(a.ActorId, _lastEnemyTargetId, StringComparison.OrdinalIgnoreCase));
+        var next = idx < 0 ? 0 : (idx + 1) % candidates.Count;
+        return candidates[next];
     }
 
     private void AdvanceTurn(List<DndLedgerEntry> newEntries)
     {
-        if (_phase != DndEncounterPhase.InCombat || _turnOrder.Count == 0 || _completed)
-        {
-            return;
-        }
-
-        // Move to next alive actor. If none alive on either side, complete.
-        for (var i = 0; i < _turnOrder.Count + 1; i++)
-        {
-            _turnIndex++;
-            if (_turnIndex >= _turnOrder.Count)
-            {
-                _turnIndex = 0;
-                _roundNumber++;
-                newEntries.Add(AppendLedger(
-                    DndLedgerKind.TurnAdvanced,
-                    $"Round {_roundNumber} begins.",
-                    DetailsForSystem()));
-            }
-
-            var id = CurrentActorId();
-            if (string.IsNullOrWhiteSpace(id) || !_actors.TryGetValue(id, out var a))
-            {
-                continue;
-            }
-
-            if (!a.IsAlive)
-            {
-                continue;
-            }
-
-            newEntries.Add(AppendLedger(
-                DndLedgerKind.TurnAdvanced,
-                $"Turn: {ActorName(id)}.",
-                DetailsForSystem()));
-            return;
-        }
-
-        Complete("stalled", newEntries);
+        // Party-round combat does not use interleaved initiative turns.
     }
 
     private bool CheckCompletion(List<DndLedgerEntry> newEntries)
@@ -902,18 +995,28 @@ public sealed class DndEncounterRunner
             return false;
         }
 
-        if (!string.Equals(CurrentActorId(), actorId, StringComparison.OrdinalIgnoreCase))
-        {
-            error = "Not actor's turn";
-            return false;
-        }
-
         if (actor.Side != DndSide.Party)
         {
             error = "Only party can declare actions";
             return false;
         }
 
+        var lockId = CurrentActorId();
+        if (!string.IsNullOrWhiteSpace(lockId) &&
+            !string.Equals(lockId, actorId, StringComparison.OrdinalIgnoreCase))
+        {
+            error = $"{ActorName(lockId)}'s action is still resolving";
+            return false;
+        }
+
+        if (_table.ActedThisRound.Contains(actorId))
+        {
+            error = "Already acted this round";
+            return false;
+        }
+
+        _table.Seat(actorId);
+        _table.CurrentActorId = actorId;
         return true;
     }
 
@@ -1032,29 +1135,208 @@ public sealed class DndEncounterRunner
                 InitiativeTotal: a.InitiativeTotal);
         }
 
+        var activePcs = CountActivePcs();
         return new DndEncounterSnapshot(
             Phase: _phase,
-            RoundNumber: _roundNumber,
+            RoundNumber: Math.Max(_roundNumber, _table.RoundNumber),
             CurrentActorId: CurrentActorId(),
             TurnOrder: _turnOrder.ToList().AsReadOnly(),
             Actors: new ReadOnlyDictionary<string, DndActorSnapshot>(actors),
             IsCompleted: _completed,
-            CompletionReason: _completionReason ?? string.Empty);
+            CompletionReason: _completionReason ?? string.Empty,
+            ActedThisRoundActorIds: DndTableRound.Sorted(_table.ActedThisRound),
+            ReadyActorIds: DndTableRound.Sorted(_table.ReadyThisRound),
+            SittingOutActorIds: DndTableRound.Sorted(_table.SittingOut),
+            ParticipatingActorIds: DndTableRound.Sorted(_table.Participating),
+            ReadyQuorumNeeded: DndTableRound.QuorumNeeded(activePcs),
+            DoneVoteCount: _table.ReadyThisRound.Count(id => !DndTableRound.IsNpcActorId(id)));
     }
 
     private string CurrentActorId()
+        => _phase == DndEncounterPhase.InCombat ? (_table.CurrentActorId ?? string.Empty) : string.Empty;
+
+    private void SeedParticipatingFromLivingParty()
     {
-        if (_turnOrder.Count == 0 || _phase != DndEncounterPhase.InCombat)
+        _table.Participating.Clear();
+        foreach (var actor in _actors.Values)
         {
-            return string.Empty;
+            if (actor.Side == DndSide.Party && actor.IsAlive && !_table.SittingOut.Contains(actor.ActorId))
+            {
+                _table.Participating.Add(actor.ActorId);
+            }
+        }
+    }
+
+    private int CountActivePcs()
+        => _actors.Values.Count(a =>
+            a.Side == DndSide.Party &&
+            a.IsAlive &&
+            !DndTableRound.IsNpcActorId(a.ActorId) &&
+            !_table.SittingOut.Contains(a.ActorId));
+
+    private bool ReadyQuorumMet()
+    {
+        var active = CountActivePcs();
+        if (active <= 0)
+        {
+            return false;
         }
 
-        if (_turnIndex < 0 || _turnIndex >= _turnOrder.Count)
+        var votes = _table.ReadyThisRound.Count(id =>
+            !DndTableRound.IsNpcActorId(id) &&
+            _table.ActedThisRound.Contains(id));
+        return votes >= DndTableRound.QuorumNeeded(active);
+    }
+
+    private void FinishResolvedAction(string actorId, List<DndLedgerEntry> newEntries)
+    {
+        if (string.IsNullOrWhiteSpace(actorId) || !_actors.TryGetValue(actorId, out var actor))
         {
-            _turnIndex = 0;
+            _table.CurrentActorId = string.Empty;
+            return;
         }
 
-        return _turnOrder[_turnIndex] ?? string.Empty;
+        if (actor.Side == DndSide.Party)
+        {
+            FinishPartyAction(actorId, newEntries);
+            return;
+        }
+
+        _table.CurrentActorId = string.Empty;
+    }
+
+    private void FinishPartyAction(string actorId, List<DndLedgerEntry> newEntries)
+    {
+        _table.MarkActed(actorId);
+        newEntries.Add(AppendLedger(
+            DndLedgerKind.TurnAdvanced,
+            $"{ActorName(actorId)} finishes their action. Party round still open.",
+            DetailsForSystem()));
+    }
+
+    private void EndPartyRound(List<DndLedgerEntry> newEntries)
+    {
+        foreach (var actor in _actors.Values.Where(a => a.Side == DndSide.Party && a.IsAlive).ToList())
+        {
+            if (DndTableRound.IsNpcActorId(actor.ActorId) || _table.ActedThisRound.Contains(actor.ActorId))
+            {
+                continue;
+            }
+
+            // Late joiners stay targetable this enemy phase even if they have not acted yet.
+            if (_table.JoinedThisRound.Contains(actor.ActorId))
+            {
+                continue;
+            }
+
+            _table.SittingOut.Add(actor.ActorId);
+            _table.Participating.Remove(actor.ActorId);
+            newEntries.Add(AppendLedger(
+                DndLedgerKind.ActorAfkSkipped,
+                $"{ActorName(actor.ActorId)} sits out (no action this round).",
+                DetailsForAction(actor.ActorId, string.Empty, string.Empty, DndActionType.Unknown)));
+        }
+
+        newEntries.Add(AppendLedger(
+            DndLedgerKind.PartyRoundEnded,
+            $"Party round {_table.RoundNumber} ends. Enemies act.",
+            DetailsForSystem()));
+
+        AutoplayUnactedNpcs(newEntries);
+        if (_completed)
+        {
+            return;
+        }
+
+        RunEnemyPhase(newEntries);
+        if (_completed)
+        {
+            return;
+        }
+
+        foreach (var id in _table.JoinedThisRound.ToList())
+        {
+            if (!_table.ActedThisRound.Contains(id) && _actors.TryGetValue(id, out var joiner) && joiner.Side == DndSide.Party)
+            {
+                _table.SittingOut.Add(id);
+            }
+        }
+
+        _table.AdvanceRound();
+        _roundNumber = _table.RoundNumber;
+        SeedParticipatingFromLivingParty();
+        newEntries.Add(AppendLedger(
+            DndLedgerKind.TurnAdvanced,
+            $"Party round {_table.RoundNumber} is open.",
+            DetailsForSystem()));
+    }
+
+    private void AutoplayUnactedNpcs(List<DndLedgerEntry> newEntries)
+    {
+        foreach (var npc in _actors.Values
+                     .Where(a => a.Side == DndSide.Party && a.IsAlive && DndTableRound.IsNpcActorId(a.ActorId))
+                     .OrderBy(a => a.ActorId, StringComparer.OrdinalIgnoreCase)
+                     .ToList())
+        {
+            if (_completed || _table.ActedThisRound.Contains(npc.ActorId))
+            {
+                continue;
+            }
+
+            var target = _actors.Values
+                .Where(a => a.Side == DndSide.Enemy && a.IsAlive)
+                .OrderByDescending(a => a.IsBoss)
+                .ThenBy(a => a.ActorId, StringComparer.OrdinalIgnoreCase)
+                .FirstOrDefault();
+            if (target == null)
+            {
+                FinishPartyAction(npc.ActorId, newEntries);
+                continue;
+            }
+
+            _table.CurrentActorId = npc.ActorId;
+            var declared = DeclareAction(npc.ActorId, target.ActorId, DndActionType.Attack);
+            if (!declared.Ok)
+            {
+                FinishPartyAction(npc.ActorId, newEntries);
+                continue;
+            }
+
+            newEntries.AddRange(declared.NewLedgerEntries);
+            ResolvePendingForCurrentAction(newEntries);
+        }
+    }
+
+    private void RunEnemyPhase(List<DndLedgerEntry> newEntries)
+    {
+        var enemies = _actors.Values
+            .Where(a => a.Side == DndSide.Enemy && a.IsAlive)
+            .OrderByDescending(a => a.IsBoss)
+            .ThenBy(a => a.ActorId, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        foreach (var enemy in enemies)
+        {
+            if (_completed)
+            {
+                return;
+            }
+
+            SimulateEnemyTurn(enemy, newEntries);
+        }
+    }
+
+    private void ResolvePendingForCurrentAction(List<DndLedgerEntry> newEntries)
+    {
+        for (var i = 0; i < 16 && _pendingRollsById.Count > 0 && !_completed; i++)
+        {
+            var next = _pendingRollsById.Values
+                .OrderBy(r => r.RollId, StringComparer.OrdinalIgnoreCase)
+                .First();
+            if (!ResolveRollInternal(next, null, null, newEntries))
+            {
+                break;
+            }
+        }
     }
 
     private string ActorName(string actorId)

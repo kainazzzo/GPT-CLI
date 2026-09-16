@@ -19,12 +19,17 @@ public sealed partial class DndCampaignRunner
         _scenes.Clear();
         _scenes.AddRange(DndSceneCatalog.Synthesize(_templates.Values.ToList()));
         _sessionStarted = true;
-        _sessionPhase = DndGamePhase.SessionStart;
+        _sessionPhase = HasSeatedPc() ? DndGamePhase.SessionStart : DndGamePhase.PartyFormation;
         _currentSceneId = DndSceneCatalog.IntroSceneId;
         _previousPhase = DndGamePhase.NotStarted;
         _pendingCheck = null;
         _lastCheckSuccess = false;
         _lastCheckSummary = string.Empty;
+        _sessionRound.ClearRoundFlags();
+        foreach (var id in SeatedActorIds())
+        {
+            _sessionRound.Participating.Add(id);
+        }
 
         var intro = FindScene(DndSceneCatalog.IntroSceneId);
         if (intro != null)
@@ -35,7 +40,7 @@ public sealed partial class DndCampaignRunner
         return SessionOk("Session started. Choose an option to continue.");
     }
 
-    public DndCampaignResult ChooseOption(string input)
+    public DndCampaignResult ChooseOption(string input, string actorId = null)
     {
         if (!_sessionStarted)
         {
@@ -52,12 +57,48 @@ public sealed partial class DndCampaignRunner
             return SessionError("In combat. Attack, cast, or pass.");
         }
 
+        if (_sessionPhase == DndGamePhase.PartyFormation)
+        {
+            if (!TryResolveOption(input, out var formationOption, out _))
+            {
+                return SessionError("Party is still forming. Join first, then say ready or start playing.");
+            }
+
+            if (string.Equals(formationOption.Id, "party", StringComparison.OrdinalIgnoreCase))
+            {
+                return SessionOk("Party status.");
+            }
+
+            return SessionError("Party is still forming");
+        }
+
         if (!TryResolveOption(input, out var option, out var error))
         {
             return SessionError(error);
         }
 
-        return ApplyOption(option);
+        var id = option.Id ?? string.Empty;
+        var free = id is "recap" or "party" or "roll" or "cancel" or "return" or "end"
+            || (_sessionPhase == DndGamePhase.Failed && id.StartsWith("rest:", StringComparison.OrdinalIgnoreCase));
+        var check = id.StartsWith("check:", StringComparison.OrdinalIgnoreCase);
+        if (!free && !check && !TryConsumeSessionAction(actorId, out var actError))
+        {
+            return SessionError(actError);
+        }
+
+        var result = ApplyOption(option, actorId);
+        if (result.Ok && !free && !check && _sessionPhase != DndGamePhase.Check)
+        {
+            var resolvedActor = string.IsNullOrWhiteSpace(actorId)
+                ? _sessionRound.CurrentActorId
+                : actorId;
+            if (!string.IsNullOrWhiteSpace(resolvedActor))
+            {
+                _sessionRound.MarkActed(resolvedActor);
+            }
+        }
+
+        return result;
     }
 
     public DndCampaignResult RequestCheck(string actorId, DndCheckStat stat, int dc, string reason)
@@ -70,6 +111,11 @@ public sealed partial class DndCampaignRunner
         if (_failed)
         {
             return SessionError("Campaign failed");
+        }
+
+        if (_sessionPhase == DndGamePhase.PartyFormation)
+        {
+            return SessionError("Party is still forming");
         }
 
         if (HasActiveEncounter)
@@ -85,6 +131,11 @@ public sealed partial class DndCampaignRunner
         if (!TryResolveCheckActor(actorId, out var member, out var actorError))
         {
             return SessionError(actorError);
+        }
+
+        if (!TryConsumeSessionAction(member.ActorId, out var actError))
+        {
+            return SessionError(actError);
         }
 
         var clampedDc = _rules.ClampCheckDc(dc <= 0 ? _rules.DefaultCheckDc : dc);
@@ -128,6 +179,7 @@ public sealed partial class DndCampaignRunner
         var previous = _previousPhase;
         _pendingCheck = null;
         _sessionPhase = previous == DndGamePhase.NotStarted ? DndGamePhase.Exploration : previous;
+        _sessionRound.MarkActed(member.ActorId);
         return SessionOk(_lastCheckSummary);
     }
 
@@ -143,9 +195,15 @@ public sealed partial class DndCampaignRunner
             return SessionError("No pending check");
         }
 
+        var actorId = _pendingCheck?.ActorId;
         var previous = _previousPhase;
         _pendingCheck = null;
         _sessionPhase = previous == DndGamePhase.NotStarted ? DndGamePhase.Exploration : previous;
+        if (!string.IsNullOrWhiteSpace(actorId))
+        {
+            _sessionRound.MarkActed(actorId);
+        }
+
         return SessionOk("Check cancelled.");
     }
 
@@ -159,6 +217,11 @@ public sealed partial class DndCampaignRunner
         if (_failed)
         {
             return SessionError("Campaign failed");
+        }
+
+        if (_sessionPhase == DndGamePhase.PartyFormation)
+        {
+            return SessionError("Party is still forming");
         }
 
         if (_sessionStarted && _sessionPhase is DndGamePhase.Complete or DndGamePhase.Combat or DndGamePhase.Check)
@@ -217,7 +280,7 @@ public sealed partial class DndCampaignRunner
         return string.Join("\n", lines);
     }
 
-    private DndCampaignResult ApplyOption(DndSceneOption option)
+    private DndCampaignResult ApplyOption(DndSceneOption option, string actorId = null)
     {
         var id = option.Id ?? string.Empty;
 
@@ -243,7 +306,7 @@ public sealed partial class DndCampaignRunner
             var stat = option.CheckStat ?? DndCheckStat.Dex;
             var dc = option.CheckDc ?? _rules.DefaultCheckDc;
             var reason = string.IsNullOrWhiteSpace(option.CheckReason) ? option.Label : option.CheckReason;
-            return RequestCheck(actorId: null, stat, dc, reason);
+            return RequestCheck(actorId, stat, dc, reason);
         }
 
         if (string.Equals(id, "social", StringComparison.OrdinalIgnoreCase))
@@ -394,6 +457,7 @@ public sealed partial class DndCampaignRunner
         }
 
         AppendSessionMessage($"Combat started ({templateId}).", newEntries);
+        _sessionRound.ClearRoundFlags();
     }
 
     private void MaybeAdvanceSessionFromEncounter(DndEncounterSnapshot encounter, List<DndCampaignLedgerEntry> newEntries)
@@ -412,6 +476,7 @@ public sealed partial class DndCampaignRunner
         {
             _sessionPhase = DndGamePhase.Failed;
             _pendingCheck = null;
+            _sessionRound.ClearRoundFlags();
             AppendSessionMessage("The party has fallen.", newEntries);
             return;
         }
@@ -430,6 +495,7 @@ public sealed partial class DndCampaignRunner
             _currentSceneId = aftermath.SceneId;
             _sessionPhase = DndGamePhase.Aftermath;
             _pendingCheck = null;
+            _sessionRound.ClearRoundFlags();
             AppendSessionMessage(
                 string.IsNullOrWhiteSpace(aftermath.Summary) ? "Victory. Aftermath." : aftermath.Summary,
                 newEntries);
@@ -438,6 +504,7 @@ public sealed partial class DndCampaignRunner
 
         _sessionPhase = DndGamePhase.Aftermath;
         _pendingCheck = null;
+        _sessionRound.ClearRoundFlags();
         AppendSessionMessage("Victory. Aftermath.", newEntries);
     }
 
@@ -523,7 +590,7 @@ public sealed partial class DndCampaignRunner
         }
 
         member = _party.Values
-            .Where(p => p.IsAlive)
+            .Where(p => p.IsAlive && !_sessionRound.SittingOut.Contains(p.ActorId))
             .OrderBy(p => p.ActorId, StringComparer.OrdinalIgnoreCase)
             .FirstOrDefault();
         if (member == null)
@@ -549,7 +616,15 @@ public sealed partial class DndCampaignRunner
             LastCheckSuccess: _lastCheckSuccess,
             LastCheckSummary: _lastCheckSummary ?? string.Empty,
             Scenes: _scenes.ToList().AsReadOnly(),
-            Options: BuildSessionOptions());
+            Options: BuildSessionOptions(),
+            SeatedActorIds: DndTableRound.Sorted(SeatedActorIds()),
+            SittingOutActorIds: DndTableRound.Sorted(_sessionRound.SittingOut),
+            ActedThisRoundActorIds: DndTableRound.Sorted(_sessionRound.ActedThisRound),
+            ReadyActorIds: DndTableRound.Sorted(_sessionRound.ReadyThisRound),
+            TableCurrentActorId: _sessionRound.CurrentActorId ?? string.Empty,
+            TableRoundNumber: _sessionRound.RoundNumber,
+            ReadyQuorumNeeded: DndTableRound.QuorumNeeded(CountSeatedPcs()),
+            DoneVoteCount: _sessionRound.ReadyThisRound.Count(id => !DndTableRound.IsNpcActorId(id)));
     }
 
     private IReadOnlyList<DndSceneOption> BuildSessionOptions()
@@ -566,6 +641,10 @@ public sealed partial class DndCampaignRunner
 
         switch (_sessionPhase)
         {
+            case DndGamePhase.PartyFormation:
+                list.Add(new DndSceneOption("party", "Show the party", DndGamePhase.PartyFormation));
+                break;
+
             case DndGamePhase.SessionStart:
                 list.Add(new DndSceneOption("begin", "Begin the adventure", DndGamePhase.Exploration, NextSceneId: nextId));
                 list.Add(new DndSceneOption("recap", "Recap the hook", DndGamePhase.SessionStart));

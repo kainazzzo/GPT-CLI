@@ -49,18 +49,18 @@ Another example:
 - Output: `modules/DndModuleExample.dll`
 - Modes:
   - `off`: module ignores messages
-  - `draft`: natural language campaign drafting + party setup (does not write the campaign catalog)
+  - `draft`: natural language campaign drafting (does not write the campaign catalog)
   - `game`: gameplay/encounters (finalizes the active draft into the catalog/run on entry)
 - Primary workflow (natural language):
   - Enable module in your channel: `/gptcli modules enable module:dnd`
-  - Switch to `draft`, then describe your campaign in plain English (name + theme + party).
-  - Keep iterating in `draft` by asking for story changes ("rewrite the hook...", "add a rival faction...") or party changes ("add @User", "add npc:...").
-  - Switch to `game` to finalize and start playing.
+  - Switch to `draft`, then describe your campaign in plain English (name + theme).
+  - Keep iterating in `draft` by asking for story changes ("rewrite the hook...", "add a rival faction...").
+  - Switch to `game` to finalize and start playing. Players sit down with a sheet and `I'll join`.
 - Slash commands (draft):
   - `/gptcli dnd status`, `/gptcli dnd mode value:off|draft|game`
   - `/gptcli dnd campaigncreate` (build/overwrite the active draft)
   - `/gptcli dnd draftupdate` (apply a modification prompt to the existing draft story)
-  - `/gptcli dnd partyshow`, `/gptcli dnd partyaddpc`, `/gptcli dnd partyremovepc`, `/gptcli dnd partyaddnpc`
+  - `/gptcli dnd partyshow` (live seating in game; no draft roster)
   - `/gptcli dnd charactercreate`, `/gptcli dnd charactershow`
   - `/gptcli dnd npccreate`, `/gptcli dnd npclist`, `/gptcli dnd npcshow`, `/gptcli dnd npcremove`
   - `/gptcli dnd campaignlist`, `/gptcli dnd campaignstart`, `/gptcli dnd encounterlist`
@@ -72,13 +72,9 @@ Another example:
 - Game-mode actions are typically driven by natural language (auto-routing) or by `!` tags:
   - `!state`, `!targets`, `!attack <target>`, `!cast <target>`, `!pass`, `!rollall`, `!ledger [n]`
 - Persistence (per Discord channel state dir):
-  - Drafts: `dnd-lite/drafts/<campaign-slug>/draft.json` + `party.json`
+  - Drafts: `dnd-lite/drafts/<campaign-slug>/draft.json`
   - Final: `dnd-lite/campaigns/<campaign-slug>/campaign.json` and `dnd-lite/runs/<campaign-slug>/...`
 
 ## Docker
 
-If you use docker-compose, map a host directory to `/app/modules` so modules persist:
-
-```
-- /usr/local/discord/modules:/app/modules
-```
+`docker compose build` compiles the example modules into the discord image at `/app/modules`. Do not mount a host modules directory over that path unless you also rebuild those DLLs; a stale mount is how an old plugin can keep running after a compose rebuild.

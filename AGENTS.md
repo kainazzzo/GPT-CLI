@@ -56,7 +56,7 @@ dotnet publish gpt.csproj -c Release -r linux-x64 -o $HOME/bin --self-contained 
 
 `test.bat` is a Windows **publish** helper, not the unit-test runner.
 
-After changing an example module, rebuild/deploy its DLL (`modules/examples/<Name>/build-module.sh` or `modules/build-deploy-modules.sh`) and restart the Discord process. Host `gpt.csproj` excludes `modules/**/*.cs`.
+After changing an example module: local DLL via `modules/examples/<Name>/build-module.sh` (or `modules/build-deploy-modules.sh`); Docker via `docker compose build` / `up --build` (modules are baked into the image at `/app/modules`). Host `gpt.csproj` excludes `modules/**/*.cs`.
 
 ## Coding
 

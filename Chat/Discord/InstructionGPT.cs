@@ -27,6 +27,7 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
     private readonly IHostApplicationLifetime _appLifetime;
     private readonly ConcurrentDictionary<ulong, HashSet<string>> _imageResponseMap = new();
     private readonly Dictionary<(ulong ChannelId, ulong UserId), DateTimeOffset> _lastPromptByUser = new();
+    private readonly ConcurrentDictionary<ulong, SemaphoreSlim> _channelStateSaveLocks = new();
     private readonly object _promptDebounceLock = new();
     private readonly int _defaultPromptDebounceSeconds;
 	private DiscordModulePipeline _modulePipeline;
@@ -330,14 +331,17 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
             // Save state immediately since some new properties might have been added with default values
             await SaveState();
 
-            // Message receiver is going to run in parallel
+            // Message receiver is going to run in parallel. Do not also save here:
+            // HandleMessageReceivedAsync (and modules) persist channel state, and a second
+            // File.Create on the same path races into IOException on the volume.
 #pragma warning disable CS4014
             Client.MessageReceived += (message) =>
             {
                 if (message?.Content != null)
                 {
-                    HandleMessageReceivedAsync(message);
-                    SaveCachedChannelState(message.Channel.Id);
+                    _ = HandleMessageReceivedAsync(message).ContinueWith(
+                        t => Console.Error.WriteLine($"[host] HandleMessageReceivedAsync: {t.Exception}"),
+                        TaskContinuationOptions.OnlyOnFaulted);
                 }
 
                 return Task.CompletedTask;
@@ -411,7 +415,16 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 		            await Console.Out.WriteLineAsync($"GptCliFunctions summary failed: {ex.GetType().Name} {ex.Message}");
 		        }
 
-		        var options = BuildGptCliSlashOptions(functions);
+		        List<SlashCommandOptionBuilder> options;
+		        try
+		        {
+		            options = BuildGptCliSlashOptions(functions);
+		        }
+		        catch (Exception ex)
+		        {
+		            await Console.Out.WriteLineAsync($"BuildGptCliSlashOptions failed: {ex.GetType().Name} {ex.Message}");
+		            return;
+		        }
 
 		        var command = new SlashCommandBuilder()
 		            .WithName("gptcli")
@@ -1056,35 +1069,54 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 
     internal async Task SaveCachedChannelState(ulong channelId)
     {
-        if (!ChannelBots.TryGetValue(channelId, out var channelState))
+        var gate = _channelStateSaveLocks.GetOrAdd(channelId, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync();
+        try
         {
-            channelState = InitializeChannel(channelId);
-        }
-
-        if (channelState.ChannelId == 0 || channelState.GuildId == 0)
-        {
-            var guildChannel = Client.GetChannel(channelId) as IGuildChannel;
-            if (guildChannel != null)
+            if (!ChannelBots.TryGetValue(channelId, out var channelState))
             {
-                EnsureChannelStateMetadata(channelState, guildChannel);
+                channelState = InitializeChannel(channelId);
             }
-            else
+
+            if (channelState.ChannelId == 0 || channelState.GuildId == 0)
             {
-                channelState.ChannelId = channelId;
+                var guildChannel = Client.GetChannel(channelId) as IGuildChannel;
+                if (guildChannel != null)
+                {
+                    EnsureChannelStateMetadata(channelState, guildChannel);
+                }
+                else
+                {
+                    channelState.ChannelId = channelId;
+                }
             }
-        }
 
-        if (channelState.GuildId == 0 && ChannelGuildIds.TryGetValue(channelId, out var storedGuildId))
+            if (channelState.GuildId == 0 && ChannelGuildIds.TryGetValue(channelId, out var storedGuildId))
+            {
+                channelState.GuildId = storedGuildId;
+            }
+
+            var channelDirectory = GetChannelDirectory(channelState);
+            Directory.CreateDirectory(channelDirectory);
+            var stateFileName = BuildTokenizedFileName(GetChannelFileName(channelState), channelState.GuildId, "state.json");
+            var path = Path.Combine(channelDirectory, stateFileName);
+            var tmp = path + ".tmp";
+            await using (var stream = new FileStream(tmp, FileMode.Create, FileAccess.Write, FileShare.Read))
+            {
+                await WriteAsync(channelId, stream);
+                await stream.FlushAsync();
+            }
+
+            File.Move(tmp, path, overwrite: true);
+        }
+        catch (Exception ex)
         {
-            channelState.GuildId = storedGuildId;
+            await Console.Error.WriteLineAsync($"[host] SaveCachedChannelState failed: {ex.GetType().Name} {ex.Message}");
         }
-
-        var channelDirectory = GetChannelDirectory(channelState);
-        Directory.CreateDirectory(channelDirectory);
-        var stateFileName = BuildTokenizedFileName(GetChannelFileName(channelState), channelState.GuildId, "state.json");
-
-        await using var stream = File.Create(Path.Combine(channelDirectory, stateFileName));
-        await WriteAsync(channelId, stream);
+        finally
+        {
+            gate.Release();
+        }
     }
 
     // Method to write state to a Stream in JSON format
@@ -1691,10 +1723,6 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 		            return toolName.Equals("gptcli_dnd_campaigncreate", StringComparison.OrdinalIgnoreCase) ||
 		                   toolName.Equals("gptcli_dnd_draftupdate", StringComparison.OrdinalIgnoreCase) ||
 		                   toolName.Equals("gptcli_dnd_partyshow", StringComparison.OrdinalIgnoreCase) ||
-		                   toolName.Equals("gptcli_dnd_partyaddpc", StringComparison.OrdinalIgnoreCase) ||
-		                   toolName.Equals("gptcli_dnd_partyremovepc", StringComparison.OrdinalIgnoreCase) ||
-		                   toolName.Equals("gptcli_dnd_partyaddnpc", StringComparison.OrdinalIgnoreCase) ||
-		                   toolName.Equals("gptcli_dnd_partyremovenpc", StringComparison.OrdinalIgnoreCase) ||
 		                   toolName.Equals("gptcli_dnd_passtimeout", StringComparison.OrdinalIgnoreCase) ||
 		                   toolName.Equals("gptcli_dnd_campaignfinalize", StringComparison.OrdinalIgnoreCase) ||
 		                   toolName.Equals("gptcli_dnd_campaignlist", StringComparison.OrdinalIgnoreCase) ||
@@ -1730,6 +1758,8 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 	                   toolName.Equals("gptcli_dnd_attack", StringComparison.OrdinalIgnoreCase) ||
 	                   toolName.Equals("gptcli_dnd_cast", StringComparison.OrdinalIgnoreCase) ||
 	                   toolName.Equals("gptcli_dnd_pass", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_join", StringComparison.OrdinalIgnoreCase) ||
+	                   toolName.Equals("gptcli_dnd_ready", StringComparison.OrdinalIgnoreCase) ||
 	                   toolName.Equals("gptcli_dnd_choose", StringComparison.OrdinalIgnoreCase) ||
 	                   toolName.Equals("gptcli_dnd_rest", StringComparison.OrdinalIgnoreCase) ||
 	                   toolName.Equals("gptcli_dnd_rollall", StringComparison.OrdinalIgnoreCase) ||
@@ -4551,6 +4581,74 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 		        return prefix.Length == 0 ? (fallback ?? "command").Trim() : (prefix + "...");
 		    }
 
+		    // Discord: a SubCommandGroup may contain at most 25 subcommands.
+		    private const int DiscordMaxOptionsPerGroup = 25;
+
+		    private static SlashCommandOptionBuilder FindSlashSubCommandGroup(
+		        Dictionary<string, SlashCommandOptionBuilder> topLevel,
+		        string baseName,
+		        string subName)
+		    {
+		        for (var i = 1; i <= 9; i++)
+		        {
+		            var name = i == 1 ? baseName : $"{baseName}{i}";
+		            if (!topLevel.TryGetValue(name, out var group))
+		            {
+		                return null;
+		            }
+
+		            if (group.Type == ApplicationCommandOptionType.SubCommandGroup &&
+		                group.Options?.Any(o => string.Equals(o.Name, subName, StringComparison.OrdinalIgnoreCase)) == true)
+		            {
+		                return group;
+		            }
+		        }
+
+		        return null;
+		    }
+
+		    private static SlashCommandOptionBuilder GetOrCreateSlashSubCommandGroupWithCapacity(
+		        Dictionary<string, SlashCommandOptionBuilder> topLevel,
+		        List<string> order,
+		        string baseName,
+		        string description)
+		    {
+		        for (var i = 1; i <= 9; i++)
+		        {
+		            var name = i == 1 ? baseName : $"{baseName}{i}";
+		            if (!topLevel.TryGetValue(name, out var group))
+		            {
+		                var desc = i == 1
+		                    ? description
+		                    : $"{description} (more)";
+		                group = new SlashCommandOptionBuilder()
+		                    .WithName(name)
+		                    .WithDescription(TruncateDiscordDescription(desc, name))
+		                    .WithType(ApplicationCommandOptionType.SubCommandGroup);
+		                topLevel[name] = group;
+		                order.Add(name);
+		                if (i > 1)
+		                {
+		                    Console.WriteLine($"[gptcli] slash group '{baseName}' exceeded {DiscordMaxOptionsPerGroup} subcommands; using /gptcli {name}");
+		                }
+
+		                return group;
+		            }
+
+		            if (group.Type != ApplicationCommandOptionType.SubCommandGroup)
+		            {
+		                continue;
+		            }
+
+		            if ((group.Options?.Count ?? 0) < DiscordMaxOptionsPerGroup)
+		            {
+		                return group;
+		            }
+		        }
+
+		        return null;
+		    }
+
 		    private List<SlashCommandOptionBuilder> BuildGptCliSlashOptions(IReadOnlyList<GptCliFunction> functions)
 		    {
 		        var topLevel = new Dictionary<string, SlashCommandOptionBuilder>(StringComparer.OrdinalIgnoreCase);
@@ -4602,23 +4700,25 @@ public class InstructionGPT : DiscordBotBase, IHostedService, IDiscordModuleHost
 	                }
 	                case GptCliSlashBindingKind.GroupSubCommand:
 	                {
-	                    var groupName = slash.TopLevelName.Trim();
-		                    if (!topLevel.TryGetValue(groupName, out var group))
-		                    {
-		                        group = new SlashCommandOptionBuilder()
-		                            .WithName(groupName)
-		                            .WithDescription(TruncateDiscordDescription(slash.TopLevelDescription ?? groupName, groupName))
-		                            .WithType(ApplicationCommandOptionType.SubCommandGroup);
-		                        topLevel[groupName] = group;
-		                        order.Add(groupName);
-		                    }
-
-	                    if (group.Type != ApplicationCommandOptionType.SubCommandGroup || string.IsNullOrWhiteSpace(slash.SubCommandName))
+	                    if (string.IsNullOrWhiteSpace(slash.SubCommandName))
 	                    {
 	                        continue;
 	                    }
 
+	                    var groupName = slash.TopLevelName.Trim();
 	                    var subName = slash.SubCommandName.Trim();
+	                    var group = FindSlashSubCommandGroup(topLevel, groupName, subName)
+	                        ?? GetOrCreateSlashSubCommandGroupWithCapacity(
+	                            topLevel,
+	                            order,
+	                            groupName,
+	                            slash.TopLevelDescription ?? groupName);
+	                    if (group == null)
+	                    {
+	                        Console.WriteLine($"[gptcli] skipping slash /{groupName} {subName}: no subcommand-group capacity");
+	                        continue;
+	                    }
+
 	                    var subExists = group.Options?.Any(o => string.Equals(o.Name, subName, StringComparison.OrdinalIgnoreCase)) == true;
 	                    if (!subExists)
 	                    {

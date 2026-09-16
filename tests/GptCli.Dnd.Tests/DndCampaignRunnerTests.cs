@@ -54,27 +54,22 @@ public sealed class DndCampaignRunnerTests
 
         var res = camp.StartEncounter("t1");
         Assert.True(res.Ok);
-        Assert.Equal(DndEncounterPhase.NeedInitiative, res.EncounterResult.State.Phase);
+        Assert.Equal(DndEncounterPhase.InCombat, res.EncounterResult.State.Phase);
         Assert.Equal(7, res.EncounterResult.State.Actors["p1"].Hp);
         Assert.Equal(2, res.EncounterResult.State.Actors["p1"].Mp);
     }
 
     [Fact]
-    public void Encounter_auto_enemy_turn_reconciles_into_campaign_party_state()
+    public void Encounter_enemy_turn_after_ready_reconciles_into_campaign_party_state()
     {
-        // Dice sequence:
-        // initiative: p1=20, b1=1
-        // player attack to-hit: 1 (miss)
-        // enemy to-hit: 20 (crit hit)
-        // enemy damage dice: 3,3 (2d8+1 => 7)
-        var dice = new FixedDiceRoller(new[] { 20, 1, 1, 20, 3, 3 });
+        var dice = new FixedDiceRoller(new[] { 1, 20, 3, 3 });
         var camp = MakeCampaign(startingHp: 20, startingMp: 10, dice: dice);
         camp.RegisterEncounterTemplate(BasicTemplate());
         camp.StartEncounter("t1");
-        camp.RollAll(); // resolve initiative
 
         camp.Attack("p1", "b1");
-        var res = camp.RollAll(); // resolves miss, then enemy attacks/damages
+        camp.RollAll();
+        var res = camp.Ready("p1");
         Assert.True(res.Ok);
         Assert.Equal(13, res.Campaign.Party["p1"].Hp);
     }
@@ -82,19 +77,14 @@ public sealed class DndCampaignRunnerTests
     [Fact]
     public void Party_wipe_marks_campaign_failed_and_blocks_actions_until_cleared()
     {
-        // Start low HP and force enemy hit+damage.
-        // initiative: p1=20, b1=1
-        // player attack: 1 miss
-        // enemy to-hit: 20 crit hit
-        // enemy damage: 8,8 => 2d8+1 => 17 kills startingHp=3
-        var dice = new FixedDiceRoller(new[] { 20, 1, 1, 20, 8, 8 });
+        var dice = new FixedDiceRoller(new[] { 1, 20, 8, 8 });
         var camp = MakeCampaign(startingHp: 3, startingMp: 0, dice: dice);
         camp.RegisterEncounterTemplate(BasicTemplate());
         camp.StartEncounter("t1");
-        camp.RollAll();
 
         camp.Attack("p1", "b1");
-        var res = camp.RollAll();
+        camp.RollAll();
+        var res = camp.Ready("p1");
         Assert.True(res.Campaign.IsFailed);
         Assert.Equal("defeat", res.Campaign.FailureReason);
 
@@ -119,13 +109,13 @@ public sealed class DndCampaignRunnerTests
     [Fact]
     public void LongRest_without_clearFailure_restores_hp_but_keeps_failed()
     {
-        var dice = new FixedDiceRoller(new[] { 20, 1, 1, 20, 8, 8 });
+        var dice = new FixedDiceRoller(new[] { 1, 20, 8, 8 });
         var camp = MakeCampaign(startingHp: 3, startingMp: 0, dice: dice);
         camp.RegisterEncounterTemplate(BasicTemplate());
         camp.StartEncounter("t1");
-        camp.RollAll();
         camp.Attack("p1", "b1");
         camp.RollAll();
+        camp.Ready("p1");
 
         Assert.True(camp.GetState().IsFailed);
 
@@ -142,11 +132,10 @@ public sealed class DndCampaignRunnerTests
     [Fact]
     public void Pass_reconciles_party_hp_mp_when_enemy_misses()
     {
-        var dice = new FixedDiceRoller(new[] { 20, 1, 1 });
+        var dice = new FixedDiceRoller(new[] { 1 });
         var camp = MakeCampaign(startingHp: 20, startingMp: 10, dice: dice);
         camp.RegisterEncounterTemplate(BasicTemplate());
         camp.StartEncounter("t1");
-        camp.RollAll();
 
         var res = camp.Pass("p1");
         Assert.True(res.Ok);

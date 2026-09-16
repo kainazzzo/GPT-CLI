@@ -19,6 +19,18 @@ public sealed class DndEncounterRunnerState
     public List<DndPendingRoll> PendingRolls { get; set; } = new();
     public List<DndEncounterActionState> Actions { get; set; } = new();
     public List<DndLedgerEntry> Ledger { get; set; } = new();
+    public DndTableRoundState TableRound { get; set; }
+}
+
+public sealed class DndTableRoundState
+{
+    public int RoundNumber { get; set; } = 1;
+    public string CurrentActorId { get; set; } = string.Empty;
+    public List<string> ActedThisRoundActorIds { get; set; } = new();
+    public List<string> ReadyActorIds { get; set; } = new();
+    public List<string> SittingOutActorIds { get; set; } = new();
+    public List<string> ParticipatingActorIds { get; set; } = new();
+    public List<string> JoinedThisRoundActorIds { get; set; } = new();
 }
 
 public sealed class DndEncounterActorState
@@ -68,5 +80,6 @@ public sealed class DndSessionRunnerState
     public bool LastCheckSuccess { get; set; }
     public string LastCheckSummary { get; set; } = string.Empty;
     public List<DndSceneDefinition> Scenes { get; set; } = new();
+    public DndTableRoundState TableRound { get; set; }
 }
 

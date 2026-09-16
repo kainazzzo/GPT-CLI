@@ -51,6 +51,7 @@ public sealed partial class DndCampaignRunner
     private bool _lastCheckSuccess;
     private string _lastCheckSummary = string.Empty;
     private readonly List<DndSceneDefinition> _scenes = new();
+    private readonly DndTableRound _sessionRound = new();
 
     public DndCampaignRunner(
         DndCampaignDefinition definition,
@@ -67,41 +68,42 @@ public sealed partial class DndCampaignRunner
         _dice = diceRoller ?? new RandomDiceRoller();
         _clock = clock ?? new SystemClock();
 
-        if (definition.Party == null || definition.Party.Count == 0)
-        {
-            throw new ArgumentException("Party required", nameof(definition));
-        }
-
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var m in definition.Party)
+        foreach (var m in definition.Party ?? Array.Empty<DndCampaignPartyMember>())
         {
-            if (m == null)
-            {
-                throw new ArgumentException("Null party member", nameof(definition));
-            }
-
-            if (string.IsNullOrWhiteSpace(m.ActorId))
-            {
-                throw new ArgumentException("Party member ActorId required", nameof(definition));
-            }
-
-            if (!seen.Add(m.ActorId))
-            {
-                throw new ArgumentException($"Duplicate party member ActorId '{m.ActorId}'", nameof(definition));
-            }
-
-            if (m.MaxHp <= 0)
-            {
-                throw new ArgumentException($"MaxHp must be > 0 for '{m.ActorId}'", nameof(definition));
-            }
-
-            if (m.MaxMp < 0)
-            {
-                throw new ArgumentException($"MaxMp must be >= 0 for '{m.ActorId}'", nameof(definition));
-            }
-
-            _party[m.ActorId] = new PartyMemberState(m);
+            AddValidatedMember(m, seen, allowDuplicate: false);
         }
+    }
+
+    private void AddValidatedMember(DndCampaignPartyMember m, HashSet<string> seen, bool allowDuplicate)
+    {
+        if (m == null)
+        {
+            throw new ArgumentException("Null party member");
+        }
+
+        if (string.IsNullOrWhiteSpace(m.ActorId))
+        {
+            throw new ArgumentException("Party member ActorId required");
+        }
+
+        if (!seen.Add(m.ActorId) && !allowDuplicate)
+        {
+            throw new ArgumentException($"Duplicate party member ActorId '{m.ActorId}'");
+        }
+
+        if (m.MaxHp <= 0)
+        {
+            throw new ArgumentException($"MaxHp must be > 0 for '{m.ActorId}'");
+        }
+
+        if (m.MaxMp < 0)
+        {
+            throw new ArgumentException($"MaxMp must be >= 0 for '{m.ActorId}'");
+        }
+
+        _party[m.ActorId] = new PartyMemberState(m);
+        _sessionRound.Seat(m.ActorId);
     }
 
     public DndCampaignSnapshot GetState() => BuildSnapshot(activeEncounterState: _encounter?.GetState());
@@ -173,7 +175,8 @@ public sealed partial class DndCampaignRunner
                 PendingCheck = _pendingCheck,
                 LastCheckSuccess = _lastCheckSuccess,
                 LastCheckSummary = _lastCheckSummary ?? string.Empty,
-                Scenes = _scenes.ToList()
+                Scenes = _scenes.ToList(),
+                TableRound = _sessionRound.ToState()
             }
         };
     }
@@ -239,9 +242,176 @@ public sealed partial class DndCampaignRunner
             {
                 runner._scenes.AddRange(session.Scenes.Where(s => s != null && !string.IsNullOrWhiteSpace(s.SceneId)));
             }
+
+            if (session.TableRound != null)
+            {
+                runner._sessionRound.LoadFrom(session.TableRound);
+            }
         }
 
         return runner;
+    }
+
+    public DndCampaignResult JoinParty(DndCampaignPartyMember member)
+    {
+        if (member == null || string.IsNullOrWhiteSpace(member.ActorId))
+        {
+            return ErrorCampaign("Party member required", _encounter?.GetState(), Array.Empty<DndCampaignLedgerEntry>());
+        }
+
+        try
+        {
+            if (_party.ContainsKey(member.ActorId))
+            {
+                _sessionRound.Seat(member.ActorId, joinedThisRound: true);
+            }
+            else
+            {
+                AddValidatedMember(member, new HashSet<string>(_party.Keys, StringComparer.OrdinalIgnoreCase), allowDuplicate: true);
+                _sessionRound.Seat(member.ActorId, joinedThisRound: true);
+            }
+        }
+        catch (ArgumentException ex)
+        {
+            return ErrorCampaign(ex.Message, _encounter?.GetState(), Array.Empty<DndCampaignLedgerEntry>());
+        }
+
+        DndTurnResult encounterResult = null;
+        if (HasActiveEncounter && _sessionPhase != DndGamePhase.PartyFormation)
+        {
+            var p = _party[member.ActorId];
+            encounterResult = _encounter.AddPartyActor(new DndActorDefinition(
+                ActorId: p.ActorId,
+                Name: p.Name,
+                Side: DndSide.Party,
+                IsBoss: false,
+                Stats: p.Stats,
+                MaxHp: p.MaxHp,
+                MaxMp: p.MaxMp,
+                StartingHp: p.Hp,
+                StartingMp: p.Mp));
+            if (encounterResult != null)
+            {
+                ReconcilePartyFromSnapshot(encounterResult.State);
+            }
+        }
+
+        var entries = new List<DndCampaignLedgerEntry>();
+        AppendSessionMessage($"{member.Name} sits down at the table.", entries);
+        return BuildCampaignResult(encounterResult, entries);
+    }
+
+    public DndCampaignResult BeginPlayFromFormation()
+    {
+        if (!_sessionStarted)
+        {
+            return SessionError("Session not started");
+        }
+
+        if (_sessionPhase != DndGamePhase.PartyFormation)
+        {
+            return SessionError("Party is not forming");
+        }
+
+        if (!HasSeatedPc())
+        {
+            return SessionError("At least one player must join before play can start");
+        }
+
+        var resume = _previousPhase;
+        if (resume is DndGamePhase.NotStarted or DndGamePhase.PartyFormation)
+        {
+            _sessionPhase = DndGamePhase.SessionStart;
+        }
+        else
+        {
+            _sessionPhase = resume;
+        }
+
+        _sessionRound.ClearRoundFlags();
+        foreach (var id in SeatedActorIds())
+        {
+            _sessionRound.Participating.Add(id);
+        }
+
+        return SessionOk("The party is assembled. Play is open.");
+    }
+
+    public DndCampaignResult Ready(string actorId)
+    {
+        if (string.IsNullOrWhiteSpace(actorId))
+        {
+            return SessionError("actorId required");
+        }
+
+        if (_sessionPhase == DndGamePhase.PartyFormation)
+        {
+            if (!_party.ContainsKey(actorId) || _sessionRound.SittingOut.Contains(actorId))
+            {
+                return SessionError("Join the party first");
+            }
+
+            return BeginPlayFromFormation();
+        }
+
+        if (HasActiveEncounter)
+        {
+            return RunEncounterStep(() => _encounter.Ready(actorId));
+        }
+
+        if (!_sessionStarted)
+        {
+            return SessionError("Session not started");
+        }
+
+        if (!_sessionRound.ActedThisRound.Contains(actorId))
+        {
+            return SessionError("Act first, then you can skip the rest of the round");
+        }
+
+        _sessionRound.ReadyThisRound.Add(actorId);
+        var entries = new List<DndCampaignLedgerEntry>();
+        AppendSessionMessage($"{ActorDisplayName(actorId)} is done for this round.", entries);
+        if (SessionReadyQuorumMet())
+        {
+            EndSessionTableRound(entries);
+        }
+
+        return new DndCampaignResult(true, string.Empty, BuildSnapshot(_encounter?.GetState()), null, entries);
+    }
+
+    public DndCampaignResult EndPartyRound()
+    {
+        if (HasActiveEncounter)
+        {
+            return RunEncounterStep(() => _encounter.EndPartyRound());
+        }
+
+        if (!_sessionStarted)
+        {
+            return SessionError("Session not started");
+        }
+
+        var entries = new List<DndCampaignLedgerEntry>();
+        EndSessionTableRound(entries);
+        return new DndCampaignResult(true, string.Empty, BuildSnapshot(_encounter?.GetState()), null, entries);
+    }
+
+    public DndCampaignResult TimeoutIdle()
+    {
+        if (_sessionPhase == DndGamePhase.PartyFormation)
+        {
+            return SessionOk("The table is still forming.");
+        }
+
+        if (HasActiveEncounter)
+        {
+            return RunEncounterStep(() => _encounter.EndPartyRound());
+        }
+
+        var entries = new List<DndCampaignLedgerEntry>();
+        EndSessionTableRound(entries);
+        return new DndCampaignResult(true, string.Empty, BuildSnapshot(_encounter?.GetState()), null, entries);
     }
 
     public DndCampaignResult StartEncounter(string templateId)
@@ -254,6 +424,16 @@ public sealed partial class DndCampaignRunner
         if (_encounter != null && !_encounter.IsCompleted)
         {
             return ErrorCampaign("Encounter already active", _encounter.GetState(), Array.Empty<DndCampaignLedgerEntry>());
+        }
+
+        if (_sessionStarted && _sessionPhase == DndGamePhase.PartyFormation)
+        {
+            return ErrorCampaign("Party is still forming", null, Array.Empty<DndCampaignLedgerEntry>());
+        }
+
+        if (!HasSeatedPc())
+        {
+            return ErrorCampaign("No seated party members", null, Array.Empty<DndCampaignLedgerEntry>());
         }
 
         if (string.IsNullOrWhiteSpace(templateId))
@@ -272,6 +452,7 @@ public sealed partial class DndCampaignRunner
         _activeTemplateId = template.TemplateId;
 
         var partyDefs = _party.Values
+            .Where(p => !_sessionRound.SittingOut.Contains(p.ActorId))
             .Select(p => new DndActorDefinition(
                 ActorId: p.ActorId,
                 Name: p.Name,
@@ -283,6 +464,10 @@ public sealed partial class DndCampaignRunner
                 StartingHp: p.Hp,
                 StartingMp: p.Mp))
             .ToList();
+        if (partyDefs.Count == 0)
+        {
+            return ErrorCampaign("No seated party members", null, Array.Empty<DndCampaignLedgerEntry>());
+        }
 
         var boss = NormalizeEnemy(template.Boss, isBoss: true);
         var adds = (template.Adds ?? Array.Empty<DndActorDefinition>()).Select(a => NormalizeEnemy(a, isBoss: false)).ToList();
@@ -301,9 +486,51 @@ public sealed partial class DndCampaignRunner
         return BuildCampaignResult(res, newCampaignEntries);
     }
 
-    public DndCampaignResult Attack(string actorId, string targetId) => RunEncounterStep(() => _encounter.DeclareAttack(actorId, targetId));
-    public DndCampaignResult CastSpell(string actorId, string targetId) => RunEncounterStep(() => _encounter.DeclareCastSpell(actorId, targetId));
-    public DndCampaignResult Pass(string actorId) => RunEncounterStep(() => _encounter.Pass(actorId));
+    public DndCampaignResult Attack(string actorId, string targetId)
+    {
+        if (_sessionPhase == DndGamePhase.PartyFormation)
+        {
+            return ErrorCampaign("Party is still forming", _encounter?.GetState(), Array.Empty<DndCampaignLedgerEntry>());
+        }
+
+        return RunEncounterStep(() => _encounter.DeclareAttack(actorId, targetId));
+    }
+
+    public DndCampaignResult CastSpell(string actorId, string targetId)
+    {
+        if (_sessionPhase == DndGamePhase.PartyFormation)
+        {
+            return ErrorCampaign("Party is still forming", _encounter?.GetState(), Array.Empty<DndCampaignLedgerEntry>());
+        }
+
+        return RunEncounterStep(() => _encounter.DeclareCastSpell(actorId, targetId));
+    }
+
+    public DndCampaignResult Pass(string actorId)
+    {
+        if (_sessionPhase == DndGamePhase.PartyFormation)
+        {
+            return ErrorCampaign("Party is still forming", _encounter?.GetState(), Array.Empty<DndCampaignLedgerEntry>());
+        }
+
+        if (HasActiveEncounter)
+        {
+            return RunEncounterStep(() => _encounter.Pass(actorId));
+        }
+
+        if (!_sessionStarted)
+        {
+            return SessionError("Session not started");
+        }
+
+        if (!TryConsumeSessionAction(actorId, out var error))
+        {
+            return SessionError(error);
+        }
+
+        _sessionRound.MarkActed(actorId);
+        return SessionOk($"{ActorDisplayName(actorId)} waits.");
+    }
     public DndCampaignResult RollAll() => RunEncounterStep(() => _encounter.RollAll());
     public DndCampaignResult RollInitiative(string actorId) => RunEncounterStep(() => _encounter.RollInitiative(actorId));
     public DndCampaignResult RollAttack(string rollId) => RunEncounterStep(() => _encounter.RollAttack(rollId));
@@ -313,6 +540,11 @@ public sealed partial class DndCampaignRunner
 
     public DndCampaignResult LongRest(bool clearFailure = false)
     {
+        if (_sessionStarted && _sessionPhase == DndGamePhase.PartyFormation && !clearFailure)
+        {
+            return ErrorCampaign("Party is still forming", _encounter?.GetState(), Array.Empty<DndCampaignLedgerEntry>());
+        }
+
         if (_encounter != null && !_encounter.IsCompleted)
         {
             return ErrorCampaign("Cannot long rest during an active encounter", _encounter.GetState(), Array.Empty<DndCampaignLedgerEntry>());
@@ -391,6 +623,7 @@ public sealed partial class DndCampaignRunner
             ReconcilePartyFromSnapshot(res.State);
             MaybeFailCampaignFromEncounter(res.State, newCampaignEntries);
             MaybeAdvanceSessionFromEncounter(res.State, newCampaignEntries);
+            MaybeEnterFormationFromEmptyTable();
         }
 
         // If encounter finished, leave it instantiated but inert; next encounter requires StartEncounter().
@@ -481,7 +714,15 @@ public sealed partial class DndCampaignRunner
 
             if (!_party.TryGetValue(actor.ActorId, out var p))
             {
-                continue;
+                _party[actor.ActorId] = new PartyMemberState(new DndCampaignPartyMember(
+                    ActorId: actor.ActorId,
+                    Name: actor.Name,
+                    Stats: actor.Stats,
+                    MaxHp: actor.MaxHp,
+                    Hp: actor.Hp,
+                    MaxMp: actor.MaxMp,
+                    Mp: actor.Mp));
+                p = _party[actor.ActorId];
             }
 
             p.Hp = Math.Clamp(actor.Hp, 0, p.MaxHp);
@@ -496,7 +737,12 @@ public sealed partial class DndCampaignRunner
             return;
         }
 
-        // Defeat condition: all party members at 0 HP.
+        // Defeat condition: all party members at 0 HP. An empty table is formation, not a wipe.
+        if (_party.Count == 0)
+        {
+            return;
+        }
+
         var anyAlive = _party.Values.Any(p => p.IsAlive);
         if (!anyAlive)
         {
@@ -538,5 +784,140 @@ public sealed partial class DndCampaignRunner
             ActiveEncounterName: _activeEncounterName ?? string.Empty,
             ActiveEncounterState: activeEncounterState,
             Session: BuildSessionSnapshot());
+    }
+
+    private IEnumerable<string> SeatedActorIds()
+        => _party.Values
+            .Where(p => p.IsAlive && !_sessionRound.SittingOut.Contains(p.ActorId))
+            .Select(p => p.ActorId);
+
+    private bool HasSeatedPc()
+        => _party.Values.Any(p =>
+            p.IsAlive &&
+            !DndTableRound.IsNpcActorId(p.ActorId) &&
+            !_sessionRound.SittingOut.Contains(p.ActorId));
+
+    private int CountSeatedPcs()
+        => _party.Values.Count(p =>
+            p.IsAlive &&
+            !DndTableRound.IsNpcActorId(p.ActorId) &&
+            !_sessionRound.SittingOut.Contains(p.ActorId));
+
+    private bool SessionReadyQuorumMet()
+        => _sessionRound.ReadyThisRound.Count(id =>
+               !DndTableRound.IsNpcActorId(id) && _sessionRound.ActedThisRound.Contains(id))
+           >= DndTableRound.QuorumNeeded(CountSeatedPcs());
+
+    private string ActorDisplayName(string actorId)
+        => _party.TryGetValue(actorId, out var p) && p != null && !string.IsNullOrWhiteSpace(p.Name)
+            ? p.Name
+            : actorId ?? "(none)";
+
+    private void EndSessionTableRound(List<DndCampaignLedgerEntry> entries)
+    {
+        foreach (var p in _party.Values.Where(m => m.IsAlive && !DndTableRound.IsNpcActorId(m.ActorId)).ToList())
+        {
+            if (_sessionRound.ActedThisRound.Contains(p.ActorId) || _sessionRound.JoinedThisRound.Contains(p.ActorId))
+            {
+                continue;
+            }
+
+            _sessionRound.SittingOut.Add(p.ActorId);
+            AppendSessionMessage($"{p.Name} sits out (no action this round).", entries);
+        }
+
+        foreach (var id in _sessionRound.JoinedThisRound.ToList())
+        {
+            if (!_sessionRound.ActedThisRound.Contains(id))
+            {
+                _sessionRound.SittingOut.Add(id);
+            }
+        }
+
+        _sessionRound.AdvanceRound();
+        foreach (var id in SeatedActorIds())
+        {
+            _sessionRound.Participating.Add(id);
+        }
+
+        AppendSessionMessage($"Table round {_sessionRound.RoundNumber} is open.", entries);
+        MaybeEnterFormationFromEmptyTable();
+    }
+
+    private void EnterFormation()
+    {
+        if (_sessionPhase == DndGamePhase.PartyFormation)
+        {
+            return;
+        }
+
+        if (_sessionPhase is not (DndGamePhase.NotStarted or DndGamePhase.Complete))
+        {
+            _previousPhase = _sessionPhase;
+        }
+
+        _sessionPhase = DndGamePhase.PartyFormation;
+        _pendingCheck = null;
+        _sessionRound.CurrentActorId = string.Empty;
+    }
+
+    private void MaybeEnterFormationFromEmptyTable()
+    {
+        if (!_sessionStarted || _failed || _sessionPhase is DndGamePhase.Complete or DndGamePhase.Failed)
+        {
+            return;
+        }
+
+        if (!HasSeatedPc())
+        {
+            EnterFormation();
+        }
+    }
+
+    private bool TryConsumeSessionAction(string actorId, out string error)
+    {
+        error = string.Empty;
+        if (string.IsNullOrWhiteSpace(actorId))
+        {
+            actorId = SeatedActorIds()
+                .Where(id => !DndTableRound.IsNpcActorId(id))
+                .OrderBy(id => id, StringComparer.OrdinalIgnoreCase)
+                .FirstOrDefault();
+        }
+
+        if (string.IsNullOrWhiteSpace(actorId) || !_party.TryGetValue(actorId, out var member))
+        {
+            error = "No seated party member";
+            return false;
+        }
+
+        if (!member.IsAlive)
+        {
+            error = "Actor is not alive";
+            return false;
+        }
+
+        if (_sessionRound.SittingOut.Contains(actorId))
+        {
+            _sessionRound.Seat(actorId, joinedThisRound: true);
+        }
+
+        var lockId = _sessionRound.CurrentActorId;
+        if (!string.IsNullOrWhiteSpace(lockId) &&
+            !string.Equals(lockId, actorId, StringComparison.OrdinalIgnoreCase))
+        {
+            error = $"{ActorDisplayName(lockId)}'s action is still resolving";
+            return false;
+        }
+
+        if (_sessionRound.ActedThisRound.Contains(actorId))
+        {
+            error = "Already acted this round";
+            return false;
+        }
+
+        _sessionRound.Seat(actorId);
+        _sessionRound.CurrentActorId = actorId;
+        return true;
     }
 }

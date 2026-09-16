@@ -77,10 +77,15 @@ public sealed class DndGameMasterModuleTests
         Assert.True(DndGameMasterModule.IsDndToolAllowedForMode("gptcli_dnd_mode", "off"));
         Assert.False(DndGameMasterModule.IsDndToolAllowedForMode("gptcli_dnd_attack", "off"));
         Assert.True(DndGameMasterModule.IsDndToolAllowedForMode("gptcli_dnd_campaigncreate", "draft"));
+        Assert.False(DndGameMasterModule.IsDndToolAllowedForMode("gptcli_dnd_partyaddpc", "draft"));
         Assert.False(DndGameMasterModule.IsDndToolAllowedForMode("gptcli_dnd_attack", "draft"));
         Assert.True(DndGameMasterModule.IsDndToolAllowedForMode("gptcli_dnd_attack", "game"));
+        Assert.True(DndGameMasterModule.IsDndToolAllowedForMode("gptcli_dnd_ready", "game"));
+        Assert.True(DndGameMasterModule.IsDndToolAllowedForMode("gptcli_dnd_join", "game"));
         Assert.True(DndGameMasterModule.IsDndToolAllowedForMode("gptcli_dnd_choose", "game"));
         Assert.True(DndGameMasterModule.IsDndToolAllowedForMode("gptcli_dnd_rest", "game"));
+        Assert.False(DndGameMasterModule.IsDndToolAllowedForMode("gptcli_dnd_join", "draft"));
+        Assert.False(DndGameMasterModule.IsDndToolAllowedForMode("gptcli_dnd_ready", "draft"));
         Assert.False(DndGameMasterModule.IsDndToolAllowedForMode("gptcli_dnd_choose", "draft"));
         Assert.False(DndGameMasterModule.IsDndToolAllowedForMode("gptcli_dnd_campaigncreate", "game"));
     }
@@ -125,6 +130,24 @@ public sealed class DndGameMasterModuleTests
         Assert.False(DndGameMasterModule.LooksLikeBeginIntent("start the encounter"));
         Assert.False(DndGameMasterModule.LooksLikeBeginIntent("start the fight"));
         Assert.True(DndGameMasterModule.LooksLikeGameStartIntent("start the encounter"));
+    }
+
+    [Fact]
+    public void Table_join_and_done_intents()
+    {
+        Assert.True(DndGameMasterModule.LooksLikeTableJoin("I'll join"));
+        Assert.True(DndGameMasterModule.LooksLikeTableJoin("i'll play"));
+        Assert.True(DndGameMasterModule.LooksLikeTableJoin("I'm in"));
+        Assert.True(DndGameMasterModule.LooksLikeTableJoin("count me in"));
+        Assert.True(DndGameMasterModule.LooksLikeTableJoin("join the party"));
+        Assert.False(DndGameMasterModule.LooksLikeTableJoin("attack the boss"));
+        Assert.False(DndGameMasterModule.LooksLikeRoundDone("I'll join"));
+        Assert.False(DndGameMasterModule.LooksLikeTableJoin("ready"));
+        Assert.True(DndGameMasterModule.LooksLikeRoundDone("done"));
+        Assert.True(DndGameMasterModule.LooksLikeRoundDone("ready"));
+        Assert.True(DndGameMasterModule.LooksLikeRoundDone("that's all"));
+        Assert.True(DndGameMasterModule.LooksLikeRoundDone("we're done"));
+        Assert.False(DndGameMasterModule.LooksLikeRoundDone("I search the rubble"));
     }
 
     [Fact]
@@ -338,8 +361,7 @@ public sealed class DndGameMasterModuleTests
             "Club Calor",
             hasStory: true,
             locationCount: 1,
-            encounterCount: 0,
-            partyMemberCount: 2);
+            encounterCount: 0);
         Assert.Contains("Club Calor", next, StringComparison.Ordinal);
         Assert.Contains("fight", next, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("**Next**", next, StringComparison.Ordinal);
@@ -354,8 +376,7 @@ public sealed class DndGameMasterModuleTests
             null,
             hasStory: true,
             locationCount: 2,
-            encounterCount: 2,
-            partyMemberCount: 3);
+            encounterCount: 2);
         Assert.Contains("mode value:game", next, StringComparison.Ordinal);
     }
 
@@ -381,9 +402,6 @@ public sealed class DndGameMasterModuleTests
             hasStory: true,
             locationCount: 3,
             encounterCount: 9,
-            partyPcs: 1,
-            partyNpcs: 5,
-            missingSheets: 0,
             hasFinale: true));
         Assert.True(DndGameMasterModule.CampaignMarkdownHasFinale("## Finale\nStop the drop."));
         Assert.False(DndGameMasterModule.CampaignMarkdownHasFinale("Just a premise about Medina."));
@@ -393,8 +411,6 @@ public sealed class DndGameMasterModuleTests
             hasStory: true,
             locations: new[] { "The Icebreaker" },
             encounters: Array.Empty<string>(),
-            partyPcs: 1,
-            partyNpcs: 1,
             remaining: new[] { "2–3 investigation or combat encounters", "Key districts or hideouts" });
         Assert.Contains("**Draft status**", markdown, StringComparison.Ordinal);
         Assert.Contains("**What's left**", markdown, StringComparison.Ordinal);
@@ -407,12 +423,11 @@ public sealed class DndGameMasterModuleTests
             hasStory: true,
             locations: new[] { "The Icebreaker" },
             encounters: new[] { "Medina Mile Freeze-Out" },
-            partyPcs: 1,
-            partyNpcs: 5,
             remaining: Array.Empty<string>(),
             hasFinale: true,
             includeNext: true,
             includeEditHelp: true);
+        Assert.DoesNotContain("PC(s)", complete, StringComparison.Ordinal);
         Assert.Contains("Nothing required", complete, StringComparison.Ordinal);
         Assert.Contains("**How to edit**", complete, StringComparison.Ordinal);
         Assert.Contains("natural language", complete, StringComparison.OrdinalIgnoreCase);

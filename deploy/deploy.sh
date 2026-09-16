@@ -62,12 +62,11 @@ watch_modules_loop() {
     fi
 
     if [[ "${modules_hash}" != "${last_modules}" ]]; then
-      echo "[watch-modules] change detected; deploying modules..."
-      if docker compose run --rm -T builder bash -lc "bash modules/build-deploy-modules.sh"; then
-        echo "[watch-modules] restart discord..."
-        docker compose restart discord >/dev/null 2>&1 || true
+      echo "[watch-modules] change detected; rebuilding discord image (host+modules)..."
+      if docker compose up -d --build --force-recreate discord; then
+        echo "[watch-modules] discord recreated."
       else
-        echo "[watch-modules] module deploy failed; will retry on next change."
+        echo "[watch-modules] discord rebuild failed; will retry on next change."
       fi
       last_modules="${modules_hash}"
     fi
@@ -93,9 +92,8 @@ case "${cmd}" in
     docker compose build
     ;;
   modules)
-    # Build and deploy example modules to the host-mounted modules directory.
-    # This is intentionally not part of `up`/`restart` to keep deploy cycles fast.
-    docker compose run --rm -T builder bash -lc "bash modules/build-deploy-modules.sh"
+    # Rebuild the discord image, which now compiles example modules into /app/modules.
+    docker compose up -d --build --force-recreate discord
     ;;
   watch-modules)
     # Default dev loop: bootstrap core+modules, start a daemon watcher, then stream discord logs.
@@ -107,9 +105,7 @@ case "${cmd}" in
       fi
     fi
 
-    echo "Bootstrapping core + modules..."
-    docker compose run --rm -T builder
-    docker compose run --rm -T builder bash -lc "bash modules/build-deploy-modules.sh"
+    echo "Bootstrapping discord image (host + modules)..."
     docker compose up -d --build --force-recreate discord
 
     echo "Starting watch-modules daemon in background..."
@@ -133,17 +129,12 @@ case "${cmd}" in
     ;;
   watch-modules-fg)
     # Build+deploy core + modules once, start the bot, then watch sources for changes and redeploy/restart on each change.
-    docker compose run --rm -T builder
-    echo "Building+deploying modules..."
-    docker compose run --rm -T builder bash -lc "bash modules/build-deploy-modules.sh"
-
-    echo "Starting discord service (build if needed)..."
+    echo "Starting discord service (build host + modules)..."
     docker compose up -d --build --force-recreate discord
 
     echo "Watching module sources under modules/examples for changes..."
     echo "Watching core sources for changes..."
-    echo "On module change: rebuild+deploy modules -> restart discord service"
-    echo "On core change: rebuild core -> restart discord service"
+    echo "On module or core change: docker compose build discord and recreate the service"
 
     # Watcher runs in the background while logs stream in the foreground.
     ( watch_modules_loop ) &

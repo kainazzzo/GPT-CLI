@@ -213,8 +213,8 @@ Common commands:
 Notes:
 - `docker-compose.yml` mounts `./deploy/appsettings.json` to `/app/appsettings.json` (read-only).
 - Channel state is persisted to `/usr/local/discord/channels` on the host.
-- `deploy/deploy.sh` runs a containerized `dotnet publish` before `up/build/restart`, which triggers the `gpt.csproj` post-build module deploy step.
-- Module DLLs are persisted on the host at `/usr/local/discord/modules` and mounted into the bot container at `/app/modules`.
+- `docker compose build` publishes the host **and** compiles example modules into the image at `/app/modules`. The bot does not mount host module DLLs.
+- Rebuild after module source changes the same way: `docker compose build` (or `docker compose up -d --build`).
 
 ## Features
 

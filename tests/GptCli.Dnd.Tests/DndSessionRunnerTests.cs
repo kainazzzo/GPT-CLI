@@ -113,7 +113,8 @@ public sealed class DndSessionRunnerTests
 
         var res = camp.ChooseOption("begin");
         Assert.True(res.Ok);
-        var session = res.Campaign.Session;
+        camp.Ready("p1");
+        var session = camp.GetSessionSnapshot();
         Assert.Equal(DndGamePhase.Exploration, session.Phase);
         Assert.Equal("t1-approach", session.CurrentSceneId);
         Assert.Contains(session.Options, o => o.Id == "check:search");
@@ -141,6 +142,7 @@ public sealed class DndSessionRunnerTests
         camp.RegisterEncounterTemplate(BasicTemplate());
         camp.StartSession();
         camp.ChooseOption("begin");
+        camp.Ready("p1");
 
         var pending = camp.ChooseOption("check:search");
         Assert.True(pending.Ok);
@@ -164,6 +166,7 @@ public sealed class DndSessionRunnerTests
         camp.RegisterEncounterTemplate(BasicTemplate());
         camp.StartSession();
         camp.ChooseOption("begin");
+        camp.Ready("p1");
         camp.ChooseOption("check:search");
 
         var resolved = camp.ResolveCheck();
@@ -179,6 +182,7 @@ public sealed class DndSessionRunnerTests
         camp.RegisterEncounterTemplate(BasicTemplate());
         camp.StartSession();
         camp.ChooseOption("begin");
+        camp.Ready("p1");
         camp.ChooseOption("search the area");
 
         var cancelled = camp.ChooseOption("cancel");
@@ -194,12 +198,13 @@ public sealed class DndSessionRunnerTests
         camp.RegisterEncounterTemplate(BasicTemplate());
         camp.StartSession();
         camp.ChooseOption("begin");
+        camp.Ready("p1");
 
         var started = camp.ChooseOption("start the fight");
         Assert.True(started.Ok);
         Assert.Equal(DndGamePhase.Combat, started.Campaign.Session.Phase);
         Assert.NotNull(started.Campaign.ActiveEncounterState);
-        Assert.Equal(DndEncounterPhase.NeedInitiative, started.Campaign.ActiveEncounterState.Phase);
+        Assert.Equal(DndEncounterPhase.InCombat, started.Campaign.ActiveEncounterState.Phase);
         Assert.Equal(20, started.Campaign.Party["p1"].Hp);
 
         var blocked = camp.StartEncounter("missing");
@@ -209,13 +214,13 @@ public sealed class DndSessionRunnerTests
     [Fact]
     public void Combat_victory_moves_to_aftermath()
     {
-        var dice = new FixedDiceRoller(new[] { 20, 1, 20, 8, 8 });
+        var dice = new FixedDiceRoller(new[] { 20, 8, 8 });
         var camp = MakeCampaign(dice: dice);
         camp.RegisterEncounterTemplate(BasicTemplate());
         camp.StartSession();
         camp.ChooseOption("begin");
+        camp.Ready("p1");
         camp.ChooseOption("combat:t1");
-        camp.RollAll();
 
         var res = camp.Attack("p1", "b1");
         res = camp.RollAll();
@@ -230,15 +235,16 @@ public sealed class DndSessionRunnerTests
     [Fact]
     public void Party_wipe_moves_session_to_failed_and_long_rest_revives()
     {
-        var dice = new FixedDiceRoller(new[] { 20, 1, 1, 20, 8, 8 });
+        var dice = new FixedDiceRoller(new[] { 1, 20, 8, 8 });
         var camp = MakeCampaign(startingHp: 3, startingMp: 0, dice: dice);
         camp.RegisterEncounterTemplate(BasicTemplate());
         camp.StartSession();
         camp.ChooseOption("begin");
+        camp.Ready("p1");
         camp.ChooseOption("combat:t1");
-        camp.RollAll();
         camp.Attack("p1", "b1");
-        var res = camp.RollAll();
+        camp.RollAll();
+        var res = camp.Ready("p1");
 
         Assert.True(res.Campaign.IsFailed);
         Assert.Equal(DndGamePhase.Failed, res.Campaign.Session.Phase);
@@ -259,6 +265,7 @@ public sealed class DndSessionRunnerTests
         camp.RegisterEncounterTemplate(BasicTemplate());
         camp.StartSession();
         camp.ChooseOption("begin");
+        camp.Ready("p1");
 
         var rested = camp.ChooseOption("rest");
         Assert.Equal(DndGamePhase.Rest, rested.Campaign.Session.Phase);
@@ -269,6 +276,7 @@ public sealed class DndSessionRunnerTests
         Assert.Equal(6, shortRest.Campaign.Party["p1"].Mp);
 
         camp.ChooseOption("return");
+        camp.Ready("p1");
         camp.ChooseOption("combat:t1");
         var blocked = camp.ShortRest();
         Assert.False(blocked.Ok);
@@ -282,6 +290,7 @@ public sealed class DndSessionRunnerTests
         camp.RegisterEncounterTemplate(BasicTemplate());
         camp.StartSession();
         camp.ChooseOption("begin");
+        camp.Ready("p1");
         camp.ChooseOption("combat:t1");
 
         var blocked = camp.LongRest();
@@ -291,13 +300,13 @@ public sealed class DndSessionRunnerTests
     [Fact]
     public void Aftermath_continue_reaches_finale_when_no_more_encounters()
     {
-        var dice = new FixedDiceRoller(new[] { 20, 1, 20, 8, 8 });
+        var dice = new FixedDiceRoller(new[] { 20, 8, 8 });
         var camp = MakeCampaign(dice: dice);
         camp.RegisterEncounterTemplate(BasicTemplate());
         camp.StartSession();
         camp.ChooseOption("begin");
+        camp.Ready("p1");
         camp.ChooseOption("combat:t1");
-        camp.RollAll();
         camp.Attack("p1", "b1");
         camp.RollAll();
 
@@ -315,6 +324,7 @@ public sealed class DndSessionRunnerTests
         camp.RegisterEncounterTemplate(BasicTemplate());
         camp.StartSession();
         camp.ChooseOption("begin");
+        camp.Ready("p1");
         camp.RequestCheck("p1", DndCheckStat.Dex, 12, "Search the rubble");
 
         var state = camp.ToState();
@@ -334,5 +344,69 @@ public sealed class DndSessionRunnerTests
         var resolved = restored.ResolveCheck();
         Assert.True(resolved.Campaign.Session.LastCheckSuccess);
         Assert.Equal(DndGamePhase.Exploration, resolved.Campaign.Session.Phase);
+    }
+
+    [Fact]
+    public void Empty_party_starts_in_formation()
+    {
+        var camp = new DndCampaignRunner(
+            new DndCampaignDefinition(Array.Empty<DndCampaignPartyMember>()),
+            clock: new FakeClock(DateTimeOffset.Parse("2026-02-08T00:00:00Z")));
+        camp.RegisterEncounterTemplate(BasicTemplate());
+        var started = camp.StartSession();
+        Assert.True(started.Ok);
+        Assert.Equal(DndGamePhase.PartyFormation, started.Campaign.Session.Phase);
+
+        var blocked = camp.ChooseOption("begin");
+        Assert.False(blocked.Ok);
+        Assert.Contains("forming", blocked.Error, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Join_then_ready_leaves_formation()
+    {
+        var camp = new DndCampaignRunner(
+            new DndCampaignDefinition(Array.Empty<DndCampaignPartyMember>()),
+            clock: new FakeClock(DateTimeOffset.Parse("2026-02-08T00:00:00Z")));
+        camp.RegisterEncounterTemplate(BasicTemplate());
+        camp.StartSession();
+
+        var joined = camp.JoinParty(new DndCampaignPartyMember(
+            ActorId: "p1",
+            Name: "Hero",
+            Stats: new DndStats(14, 12, 12, 10, 10),
+            MaxHp: 20,
+            Hp: 20,
+            MaxMp: 10,
+            Mp: 10));
+        Assert.True(joined.Ok);
+        Assert.Equal(DndGamePhase.PartyFormation, joined.Campaign.Session.Phase);
+
+        var ready = camp.Ready("p1");
+        Assert.True(ready.Ok);
+        Assert.Equal(DndGamePhase.SessionStart, ready.Campaign.Session.Phase);
+        Assert.Contains(ready.Campaign.Session.Options, o => o.Id == "begin");
+    }
+
+    [Fact]
+    public void Ready_in_formation_without_joining_fails()
+    {
+        var camp = new DndCampaignRunner(
+            new DndCampaignDefinition(Array.Empty<DndCampaignPartyMember>()),
+            clock: new FakeClock(DateTimeOffset.Parse("2026-02-08T00:00:00Z")));
+        camp.StartSession();
+        var ready = camp.Ready("p1");
+        Assert.False(ready.Ok);
+    }
+
+    [Fact]
+    public void StartEncounter_with_empty_party_fails()
+    {
+        var camp = new DndCampaignRunner(
+            new DndCampaignDefinition(Array.Empty<DndCampaignPartyMember>()),
+            clock: new FakeClock(DateTimeOffset.Parse("2026-02-08T00:00:00Z")));
+        camp.RegisterEncounterTemplate(BasicTemplate());
+        var res = camp.StartEncounter("t1");
+        Assert.False(res.Ok);
     }
 }
