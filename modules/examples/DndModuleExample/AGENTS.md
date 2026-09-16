@@ -20,7 +20,7 @@ On `/gptcli dnd mode value:game`:
 
 1. Finalize draft → catalog if needed (`TryFinalizeDraftOnGameSwitchAsync`).
 2. `EnsureGameSessionAsync` → `DndCampaignRunner.StartSession()` if needed (empty party is allowed; session starts in `PartyFormation`).
-3. Reply with `RenderSessionPrompt`: **State**, scene summary, **Party** HP/MP, **Options**, table-round footer.
+3. Reply with `RenderSessionPrompt`: **State**, **Goal**, **Here**, **To progress**, **Party**, **Options** (only legal next beats).
 
 Every later game reply should keep that footer (`RenderTurnResult` / `WithSessionFooter`).
 
@@ -45,7 +45,7 @@ Combat rolls auto-resolve (`AutoResolvePendingRolls`) according to liveconfig `a
 - talk/speak → `social`
 - travel → `travel`
 - rest / short rest / long rest
-- fight/combat/ambush → `combat:{templateId}`
+- fight/combat/ambush → `combat:{templateId}` (only if listed — not on a fresh approach)
 - continue / begin / recap / roll / cancel / return / end session
 
 ## Tools

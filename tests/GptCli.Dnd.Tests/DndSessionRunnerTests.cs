@@ -113,13 +113,17 @@ public sealed class DndSessionRunnerTests
 
         var res = camp.ChooseOption("begin");
         Assert.True(res.Ok);
-        camp.Ready("p1");
         var session = camp.GetSessionSnapshot();
         Assert.Equal(DndGamePhase.Exploration, session.Phase);
         Assert.Equal("t1-approach", session.CurrentSceneId);
         Assert.Contains(session.Options, o => o.Id == "check:search");
         Assert.Contains(session.Options, o => o.Id == "social");
-        Assert.Contains(session.Options, o => o.Id.StartsWith("combat:", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(session.Options, o => o.Id.StartsWith("combat:", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(session.Options, o => o.Id == "travel");
+        Assert.DoesNotContain(session.Options, o => o.Id == "rest");
+        Assert.False(string.IsNullOrWhiteSpace(session.Objective));
+        Assert.Contains("Boss", session.PresentNames);
+        Assert.Contains("talk", session.ProgressHint, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -145,16 +149,30 @@ public sealed class DndSessionRunnerTests
         var talked = camp.ChooseOption("social", "p1");
         Assert.True(talked.Ok);
         Assert.Equal(DndGamePhase.Social, talked.Campaign.Session.Phase);
+        Assert.DoesNotContain("p1", talked.Campaign.Session.ActedThisRoundActorIds ?? Array.Empty<string>());
 
-        camp.ChooseOption("return", "p1");
-        var blocked = camp.ChooseOption("check:search", "p1");
-        Assert.False(blocked.Ok);
-        Assert.Contains("Already acted", blocked.Error, StringComparison.OrdinalIgnoreCase);
+        var persuaded = camp.ChooseOption("check:persuade", "p1");
+        Assert.True(persuaded.Ok);
+        Assert.Equal(DndGamePhase.Check, persuaded.Campaign.Session.Phase);
+    }
 
-        camp.Ready("p1");
-        var searched = camp.ChooseOption("check:search", "p1");
-        Assert.True(searched.Ok);
-        Assert.Equal(DndGamePhase.Check, searched.Campaign.Session.Phase);
+    [Fact]
+    public void Solo_follow_up_beat_does_not_require_done()
+    {
+        var camp = MakeCampaign();
+        camp.RegisterEncounterTemplate(BasicTemplate());
+        camp.StartSession();
+        camp.ChooseOption("begin", "p1");
+        camp.ChooseOption("social", "p1");
+
+        var persuaded = camp.ChooseOption("check:persuade", "p1");
+        Assert.True(persuaded.Ok);
+        Assert.Equal(DndGamePhase.Check, persuaded.Campaign.Session.Phase);
+
+        camp.ChooseOption("roll", "p1");
+        var fight = camp.ChooseOption("combat:t1", "p1");
+        Assert.True(fight.Ok);
+        Assert.Equal(DndGamePhase.Combat, fight.Campaign.Session.Phase);
     }
 
     [Fact]
@@ -165,7 +183,6 @@ public sealed class DndSessionRunnerTests
         camp.RegisterEncounterTemplate(BasicTemplate());
         camp.StartSession();
         camp.ChooseOption("begin");
-        camp.Ready("p1");
 
         var pending = camp.ChooseOption("check:search");
         Assert.True(pending.Ok);
@@ -189,7 +206,6 @@ public sealed class DndSessionRunnerTests
         camp.RegisterEncounterTemplate(BasicTemplate());
         camp.StartSession();
         camp.ChooseOption("begin");
-        camp.Ready("p1");
         camp.ChooseOption("check:search");
 
         var resolved = camp.ResolveCheck();
@@ -205,7 +221,6 @@ public sealed class DndSessionRunnerTests
         camp.RegisterEncounterTemplate(BasicTemplate());
         camp.StartSession();
         camp.ChooseOption("begin");
-        camp.Ready("p1");
         camp.ChooseOption("search the area");
 
         var cancelled = camp.ChooseOption("cancel");
@@ -221,9 +236,10 @@ public sealed class DndSessionRunnerTests
         camp.RegisterEncounterTemplate(BasicTemplate());
         camp.StartSession();
         camp.ChooseOption("begin");
-        camp.Ready("p1");
+        camp.ChooseOption("check:search");
+        camp.ResolveCheck();
 
-        var started = camp.ChooseOption("start the fight");
+        var started = camp.ChooseOption("combat:t1");
         Assert.True(started.Ok);
         Assert.Equal(DndGamePhase.Combat, started.Campaign.Session.Phase);
         Assert.NotNull(started.Campaign.ActiveEncounterState);
@@ -242,8 +258,7 @@ public sealed class DndSessionRunnerTests
         camp.RegisterEncounterTemplate(BasicTemplate());
         camp.StartSession();
         camp.ChooseOption("begin");
-        camp.Ready("p1");
-        camp.ChooseOption("combat:t1");
+        camp.StartEncounter("t1");
 
         var res = camp.Attack("p1", "b1");
         res = camp.RollAll();
@@ -263,11 +278,9 @@ public sealed class DndSessionRunnerTests
         camp.RegisterEncounterTemplate(BasicTemplate());
         camp.StartSession();
         camp.ChooseOption("begin");
-        camp.Ready("p1");
-        camp.ChooseOption("combat:t1");
+        camp.StartEncounter("t1");
         camp.Attack("p1", "b1");
-        camp.RollAll();
-        var res = camp.Ready("p1");
+        var res = camp.RollAll();
 
         Assert.True(res.Campaign.IsFailed);
         Assert.Equal(DndGamePhase.Failed, res.Campaign.Session.Phase);
@@ -288,19 +301,15 @@ public sealed class DndSessionRunnerTests
         camp.RegisterEncounterTemplate(BasicTemplate());
         camp.StartSession();
         camp.ChooseOption("begin");
-        camp.Ready("p1");
-
-        var rested = camp.ChooseOption("rest");
-        Assert.Equal(DndGamePhase.Rest, rested.Campaign.Session.Phase);
 
         var shortRest = camp.ShortRest();
+        Assert.Equal(DndGamePhase.Rest, shortRest.Campaign.Session.Phase);
         Assert.True(shortRest.Ok);
         Assert.Equal(15, shortRest.Campaign.Party["p1"].Hp);
         Assert.Equal(6, shortRest.Campaign.Party["p1"].Mp);
 
         camp.ChooseOption("return");
-        camp.Ready("p1");
-        camp.ChooseOption("combat:t1");
+        camp.StartEncounter("t1");
         var blocked = camp.ShortRest();
         Assert.False(blocked.Ok);
         Assert.Contains("encounter", blocked.Error, StringComparison.OrdinalIgnoreCase);
@@ -313,8 +322,7 @@ public sealed class DndSessionRunnerTests
         camp.RegisterEncounterTemplate(BasicTemplate());
         camp.StartSession();
         camp.ChooseOption("begin");
-        camp.Ready("p1");
-        camp.ChooseOption("combat:t1");
+        camp.StartEncounter("t1");
 
         var blocked = camp.LongRest();
         Assert.False(blocked.Ok);
@@ -328,8 +336,7 @@ public sealed class DndSessionRunnerTests
         camp.RegisterEncounterTemplate(BasicTemplate());
         camp.StartSession();
         camp.ChooseOption("begin");
-        camp.Ready("p1");
-        camp.ChooseOption("combat:t1");
+        camp.StartEncounter("t1");
         camp.Attack("p1", "b1");
         camp.RollAll();
 
@@ -347,7 +354,6 @@ public sealed class DndSessionRunnerTests
         camp.RegisterEncounterTemplate(BasicTemplate());
         camp.StartSession();
         camp.ChooseOption("begin");
-        camp.Ready("p1");
         camp.RequestCheck("p1", DndCheckStat.Dex, 12, "Search the rubble");
 
         var state = camp.ToState();

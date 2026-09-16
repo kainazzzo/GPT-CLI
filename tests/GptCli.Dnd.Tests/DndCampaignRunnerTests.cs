@@ -68,8 +68,7 @@ public sealed class DndCampaignRunnerTests
         camp.StartEncounter("t1");
 
         camp.Attack("p1", "b1");
-        camp.RollAll();
-        var res = camp.Ready("p1");
+        var res = camp.RollAll();
         Assert.True(res.Ok);
         Assert.Equal(13, res.Campaign.Party["p1"].Hp);
     }
@@ -83,8 +82,7 @@ public sealed class DndCampaignRunnerTests
         camp.StartEncounter("t1");
 
         camp.Attack("p1", "b1");
-        camp.RollAll();
-        var res = camp.Ready("p1");
+        var res = camp.RollAll();
         Assert.True(res.Campaign.IsFailed);
         Assert.Equal("defeat", res.Campaign.FailureReason);
 
@@ -115,7 +113,6 @@ public sealed class DndCampaignRunnerTests
         camp.StartEncounter("t1");
         camp.Attack("p1", "b1");
         camp.RollAll();
-        camp.Ready("p1");
 
         Assert.True(camp.GetState().IsFailed);
 

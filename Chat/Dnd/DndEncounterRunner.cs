@@ -1208,10 +1208,30 @@ public sealed class DndEncounterRunner
     private void FinishPartyAction(string actorId, List<DndLedgerEntry> newEntries)
     {
         _table.MarkActed(actorId);
+        if (!_completed &&
+            _pendingRollsById.Count == 0 &&
+            !DndTableRound.IsNpcActorId(actorId) &&
+            AllLivingPartyPcsHaveActed())
+        {
+            EndPartyRound(newEntries);
+            return;
+        }
+
         newEntries.Add(AppendLedger(
             DndLedgerKind.TurnAdvanced,
             $"{ActorName(actorId)} finishes their action. Party round still open.",
             DetailsForSystem()));
+    }
+
+    private bool AllLivingPartyPcsHaveActed()
+    {
+        var pcs = _actors.Values
+            .Where(a => a.Side == DndSide.Party &&
+                        a.IsAlive &&
+                        !DndTableRound.IsNpcActorId(a.ActorId))
+            .ToList();
+        return pcs.Count > 0 &&
+               pcs.All(a => _table.ActedThisRound.Contains(a.ActorId));
     }
 
     private void EndPartyRound(List<DndLedgerEntry> newEntries)

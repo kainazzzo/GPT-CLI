@@ -65,7 +65,11 @@ public sealed record DndSessionSnapshot(
     string TableCurrentActorId = "",
     int TableRoundNumber = 1,
     int ReadyQuorumNeeded = 0,
-    int DoneVoteCount = 0);
+    int DoneVoteCount = 0,
+    string Objective = "",
+    IReadOnlyList<string> PresentNames = null,
+    string ProgressHint = "",
+    bool SceneBeatResolved = false);
 
 public sealed record DndCampaignSnapshot(
     bool IsFailed,

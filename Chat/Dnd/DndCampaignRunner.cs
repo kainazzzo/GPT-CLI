@@ -50,6 +50,7 @@ public sealed partial class DndCampaignRunner
     private DndPendingCheck _pendingCheck;
     private bool _lastCheckSuccess;
     private string _lastCheckSummary = string.Empty;
+    private bool _sceneBeatResolved;
     private readonly List<DndSceneDefinition> _scenes = new();
     private readonly DndTableRound _sessionRound = new();
 
@@ -175,6 +176,7 @@ public sealed partial class DndCampaignRunner
                 PendingCheck = _pendingCheck,
                 LastCheckSuccess = _lastCheckSuccess,
                 LastCheckSummary = _lastCheckSummary ?? string.Empty,
+                SceneBeatResolved = _sceneBeatResolved,
                 Scenes = _scenes.ToList(),
                 TableRound = _sessionRound.ToState()
             }
@@ -237,6 +239,7 @@ public sealed partial class DndCampaignRunner
             runner._pendingCheck = session.PendingCheck;
             runner._lastCheckSuccess = session.LastCheckSuccess;
             runner._lastCheckSummary = session.LastCheckSummary ?? string.Empty;
+            runner._sceneBeatResolved = session.SceneBeatResolved;
             runner._scenes.Clear();
             if (session.Scenes is { Count: > 0 })
             {
@@ -529,6 +532,7 @@ public sealed partial class DndCampaignRunner
         }
 
         _sessionRound.MarkActed(actorId);
+        MaybeEndSessionRoundIfPartyActed();
         return SessionOk($"{ActorDisplayName(actorId)} waits.");
     }
     public DndCampaignResult RollAll() => RunEncounterStep(() => _encounter.RollAll());
@@ -919,5 +923,49 @@ public sealed partial class DndCampaignRunner
         _sessionRound.Seat(actorId);
         _sessionRound.CurrentActorId = actorId;
         return true;
+    }
+
+    private bool AllSeatedPcsHaveActed()
+    {
+        var seated = _party.Values
+            .Where(p => p.IsAlive &&
+                        !DndTableRound.IsNpcActorId(p.ActorId) &&
+                        !_sessionRound.SittingOut.Contains(p.ActorId))
+            .ToList();
+        return seated.Count > 0 &&
+               seated.All(p => _sessionRound.ActedThisRound.Contains(p.ActorId));
+    }
+
+    private void MaybeEndSessionRoundIfPartyActed()
+    {
+        if (HasActiveEncounter || _sessionPhase == DndGamePhase.Check)
+        {
+            return;
+        }
+
+        if (!AllSeatedPcsHaveActed())
+        {
+            return;
+        }
+
+        EndSessionTableRound(new List<DndCampaignLedgerEntry>());
+    }
+
+    private bool TryConsumeSessionActionOrAdvance(string actorId, out string error)
+    {
+        if (TryConsumeSessionAction(actorId, out error))
+        {
+            return true;
+        }
+
+        if (HasActiveEncounter ||
+            !error.Contains("Already acted", StringComparison.OrdinalIgnoreCase) ||
+            !AllSeatedPcsHaveActed())
+        {
+            return false;
+        }
+
+        EndSessionTableRound(new List<DndCampaignLedgerEntry>());
+        return TryConsumeSessionAction(actorId, out error);
     }
 }

@@ -71,7 +71,7 @@ public sealed class DndEncounterRunnerTests
     [Fact]
     public void Attack_miss_stays_in_party_round()
     {
-        var dice = new FixedDiceRoller(new[] { 1 });
+        var dice = new FixedDiceRoller(new[] { 1, 1 });
         var r = new DndEncounterRunner(BasicEncounter(), diceRoller: dice, clock: new FakeClock(DateTimeOffset.Parse("2026-02-08T00:00:00Z")));
         r.StartEncounter();
 
@@ -82,15 +82,14 @@ public sealed class DndEncounterRunnerTests
         var resolved = r.RollAll();
         Assert.True(resolved.Ok);
         Assert.Equal(string.Empty, resolved.State.CurrentActorId);
-        Assert.Contains("p1", resolved.State.ActedThisRoundActorIds);
-        Assert.DoesNotContain(resolved.NewLedgerEntries, e => e.Message.Contains("Boss attacks", StringComparison.OrdinalIgnoreCase));
         Assert.Contains(resolved.NewLedgerEntries, e => e.Message.Contains("MISS", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains(resolved.NewLedgerEntries, e => e.Message.Contains("Boss attacks", StringComparison.OrdinalIgnoreCase) || e.Message.Contains("Party round", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
     public void Attack_hit_applies_damage_and_logs_hp_delta()
     {
-        var dice = new FixedDiceRoller(new[] { 20, 4, 5 });
+        var dice = new FixedDiceRoller(new[] { 20, 4, 5, 1, 1, 1 });
         var r = new DndEncounterRunner(BasicEncounter(), diceRoller: dice, clock: new FakeClock(DateTimeOffset.Parse("2026-02-08T00:00:00Z")));
         r.StartEncounter();
 
@@ -110,7 +109,7 @@ public sealed class DndEncounterRunnerTests
         var enc = BasicEncounter();
         var r = new DndEncounterRunner(
             enc,
-            diceRoller: new FixedDiceRoller(new[] { 1, 1, 1, 1, 1, 1 }),
+            diceRoller: new FixedDiceRoller(new[] { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 }),
             clock: new FakeClock(DateTimeOffset.Parse("2026-02-08T00:00:00Z")));
         r.StartEncounter();
 
@@ -118,15 +117,12 @@ public sealed class DndEncounterRunnerTests
         Assert.True(first.Ok);
         Assert.Contains(first.NewLedgerEntries, e => e.Kind == DndLedgerKind.MpSpent);
         r.RollAll();
-        r.Ready("p1");
 
         Assert.True(r.DeclareCastSpell("p1", "b1").Ok);
         r.RollAll();
-        r.Ready("p1");
 
         Assert.True(r.DeclareCastSpell("p1", "b1").Ok);
         r.RollAll();
-        r.Ready("p1");
 
         var fail = r.DeclareCastSpell("p1", "b1");
         Assert.False(fail.Ok);
@@ -141,8 +137,7 @@ public sealed class DndEncounterRunnerTests
         r.StartEncounter();
 
         r.DeclareAttack("p1", "b1");
-        r.RollAll();
-        var res = r.Ready("p1");
+        var res = r.RollAll();
         Assert.True(res.Ok);
 
         Assert.Contains(res.NewLedgerEntries, e => e.Message.Contains("Boss attacks", StringComparison.OrdinalIgnoreCase));
@@ -178,9 +173,10 @@ public sealed class DndEncounterRunnerTests
         Assert.True(res.Ok);
         Assert.Contains(res.NewLedgerEntries, e => e.Message.Contains("passes", StringComparison.OrdinalIgnoreCase));
         Assert.Equal(string.Empty, res.State.CurrentActorId);
-        Assert.Contains("p1", res.State.ActedThisRoundActorIds);
+        Assert.Contains(res.NewLedgerEntries, e =>
+            e.Message.Contains("Boss attacks", StringComparison.OrdinalIgnoreCase) ||
+            e.Message.Contains("Party round", StringComparison.OrdinalIgnoreCase));
         Assert.Equal(20, res.State.Actors["p1"].Hp);
-        Assert.DoesNotContain(res.NewLedgerEntries, e => e.Message.Contains("Boss attacks", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
@@ -202,9 +198,24 @@ public sealed class DndEncounterRunnerTests
     }
 
     [Fact]
-    public void Second_action_same_round_is_rejected()
+    public void Second_action_same_round_is_rejected_while_another_pc_has_not_acted()
     {
-        var r = ReadyCombat(new[] { 1 });
+        var p2 = new DndActorDefinition(
+            ActorId: "p2",
+            Name: "Rookie",
+            Side: DndSide.Party,
+            IsBoss: false,
+            Stats: new DndStats(10, 10, 10, 10, 10),
+            MaxHp: 16,
+            MaxMp: 6,
+            StartingHp: 16,
+            StartingMp: 6);
+        var enc = new DndEncounterDefinition(
+            new[] { BasicEncounter().Party[0], p2 },
+            BasicEncounter().Boss,
+            Array.Empty<DndActorDefinition>());
+        var r = new DndEncounterRunner(enc, diceRoller: new FixedDiceRoller(new[] { 1 }), clock: new FakeClock(DateTimeOffset.Parse("2026-02-08T00:00:00Z")));
+        r.StartEncounter();
         r.Pass("p1");
         var err = r.DeclareAttack("p1", "b1");
         Assert.False(err.Ok);
@@ -342,8 +353,7 @@ public sealed class DndEncounterRunnerTests
         var r = new DndEncounterRunner(enc, diceRoller: dice, clock: new FakeClock(DateTimeOffset.Parse("2026-02-08T00:00:00Z")));
         r.StartEncounter();
         r.DeclareAttack("p1", "b1");
-        r.RollAll();
-        var res = r.Ready("p1");
+        var res = r.RollAll();
 
         Assert.True(res.Ok);
         Assert.True(res.State.IsCompleted);

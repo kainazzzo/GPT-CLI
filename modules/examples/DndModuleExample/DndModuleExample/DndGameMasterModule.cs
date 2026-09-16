@@ -1208,17 +1208,18 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                           "Format for Discord markdown: **bold** section headings, `- ` bullets for any list of 2+ items, blank lines between sections. Do not bury lists in a comma-separated paragraph.\n" +
                           "When responding in draft mode, end with one actionable follow-up question unless the user asked for direct execution only.\n",
                 ModeGame =>
-                    "You are the D&D game master assistant operating in GAME mode.\n" +
-                    "Parse the player's intent from the conversation, then call the matching tool. Do not rely on isolated keywords.\n" +
-                    "The engine owns HP, stats, damage, rest, checks, and legal transitions. You narrate flair and map player prose onto listed options.\n" +
-                    "Context includes the current session phase and **Options**. Call `gptcli_dnd_choose` with one of those option ids/numbers/labels.\n" +
+                    "You are the table's Dungeon Master. The engine state is the truth: Goal, Here, To progress, and Options.\n" +
+                    "Open by grounding the party: where they are, the goal, who is present, and which listed option moves the scene.\n" +
+                    "Name the people in **Here** when they talk or persuade. Do not invent extra NPCs, a fight, or extra options.\n" +
+                    "Do not offer travel, camp, or combat unless those Options are listed. A linked encounter is not a fight until the engine lists Fight.\n" +
+                    "After a check, say what the roll means for the goal (they learn X, {name} refuses, the ambush breaks).\n" +
+                    "The engine owns HP, stats, damage, rest, checks, and legal transitions. Call `gptcli_dnd_choose` only for a listed option they committed to.\n" +
                     "Call `gptcli_dnd_rest` only for a listed rest option. Call attack/cast/pass only in Combat, and only for the speaker.\n" +
                     "If the session phase is PartyFormation, call `gptcli_dnd_join` when they sit down (`I'll play` / `I'll join` / `I'm in`). Do not call `gptcli_dnd_ready` for join.\n" +
                     "Call `gptcli_dnd_ready` only for ready/done after they have joined, or to close a table/combat round.\n" +
                     "Combat is an open party round: anyone who has not acted may act. After an action resolves, invite the next player. Do not wait on initiative order.\n" +
-                    "Questions about the scene, location, or who is around are not actions. Do not call tools for those — describe the current scene and invite a real beat.\n" +
-                    "Call `gptcli_dnd_choose` only when they commit to a listed beat (search, talk, travel, rest, fight, begin, continue).\n" +
-                    "If the line is flavor, not an action, do not call tools. Narrate briefly and invite search, talk, travel, rest, or a fight.\n" +
+                    "Questions about the scene, location, or who is around are not actions. Answer from Goal/Here/To progress. Do not call tools.\n" +
+                    "If the line is flavor, not an action, do not call tools. Narrate briefly and restate the listed options.\n" +
                     "Do not write combat-battlefield flavor unless the session phase is Combat.\n" +
                     "Do not call `gptcli_dnd_encounterstart` unless the user explicitly names a template id.\n" +
                     "Never require `!` commands. Resolve pending combat rolls automatically.\n" +
@@ -9059,7 +9060,21 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             ? "The table is open, but a scene hasn't been framed yet. Say `begin` when you want to start."
             : session.CurrentSceneSummary.Trim();
         sb.AppendLine($"You're in **{title}**.");
+        if (!string.IsNullOrWhiteSpace(session?.Objective))
+        {
+            sb.AppendLine($"**Goal:** {session.Objective.Trim()}");
+        }
+
         sb.AppendLine(TrimToLimit(summary, 400));
+        if (session?.PresentNames is { Count: > 0 })
+        {
+            sb.AppendLine("**Here:** " + string.Join(", ", session.PresentNames.Take(6)));
+        }
+
+        if (!string.IsNullOrWhiteSpace(session?.ProgressHint))
+        {
+            sb.AppendLine($"**To progress:** {session.ProgressHint.Trim()}");
+        }
 
         var npcNames = await ListNearbyNpcNamesAsync(channelState, ct);
         if (LooksLikeWhoIsAroundAsk(text))
@@ -9085,7 +9100,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         }
 
         sb.AppendLine();
-        sb.AppendLine("That's just the room — no action spent. Talk, search, travel, rest, or fight when you want a beat.");
+        sb.AppendLine("That's the lay of the scene — no action spent. Pick a listed option when you want to move it.");
         var footer = RenderSessionPrompt(snap);
         if (!string.IsNullOrWhiteSpace(footer))
         {
@@ -11630,6 +11645,16 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             ? "Write a GM combat lead line for Discord."
             : "Write a short in-world GM line for Discord. Match the current scene; do not describe a battlefield unless combat is happening.");
         sb.AppendLine($"Session phase: {phase?.ToString() ?? "unknown"}.");
+        if (!string.IsNullOrWhiteSpace(res?.Campaign?.Session?.Objective))
+        {
+            sb.AppendLine("Goal: " + TrimToLimit(res.Campaign.Session.Objective, 180));
+        }
+
+        if (res?.Campaign?.Session?.PresentNames is { Count: > 0 })
+        {
+            sb.AppendLine("Here: " + string.Join(", ", res.Campaign.Session.PresentNames.Take(4)));
+        }
+
         if (!string.IsNullOrWhiteSpace(res?.Campaign?.Session?.CurrentSceneSummary))
         {
             sb.AppendLine("Scene: " + TrimToLimit(res.Campaign.Session.CurrentSceneSummary, 220));
@@ -11818,10 +11843,30 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 sb.AppendLine("Seated: " + string.Join(", ", seated.Select(id => ActorPublicName(id, snap))));
             }
         }
-        else if (!string.IsNullOrWhiteSpace(session.CurrentSceneSummary) &&
-            session.Phase is not (DndGamePhase.Combat or DndGamePhase.Check))
+        else
         {
-            sb.AppendLine(TrimToLimit(session.CurrentSceneSummary, 280));
+            if (!string.IsNullOrWhiteSpace(session.Objective))
+            {
+                sb.AppendLine($"**Goal:** {TrimToLimit(session.Objective, 220)}");
+            }
+
+            if (session.PresentNames is { Count: > 0 } &&
+                session.Phase is not (DndGamePhase.Combat or DndGamePhase.Complete or DndGamePhase.Failed))
+            {
+                sb.AppendLine("**Here:** " + string.Join(", ", session.PresentNames.Take(6)));
+            }
+
+            if (!string.IsNullOrWhiteSpace(session.CurrentSceneSummary) &&
+                session.Phase is not (DndGamePhase.Combat or DndGamePhase.Check) &&
+                !string.Equals(session.CurrentSceneSummary.Trim(), session.Objective?.Trim(), StringComparison.Ordinal))
+            {
+                sb.AppendLine(TrimToLimit(session.CurrentSceneSummary, 240));
+            }
+
+            if (!string.IsNullOrWhiteSpace(session.ProgressHint))
+            {
+                sb.AppendLine($"**To progress:** {TrimToLimit(session.ProgressHint, 180)}");
+            }
         }
 
         if (!string.IsNullOrWhiteSpace(session.LastCheckSummary) && session.Phase != DndGamePhase.Check)
@@ -12016,8 +12061,8 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             ? "open floor"
             : $"{ActorPublicName(currentActorId, snap, encounter)} resolving";
         var hint = (acted != null && acted.Count > 0)
-            ? "You can keep talking. Say `done` when the table is finished with this beat."
-            : "Talk is free. Search, travel, rest, or fight spends your beat; say `done` after that if others are waiting.";
+            ? "Talk is free. When everyone has acted, the round moves on. Say `done` only to skip someone who hasn't acted."
+            : "Talk is free. Search, travel, rest, or fight spends a beat; the round moves on when the whole party has acted.";
         return $"**Table:** {lockText}. Acted: {actedText}. Done votes: {readyText}/{Math.Max(1, quorumNeeded)}. {hint}";
     }
 

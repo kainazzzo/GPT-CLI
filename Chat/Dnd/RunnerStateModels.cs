@@ -79,6 +79,7 @@ public sealed class DndSessionRunnerState
     public DndPendingCheck PendingCheck { get; set; }
     public bool LastCheckSuccess { get; set; }
     public string LastCheckSummary { get; set; } = string.Empty;
+    public bool SceneBeatResolved { get; set; }
     public List<DndSceneDefinition> Scenes { get; set; } = new();
     public DndTableRoundState TableRound { get; set; }
 }

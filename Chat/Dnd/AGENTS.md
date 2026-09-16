@@ -24,8 +24,8 @@ Started with `StartSession()` (idempotent). Scenes are synthesized if empty.
 | `NotStarted` | No session | — |
 | `PartyFormation` | Empty table / everyone sat out | `party` only; sit down via `JoinParty`, start via `Ready` |
 | `SessionStart` | Intro/recap | `begin`, `recap`, `party` |
-| `Exploration` | Location play | `check:search`, `social`, `travel`, `rest`, `combat:{templateId}`, `continue` |
-| `Social` | Overlay talk (free to enter) | `check:persuade`, `return`, combat, `continue` |
+| `Exploration` | Location play | `check:search`, `social` (talk to the scene focus). Combat only after a check resolves |
+| `Social` | Overlay talk (free to enter) | `check:persuade` named at the focus, `return`. Combat only after a check resolves |
 | `Travel` | Overlay travel | `continue`, `check:navigate`, `rest`, combat, `return` |
 | `Check` | Pending ability check | `roll`, `cancel` |
 | `Rest` | Camp | `rest:short`, `rest:long`, `return` |
@@ -36,7 +36,9 @@ Started with `StartSession()` (idempotent). Scenes are synthesized if empty.
 
 Overlays (`Social`, `Travel`, `Rest`, `Check`) remember `PreviousPhase` and do not change `CurrentSceneId`. `ChooseOption` accepts option id, 1-based index, unique label, or unique substring.
 
-Session table rounds (exploration/social/travel): `begin` / `continue` / `travel` / `rest` / `combat` consume one action. `social`, `recap`, `party`, and `return` are free. Failed options release the current-actor lock. Questions are adapter-side and must not call `ChooseOption`.
+Session table rounds (exploration/social/travel): `continue` / `travel` / `rest` / `combat` consume one action. `begin`, `social`, `recap`, `party`, and `return` are free (talking is not a beat). Failed options release the current-actor lock. When every seated PC has acted, the round advances without `done`. `done` only skips players who have not acted. Questions are adapter-side and must not call `ChooseOption`.
+
+Approach scenes do not list fight/travel/rest/continue until a search or persuade check resolves (`SceneBeatResolved`). Snapshot includes `Objective`, `PresentNames`, and `ProgressHint` so the adapter can GM the current state.
 
 `begin` / `continue` call `MoveToScene(NextSceneId)`. Entering a `Combat` scene starts that template via `StartEncounter`. Victory → aftermath scene. Defeat → `Failed` (and campaign `IsFailed`).
 

@@ -26,6 +26,7 @@ public sealed partial class DndCampaignRunner
         _lastCheckSuccess = false;
         _lastCheckSummary = string.Empty;
         _sessionRound.ClearRoundFlags();
+        _sceneBeatResolved = false;
         foreach (var id in SeatedActorIds())
         {
             _sessionRound.Participating.Add(id);
@@ -78,13 +79,13 @@ public sealed partial class DndCampaignRunner
         }
 
         var id = option.Id ?? string.Empty;
-        var free = id is "recap" or "party" or "roll" or "cancel" or "return" or "end" or "social"
+        var free = id is "recap" or "party" or "roll" or "cancel" or "return" or "end" or "social" or "begin"
             || (_sessionPhase == DndGamePhase.Failed && id.StartsWith("rest:", StringComparison.OrdinalIgnoreCase));
         var check = id.StartsWith("check:", StringComparison.OrdinalIgnoreCase);
         var consumed = false;
         if (!free && !check)
         {
-            if (!TryConsumeSessionAction(actorId, out var actError))
+            if (!TryConsumeSessionActionOrAdvance(actorId, out var actError))
             {
                 return SessionError(actError);
             }
@@ -103,6 +104,7 @@ public sealed partial class DndCampaignRunner
                 if (!string.IsNullOrWhiteSpace(resolvedActor))
                 {
                     _sessionRound.MarkActed(resolvedActor);
+                    MaybeEndSessionRoundIfPartyActed();
                 }
             }
             else if (!result.Ok)
@@ -146,7 +148,7 @@ public sealed partial class DndCampaignRunner
             return SessionError(actorError);
         }
 
-        if (!TryConsumeSessionAction(member.ActorId, out var actError))
+        if (!TryConsumeSessionActionOrAdvance(member.ActorId, out var actError))
         {
             return SessionError(actError);
         }
@@ -193,6 +195,8 @@ public sealed partial class DndCampaignRunner
         _pendingCheck = null;
         _sessionPhase = previous == DndGamePhase.NotStarted ? DndGamePhase.Exploration : previous;
         _sessionRound.MarkActed(member.ActorId);
+        _sceneBeatResolved = true;
+        MaybeEndSessionRoundIfPartyActed();
         return SessionOk(_lastCheckSummary);
     }
 
@@ -215,6 +219,7 @@ public sealed partial class DndCampaignRunner
         if (!string.IsNullOrWhiteSpace(actorId))
         {
             _sessionRound.MarkActed(actorId);
+            MaybeEndSessionRoundIfPartyActed();
         }
 
         return SessionOk("Check cancelled.");
@@ -325,7 +330,7 @@ public sealed partial class DndCampaignRunner
         if (string.Equals(id, "social", StringComparison.OrdinalIgnoreCase))
         {
             EnterOverlay(DndGamePhase.Social);
-            return SessionOk("You turn to conversation.");
+            return SessionOk($"You turn to {SceneFocusName()}.");
         }
 
         if (string.Equals(id, "travel", StringComparison.OrdinalIgnoreCase))
@@ -426,6 +431,7 @@ public sealed partial class DndCampaignRunner
         _pendingCheck = null;
         _currentSceneId = scene.SceneId;
         _sessionPhase = PhaseForSceneKind(scene.Kind);
+        _sceneBeatResolved = false;
 
         if (scene.Kind == DndSceneKind.Combat && startCombatIfNeeded && !string.IsNullOrWhiteSpace(scene.LinkedEncounterTemplateId))
         {
@@ -637,7 +643,11 @@ public sealed partial class DndCampaignRunner
             TableCurrentActorId: _sessionRound.CurrentActorId ?? string.Empty,
             TableRoundNumber: _sessionRound.RoundNumber,
             ReadyQuorumNeeded: DndTableRound.QuorumNeeded(CountSeatedPcs()),
-            DoneVoteCount: _sessionRound.ReadyThisRound.Count(id => !DndTableRound.IsNpcActorId(id)));
+            DoneVoteCount: _sessionRound.ReadyThisRound.Count(id => !DndTableRound.IsNpcActorId(id)),
+            Objective: BuildObjective(),
+            PresentNames: BuildPresentNames(),
+            ProgressHint: BuildProgressHint(),
+            SceneBeatResolved: _sceneBeatResolved);
     }
 
     private IReadOnlyList<DndSceneOption> BuildSessionOptions()
@@ -666,50 +676,34 @@ public sealed partial class DndCampaignRunner
 
             case DndGamePhase.Exploration:
                 list.Add(new DndSceneOption("check:search", "Search the area", DndGamePhase.Check, CheckStat: DndCheckStat.Dex, CheckDc: _rules.DefaultCheckDc, CheckReason: "Search the area"));
-                list.Add(new DndSceneOption("social", "Talk to someone", DndGamePhase.Social));
-                list.Add(new DndSceneOption("travel", "Travel on", DndGamePhase.Travel));
-                list.Add(new DndSceneOption("rest", "Make camp", DndGamePhase.Rest));
-                if (!string.IsNullOrWhiteSpace(linked))
-                {
-                    list.Add(new DndSceneOption($"combat:{linked}", "Start the fight", DndGamePhase.Combat, EncounterTemplateId: linked));
-                }
-
-                if (!string.IsNullOrWhiteSpace(nextId))
-                {
-                    list.Add(new DndSceneOption("continue", "Continue to the next scene", PhaseForSceneKind(FindScene(nextId)?.Kind ?? DndSceneKind.Exploration), NextSceneId: nextId));
-                }
-
+                list.Add(new DndSceneOption("social", $"Talk to {SceneFocusName()}", DndGamePhase.Social));
+                AddThreatOptions(list, linked, nextId);
                 break;
 
             case DndGamePhase.Social:
-                list.Add(new DndSceneOption("check:persuade", "Try to persuade", DndGamePhase.Check, CheckStat: DndCheckStat.Luck, CheckDc: _rules.DefaultCheckDc, CheckReason: "Persuade"));
-                list.Add(new DndSceneOption("return", "Return to exploring", DndGamePhase.Exploration));
-                if (!string.IsNullOrWhiteSpace(linked))
-                {
-                    list.Add(new DndSceneOption($"combat:{linked}", "Start the fight", DndGamePhase.Combat, EncounterTemplateId: linked));
-                }
-
-                if (!string.IsNullOrWhiteSpace(nextId))
-                {
-                    list.Add(new DndSceneOption("continue", "Continue to the next scene", PhaseForSceneKind(FindScene(nextId)?.Kind ?? DndSceneKind.Exploration), NextSceneId: nextId));
-                }
-
+            {
+                var focus = SceneFocusName();
+                list.Add(new DndSceneOption(
+                    "check:persuade",
+                    $"Persuade {focus}",
+                    DndGamePhase.Check,
+                    CheckStat: DndCheckStat.Luck,
+                    CheckDc: _rules.DefaultCheckDc,
+                    CheckReason: $"Persuade {focus}"));
+                list.Add(new DndSceneOption("return", "Step back from the conversation", DndGamePhase.Exploration));
+                AddThreatOptions(list, linked, nextId);
                 break;
+            }
 
             case DndGamePhase.Travel:
-                if (!string.IsNullOrWhiteSpace(nextId))
+                list.Add(new DndSceneOption("check:navigate", "Navigate the route", DndGamePhase.Check, CheckStat: DndCheckStat.Dex, CheckDc: _rules.DefaultCheckDc, CheckReason: "Navigate"));
+                list.Add(new DndSceneOption("return", "Turn back", DndGamePhase.Exploration));
+                if (!string.IsNullOrWhiteSpace(nextId) && FindScene(nextId)?.Kind != DndSceneKind.Combat)
                 {
                     list.Add(new DndSceneOption("continue", "Continue traveling", PhaseForSceneKind(FindScene(nextId)?.Kind ?? DndSceneKind.Exploration), NextSceneId: nextId));
                 }
 
-                list.Add(new DndSceneOption("check:navigate", "Navigate the route", DndGamePhase.Check, CheckStat: DndCheckStat.Dex, CheckDc: _rules.DefaultCheckDc, CheckReason: "Navigate"));
-                list.Add(new DndSceneOption("rest", "Camp for the night", DndGamePhase.Rest));
-                if (!string.IsNullOrWhiteSpace(linked))
-                {
-                    list.Add(new DndSceneOption($"combat:{linked}", "Ambush! Start the fight", DndGamePhase.Combat, EncounterTemplateId: linked));
-                }
-
-                list.Add(new DndSceneOption("return", "Turn back", DndGamePhase.Exploration));
+                AddThreatOptions(list, linked, nextId);
                 break;
 
             case DndGamePhase.Check:
@@ -746,6 +740,149 @@ public sealed partial class DndCampaignRunner
         }
 
         return list.AsReadOnly();
+    }
+
+    private void AddThreatOptions(List<DndSceneOption> list, string linked, string nextId)
+    {
+        if (!_sceneBeatResolved || list == null)
+        {
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(linked))
+        {
+            list.Add(new DndSceneOption(
+                $"combat:{linked}",
+                $"Fight {SceneFocusName()}",
+                DndGamePhase.Combat,
+                EncounterTemplateId: linked));
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(nextId) && FindScene(nextId)?.Kind != DndSceneKind.Combat)
+        {
+            list.Add(new DndSceneOption(
+                "continue",
+                "Move on",
+                PhaseForSceneKind(FindScene(nextId)?.Kind ?? DndSceneKind.Exploration),
+                NextSceneId: nextId));
+        }
+    }
+
+    private string SceneFocusName()
+    {
+        var linked = CurrentScene()?.LinkedEncounterTemplateId;
+        if (!string.IsNullOrWhiteSpace(linked) &&
+            _templates.TryGetValue(linked, out var template) &&
+            template?.Boss != null &&
+            !string.IsNullOrWhiteSpace(template.Boss.Name))
+        {
+            return template.Boss.Name.Trim();
+        }
+
+        return "the crowd";
+    }
+
+    private IReadOnlyList<string> BuildPresentNames()
+    {
+        var names = new List<string>();
+        var linked = CurrentScene()?.LinkedEncounterTemplateId;
+        if (!string.IsNullOrWhiteSpace(linked) && _templates.TryGetValue(linked, out var template) && template != null)
+        {
+            if (template.Boss != null && !string.IsNullOrWhiteSpace(template.Boss.Name))
+            {
+                names.Add(template.Boss.Name.Trim());
+            }
+
+            if (template.Adds != null)
+            {
+                foreach (var add in template.Adds)
+                {
+                    if (add != null && !string.IsNullOrWhiteSpace(add.Name))
+                    {
+                        names.Add(add.Name.Trim());
+                    }
+                }
+            }
+        }
+
+        if (names.Count == 0 &&
+            _sessionPhase is DndGamePhase.Exploration or DndGamePhase.Social or DndGamePhase.Check)
+        {
+            names.Add("the crowd");
+        }
+
+        return names.AsReadOnly();
+    }
+
+    private string BuildObjective()
+    {
+        var scene = CurrentScene();
+        var focus = SceneFocusName();
+        var title = string.IsNullOrWhiteSpace(scene?.Title) ? "this scene" : scene.Title.Trim();
+        return _sessionPhase switch
+        {
+            DndGamePhase.PartyFormation => "Sit down with a character sheet.",
+            DndGamePhase.SessionStart => "Hear the hook, then begin the first scene.",
+            DndGamePhase.Exploration => string.IsNullOrWhiteSpace(scene?.Summary)
+                ? $"Learn what is happening in {title}."
+                : TrimObjective(scene.Summary),
+            DndGamePhase.Social => $"Get {focus} to talk. Learn what they know.",
+            DndGamePhase.Travel => "Get the party to the next place in one piece.",
+            DndGamePhase.Check => _pendingCheck == null
+                ? "Finish the check."
+                : _pendingCheck.Reason,
+            DndGamePhase.Rest => "Recover, then return to the scene.",
+            DndGamePhase.Combat => $"Defeat {focus}.",
+            DndGamePhase.Aftermath => string.IsNullOrWhiteSpace(scene?.Summary)
+                ? "Catch your breath, then continue."
+                : TrimObjective(scene.Summary),
+            DndGamePhase.Failed => "Take a long rest to revive, or end the session.",
+            DndGamePhase.Complete => "The prepared story is finished.",
+            _ => string.Empty
+        };
+    }
+
+    private string BuildProgressHint()
+    {
+        var focus = SceneFocusName();
+        return _sessionPhase switch
+        {
+            DndGamePhase.PartyFormation => "Need a sheet, then say I'll join.",
+            DndGamePhase.SessionStart => "Begin when the table is ready.",
+            DndGamePhase.Exploration when !_sceneBeatResolved =>
+                $"Search or talk to {focus}. The fight is not on the table until you engage this scene.",
+            DndGamePhase.Exploration =>
+                $"You've engaged the scene. Fight {focus} if the threat breaks, or keep talking.",
+            DndGamePhase.Social when !_sceneBeatResolved =>
+                $"Persuade {focus}, or step back. A fight is not offered until this conversation goes somewhere.",
+            DndGamePhase.Social =>
+                $"You have a read on {focus}. Persuade again, step back, or fight if they turn hostile.",
+            DndGamePhase.Travel => "Navigate, turn back, or keep traveling.",
+            DndGamePhase.Check => "Roll the check or cancel it.",
+            DndGamePhase.Rest => "Short rest, long rest, or break camp.",
+            DndGamePhase.Combat => "Attack, cast, or pass. When everyone has acted, enemies go.",
+            DndGamePhase.Aftermath => "Continue the adventure when you're ready.",
+            DndGamePhase.Failed => "Long rest to revive.",
+            _ => string.Empty
+        };
+    }
+
+    private static string TrimObjective(string summary)
+    {
+        var text = (summary ?? string.Empty).Trim();
+        if (text.Length == 0)
+        {
+            return string.Empty;
+        }
+
+        var stop = text.IndexOfAny(new[] { '.', '!', '?' });
+        if (stop >= 0 && stop < 180)
+        {
+            return text[..(stop + 1)].Trim();
+        }
+
+        return text.Length <= 180 ? text : text[..177].TrimEnd() + "...";
     }
 
     private DndSceneDefinition CurrentScene() => FindScene(_currentSceneId);

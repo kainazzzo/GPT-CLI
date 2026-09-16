@@ -38,7 +38,7 @@ public sealed class DndPersistenceRoundtripTests
     [Fact]
     public void EncounterRunner_ToState_FromState_preserves_pending_rolls_and_can_continue()
     {
-        var dice = new FixedDiceRoller(new[] { 20, 4, 4 });
+        var dice = new FixedDiceRoller(new[] { 20, 4, 4, 1, 1, 1 });
         var clock = new FakeClock(DateTimeOffset.Parse("2026-02-08T00:00:00Z"));
 
         var r1 = new DndEncounterRunner(BasicEncounter(), diceRoller: dice, clock: clock);
@@ -108,8 +108,7 @@ public sealed class DndPersistenceRoundtripTests
         Assert.NotNull(s1.ActiveEncounter);
 
         var camp2 = DndCampaignRunner.FromState(s1, diceRoller: dice, clock: clock);
-        camp2.RollAll();
-        var progressed = camp2.Ready("p1");
+        var progressed = camp2.RollAll();
         Assert.True(progressed.Ok);
         Assert.Equal(13, progressed.Campaign.Party["p1"].Hp);
         Assert.NotNull(progressed.NewCampaignLedgerEntries);
