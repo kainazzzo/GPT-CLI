@@ -135,6 +135,29 @@ public sealed class DndSessionRunnerTests
     }
 
     [Fact]
+    public void Social_does_not_consume_the_table_action()
+    {
+        var camp = MakeCampaign();
+        camp.RegisterEncounterTemplate(BasicTemplate());
+        camp.StartSession();
+        camp.ChooseOption("begin", "p1");
+
+        var talked = camp.ChooseOption("social", "p1");
+        Assert.True(talked.Ok);
+        Assert.Equal(DndGamePhase.Social, talked.Campaign.Session.Phase);
+
+        camp.ChooseOption("return", "p1");
+        var blocked = camp.ChooseOption("check:search", "p1");
+        Assert.False(blocked.Ok);
+        Assert.Contains("Already acted", blocked.Error, StringComparison.OrdinalIgnoreCase);
+
+        camp.Ready("p1");
+        var searched = camp.ChooseOption("check:search", "p1");
+        Assert.True(searched.Ok);
+        Assert.Equal(DndGamePhase.Check, searched.Campaign.Session.Phase);
+    }
+
+    [Fact]
     public void Exploration_check_rolls_and_returns()
     {
         var dice = new FixedDiceRoller(new[] { 11 });

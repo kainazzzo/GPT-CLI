@@ -27,10 +27,11 @@ Every later game reply should keep that footer (`RenderTurnResult` / `WithSessio
 Player text mapping, in order:
 
 1. Bang commands (`!state`, `!attack`, …) in game only.
-2. Table control (`I'll join` / `I'll play` / `ready` / `done`) before the LLM — `HandleJoinOrReadyAsync`. Do not let auto-route map join onto `gptcli_dnd_ready`.
-3. LLM auto-route with conversation + **listed options in context**. Prefer `gptcli_dnd_choose`. Sit-down paraphrases use `gptcli_dnd_join`. `gptcli_dnd_encounterstart` is excluded from auto-route (slash override still exists).
-4. Deterministic fallback: session start / natural combat verbs / `TryMatchSessionOption`.
-5. Short fallback if nothing handled.
+2. Table control (`I'll join` / `I'll play` / `ready` / `done`) before the LLM — `HandleJoinOrReadyAsync`. Do not let auto-route map join onto `gptcli_dnd_ready`. At SessionStart, `ready` begins the adventure.
+3. Scene questions (`where are we?`, `who is around?`) before the LLM — describe the current scene, do not spend a table action.
+4. LLM auto-route with conversation + **listed options in context**. Prefer `gptcli_dnd_choose` only for a committed beat. Sit-down paraphrases use `gptcli_dnd_join`. `gptcli_dnd_encounterstart` is excluded from auto-route (slash override still exists).
+5. Deterministic fallback: session start / natural combat verbs / `TryMatchSessionOption`.
+6. Short fallback if nothing handled.
 
 LLM may narrate 1–4 sentences and pick a listed option or check. LLM must not invent HP, hit/miss, damage, or extra options.
 

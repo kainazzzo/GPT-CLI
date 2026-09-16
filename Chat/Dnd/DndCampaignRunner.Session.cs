@@ -78,23 +78,36 @@ public sealed partial class DndCampaignRunner
         }
 
         var id = option.Id ?? string.Empty;
-        var free = id is "recap" or "party" or "roll" or "cancel" or "return" or "end"
+        var free = id is "recap" or "party" or "roll" or "cancel" or "return" or "end" or "social"
             || (_sessionPhase == DndGamePhase.Failed && id.StartsWith("rest:", StringComparison.OrdinalIgnoreCase));
         var check = id.StartsWith("check:", StringComparison.OrdinalIgnoreCase);
-        if (!free && !check && !TryConsumeSessionAction(actorId, out var actError))
+        var consumed = false;
+        if (!free && !check)
         {
-            return SessionError(actError);
+            if (!TryConsumeSessionAction(actorId, out var actError))
+            {
+                return SessionError(actError);
+            }
+
+            consumed = true;
         }
 
         var result = ApplyOption(option, actorId);
-        if (result.Ok && !free && !check && _sessionPhase != DndGamePhase.Check)
+        if (consumed)
         {
-            var resolvedActor = string.IsNullOrWhiteSpace(actorId)
-                ? _sessionRound.CurrentActorId
-                : actorId;
-            if (!string.IsNullOrWhiteSpace(resolvedActor))
+            if (result.Ok && _sessionPhase != DndGamePhase.Check)
             {
-                _sessionRound.MarkActed(resolvedActor);
+                var resolvedActor = string.IsNullOrWhiteSpace(actorId)
+                    ? _sessionRound.CurrentActorId
+                    : actorId;
+                if (!string.IsNullOrWhiteSpace(resolvedActor))
+                {
+                    _sessionRound.MarkActed(resolvedActor);
+                }
+            }
+            else if (!result.Ok)
+            {
+                _sessionRound.CurrentActorId = string.Empty;
             }
         }
 

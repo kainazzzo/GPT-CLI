@@ -117,6 +117,10 @@ public sealed class DndGameMasterModuleTests
 
         Assert.Equal("check:search", DndGameMasterModule.TryMatchSessionOption("I search the rubble", explore));
         Assert.Equal("social", DndGameMasterModule.TryMatchSessionOption("talk to the survivor", explore));
+        Assert.Null(DndGameMasterModule.TryMatchSessionOption("where are we?", explore));
+        Assert.Null(DndGameMasterModule.TryMatchSessionOption("what is the scene?", explore));
+        Assert.Null(DndGameMasterModule.TryMatchSessionOption("who is around?", explore));
+        Assert.Equal("social", DndGameMasterModule.TryMatchSessionOption("talk to someone.. who is around?", explore));
         Assert.Equal("combat:t1", DndGameMasterModule.TryMatchSessionOption("fight the goblins", explore));
         Assert.Equal("rest", DndGameMasterModule.TryMatchSessionOption("let's rest", explore));
         Assert.Equal("continue", DndGameMasterModule.TryMatchSessionOption("continue", explore));
@@ -148,6 +152,26 @@ public sealed class DndGameMasterModuleTests
         Assert.True(DndGameMasterModule.LooksLikeRoundDone("that's all"));
         Assert.True(DndGameMasterModule.LooksLikeRoundDone("we're done"));
         Assert.False(DndGameMasterModule.LooksLikeRoundDone("I search the rubble"));
+        Assert.True(DndGameMasterModule.LooksLikeInformationalAsk("where are we?"));
+        Assert.True(DndGameMasterModule.LooksLikeInformationalAsk("what is the scene?"));
+        Assert.True(DndGameMasterModule.LooksLikeInformationalAsk("who is around?"));
+        Assert.False(DndGameMasterModule.LooksLikeInformationalAsk("talk to someone.. who is around?"));
+        Assert.False(DndGameMasterModule.LooksLikeInformationalAsk("I search the rubble"));
+        Assert.True(DndGameMasterModule.LooksLikeCommittedBeat("talk to someone.. who is around?"));
+    }
+
+    [Fact]
+    public void FormatPublicActorLabel_hides_discord_user_ids()
+    {
+        Assert.Equal("Tellah", DndGameMasterModule.FormatPublicActorLabel("u:354977892024975375", "Tellah"));
+        Assert.Equal("a player", DndGameMasterModule.FormatPublicActorLabel("u:354977892024975375", null));
+        Assert.Equal("a player", DndGameMasterModule.FormatPublicActorLabel("u:354977892024975375", "u:354977892024975375"));
+        Assert.Equal("a player", DndGameMasterModule.FormatPublicActorLabel("354977892024975375", null));
+        Assert.Equal("Ice Queen", DndGameMasterModule.FormatPublicActorLabel("npc:ice-queen", null));
+        Assert.False(DndGameMasterModule.FormatPublicActorLabel("u:354977892024975375", "Tellah")
+            .Contains("354", StringComparison.Ordinal));
+        Assert.True(DndGameMasterModule.LooksLikeInternalActorId("u:354977892024975375"));
+        Assert.False(DndGameMasterModule.LooksLikeInternalActorId("Tellah"));
     }
 
     [Fact]

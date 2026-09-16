@@ -953,6 +953,11 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 return;
             }
 
+            if (await TryHandleInformationalAskAsync(context, channelState, message, dndState, cancellationToken))
+            {
+                return;
+            }
+
             var handled = await TryHandleAutoRoutedMessageAsync(context, channelState, message, dndState, cancellationToken);
             Console.WriteLine($"[dnd] auto-route: handled={handled} mode=game (channel={message.Channel?.Id})");
             if (handled)
@@ -1005,6 +1010,11 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             EnsureTickLoopRunning(message.Channel.Id);
 
             if (await TryHandleTableControlBeforeRouteAsync(context, channelState, message, dndState, cancellationToken))
+            {
+                return;
+            }
+
+            if (await TryHandleInformationalAskAsync(context, channelState, message, dndState, cancellationToken))
             {
                 return;
             }
@@ -1139,7 +1149,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                     if (enc != null && !enc.IsCompleted)
                     {
                         userCtx.AppendLine("Encounter:");
-                        userCtx.AppendLine($"phase={enc.Phase} round={enc.RoundNumber} current={enc.CurrentActorId}");
+                        userCtx.AppendLine($"phase={enc.Phase} round={enc.RoundNumber} current={ActorPublicName(enc.CurrentActorId, snap, enc)}");
                         userCtx.AppendLine(RenderTargets(enc));
                     }
                 }
@@ -1206,7 +1216,10 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                     "If the session phase is PartyFormation, call `gptcli_dnd_join` when they sit down (`I'll play` / `I'll join` / `I'm in`). Do not call `gptcli_dnd_ready` for join.\n" +
                     "Call `gptcli_dnd_ready` only for ready/done after they have joined, or to close a table/combat round.\n" +
                     "Combat is an open party round: anyone who has not acted may act. After an action resolves, invite the next player. Do not wait on initiative order.\n" +
+                    "Questions about the scene, location, or who is around are not actions. Do not call tools for those — describe the current scene and invite a real beat.\n" +
+                    "Call `gptcli_dnd_choose` only when they commit to a listed beat (search, talk, travel, rest, fight, begin, continue).\n" +
                     "If the line is flavor, not an action, do not call tools. Narrate briefly and invite search, talk, travel, rest, or a fight.\n" +
+                    "Do not write combat-battlefield flavor unless the session phase is Combat.\n" +
                     "Do not call `gptcli_dnd_encounterstart` unless the user explicitly names a template id.\n" +
                     "Never require `!` commands. Resolve pending combat rolls automatically.\n" +
                     "Do not call `gptcli_dnd_mode`. If the user asks to change modes, tell them to use `/gptcli dnd mode value:draft` (or `off`).\n" +
@@ -5869,6 +5882,44 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             RegexOptions.CultureInvariant);
     }
 
+    internal static bool LooksLikeCommittedBeat(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        var lower = text.Trim().ToLowerInvariant();
+        return Regex.IsMatch(
+            lower,
+            @"\b(attack|cast|search|investigate|inspect|fight|combat|ambush|travel|rest|begin|persuade|convince|talk|speak|converse|look around)\b",
+            RegexOptions.CultureInvariant);
+    }
+
+    internal static bool LooksLikeInformationalAsk(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        if (LooksLikeTableJoin(text) || LooksLikeRoundDone(text) || LooksLikeCommittedBeat(text))
+        {
+            return false;
+        }
+
+        var lower = text.Trim().ToLowerInvariant();
+        if (lower.EndsWith('?'))
+        {
+            return true;
+        }
+
+        return Regex.IsMatch(
+            lower,
+            @"\b(where are we|where am i|what(?:'s| is) the scene|what(?:'s| is) going on|who(?:'s| is) (?:around|here|nearby)|what do (?:i|we) see)\b",
+            RegexOptions.CultureInvariant);
+    }
+
     internal static bool LooksLikeBeginIntent(string text)
     {
         if (string.IsNullOrWhiteSpace(text))
@@ -8721,6 +8772,14 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 return new GptCliExecutionResult(true, "No campaign is loaded.", false);
             }
 
+            if (ctx.Message != null &&
+                LooksLikeInformationalAsk(StripBotMentions(ctx.Message.Content ?? string.Empty, ctx.Context?.Client.CurrentUser.Id ?? 0)))
+            {
+                var ask = await BuildInformationalAskReplyAsync(
+                    ctx.ChannelState, st, ctx.User.Id, ctx.Message.Content, ct);
+                return new GptCliExecutionResult(true, ask, false);
+            }
+
             var matched = TryMatchSessionOption(optionRaw, runner.GetSessionSnapshot().Options) ?? optionRaw.Trim();
             var res = await ApplySessionChoiceAsync(
                 ctx.ChannelState,
@@ -8944,6 +9003,161 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         }
     }
 
+    private async Task<bool> TryHandleInformationalAskAsync(
+        DiscordModuleContext context,
+        InstructionGPT.ChannelState channelState,
+        SocketMessage message,
+        DndLiteChannelState dndState,
+        CancellationToken ct)
+    {
+        var text = StripBotMentions(message?.Content ?? string.Empty, context.Client.CurrentUser.Id).Trim();
+        if (!LooksLikeInformationalAsk(text))
+        {
+            return false;
+        }
+
+        var reply = await BuildInformationalAskReplyAsync(channelState, dndState, message.Author.Id, text, ct);
+        if (string.IsNullOrWhiteSpace(reply))
+        {
+            return false;
+        }
+
+        await SendChunkedAsync(message.Channel, reply);
+        TryRecordAssistantReply(channelState, reply);
+        return true;
+    }
+
+    private async Task<string> BuildInformationalAskReplyAsync(
+        InstructionGPT.ChannelState channelState,
+        DndLiteChannelState dndState,
+        ulong userId,
+        string text,
+        CancellationToken ct)
+    {
+        var campaign = await LoadCampaignAsync(channelState, dndState.ActiveCampaignName, ct);
+        var runner = await LoadOrCreateRunnerAsync(channelState, dndState.ActiveCampaignName, ct);
+        if (runner == null)
+        {
+            return $"<@{userId}> No campaign is loaded.";
+        }
+
+        if (!runner.IsSessionStarted)
+        {
+            runner.StartSession();
+            if (campaign != null)
+            {
+                await PersistRunnerAsync(channelState, dndState.ActiveCampaignName, campaign, runner, ct);
+            }
+        }
+
+        var snap = runner.GetState();
+        var session = snap?.Session;
+        var sb = new StringBuilder();
+        sb.AppendLine($"<@{userId}>");
+        var title = string.IsNullOrWhiteSpace(session?.CurrentSceneTitle) ? "the scene" : session.CurrentSceneTitle;
+        var summary = string.IsNullOrWhiteSpace(session?.CurrentSceneSummary)
+            ? "The table is open, but a scene hasn't been framed yet. Say `begin` when you want to start."
+            : session.CurrentSceneSummary.Trim();
+        sb.AppendLine($"You're in **{title}**.");
+        sb.AppendLine(TrimToLimit(summary, 400));
+
+        var npcNames = await ListNearbyNpcNamesAsync(channelState, ct);
+        if (LooksLikeWhoIsAroundAsk(text))
+        {
+            sb.AppendLine();
+            if (npcNames.Count == 0)
+            {
+                sb.AppendLine("Nobody named is standing out yet. Talk, search, or pick a fight when you want a beat.");
+            }
+            else
+            {
+                sb.AppendLine("Nearby faces:");
+                foreach (var name in npcNames.Take(8))
+                {
+                    sb.AppendLine($"- {name}");
+                }
+            }
+        }
+        else if (npcNames.Count > 0)
+        {
+            sb.AppendLine();
+            sb.AppendLine("People you could approach: " + string.Join(", ", npcNames.Take(6)) + ".");
+        }
+
+        sb.AppendLine();
+        sb.AppendLine("That's just the room — no action spent. Talk, search, travel, rest, or fight when you want a beat.");
+        var footer = RenderSessionPrompt(snap);
+        if (!string.IsNullOrWhiteSpace(footer))
+        {
+            sb.AppendLine();
+            sb.AppendLine(footer);
+        }
+
+        return TrimToLimit(sb.ToString().Trim(), 1800);
+    }
+
+    internal static bool LooksLikeWhoIsAroundAsk(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        var lower = text.Trim().ToLowerInvariant();
+        return Regex.IsMatch(
+            lower,
+            @"\bwho(?:'s| is)?\s+(?:around|here|nearby|present)\b|\bwho(?:'s| is) around\b",
+            RegexOptions.CultureInvariant);
+    }
+
+    private async Task<List<string>> ListNearbyNpcNamesAsync(InstructionGPT.ChannelState channelState, CancellationToken ct)
+    {
+        var names = new List<string>();
+        try
+        {
+            var dir = Path.Combine(GetLiteRootDirectory(channelState), "profiles", "npcs");
+            if (!Directory.Exists(dir))
+            {
+                return names;
+            }
+
+            foreach (var file in Directory.GetFiles(dir, "*.json").OrderBy(f => f, StringComparer.OrdinalIgnoreCase).Take(12))
+            {
+                ct.ThrowIfCancellationRequested();
+                string json;
+                try
+                {
+                    json = await File.ReadAllTextAsync(file, ct);
+                }
+                catch
+                {
+                    continue;
+                }
+
+                DndLiteNpcProfile npc;
+                try
+                {
+                    npc = JsonSerializer.Deserialize<DndLiteNpcProfile>(json, _jsonOptions);
+                }
+                catch
+                {
+                    continue;
+                }
+
+                if (!string.IsNullOrWhiteSpace(npc?.Name))
+                {
+                    names.Add(npc.Name.Trim());
+                }
+            }
+        }
+        catch
+        {
+            // ignore
+        }
+
+        return names;
+    }
+
     private async Task<(bool handled, bool stateChanged, string responseText)> HandleJoinOrReadyAsync(
         DiscordModuleContext context,
         InstructionGPT.ChannelState channelState,
@@ -9010,7 +9224,10 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         }
         else
         {
-            res = runner.Ready(actorId);
+            var phase = runner.GetSessionSnapshot()?.Phase;
+            res = phase == DndGamePhase.SessionStart
+                ? runner.ChooseOption("begin", actorId)
+                : runner.Ready(actorId);
         }
 
         await PersistRunnerAsync(channelState, dndState.ActiveCampaignName, campaign, runner, ct);
@@ -9663,7 +9880,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             .OrderBy(a => a.IsBoss ? 0 : 1)
             .ThenBy(a => a.Name, StringComparer.OrdinalIgnoreCase)
             .Take(6)
-            .Select(a => $"{a.Name} ({a.ActorId})")
+            .Select(a => string.IsNullOrWhiteSpace(a.Name) ? ActorPublicName(a.ActorId, encounter: encounter) : a.Name.Trim())
             .ToList() ?? new List<string>();
 
         return enemies.Count == 0 ? "no living enemies listed" : string.Join(", ", enemies);
@@ -10967,6 +11184,11 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             mechanics = TrimToLimit((fallbackText ?? (res?.Error ?? "error")).Trim(), 2600);
         }
 
+        if (res is { Ok: false })
+        {
+            return WithSessionFooter(TrimToLimit(mechanics, 3500), res);
+        }
+
         if (!settings.Enabled || string.Equals(settings.Mode, GameNarrationModeOff, StringComparison.OrdinalIgnoreCase))
         {
             return WithSessionFooter(TrimToLimit(mechanics, 3500), res);
@@ -11289,6 +11511,21 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             return $"{combatEmoji} **Stay sharp.** {line}";
         }
 
+        var phase = res.Campaign?.Session?.Phase;
+        if (phase != null && phase != DndGamePhase.Combat)
+        {
+            var scene = res.Campaign?.Session?.CurrentSceneSummary;
+            if (!string.IsNullOrWhiteSpace(scene))
+            {
+                return TrimToLimit(scene.Trim(), 220);
+            }
+
+            if (!string.IsNullOrWhiteSpace(actionLabel))
+            {
+                return $"**{actionLabel.Trim()}.** The scene holds — pick a listed option when you want a beat.";
+            }
+        }
+
         if (!string.IsNullOrWhiteSpace(actionLabel))
         {
             return $"{combatEmoji} **{actionLabel.Trim()} resolved.** Keep momentum and call the next beat.";
@@ -11387,13 +11624,29 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             : RenderNextRequest(next, res?.EncounterResult?.State).Split('\n', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault() ?? string.Empty;
 
         var sb = new StringBuilder();
-        sb.AppendLine("Write a GM combat lead line for Discord.");
+        var phase = res?.Campaign?.Session?.Phase;
+        var inCombat = phase == DndGamePhase.Combat;
+        sb.AppendLine(inCombat
+            ? "Write a GM combat lead line for Discord."
+            : "Write a short in-world GM line for Discord. Match the current scene; do not describe a battlefield unless combat is happening.");
+        sb.AppendLine($"Session phase: {phase?.ToString() ?? "unknown"}.");
+        if (!string.IsNullOrWhiteSpace(res?.Campaign?.Session?.CurrentSceneSummary))
+        {
+            sb.AppendLine("Scene: " + TrimToLimit(res.Campaign.Session.CurrentSceneSummary, 220));
+        }
         sb.AppendLine($"Character limit: {Math.Clamp(maxLeadChars, 120, 1200)}");
         sb.AppendLine($"Emoji density: {NormalizeGameNarrationEmojiLevel(emojiLevel)} (2-5 emojis when possible).");
         sb.AppendLine("Rules:");
         sb.AppendLine("- Do not invent new mechanics, dice values, or damage.");
         sb.AppendLine("- Do not prefix with tags/labels like [encounter-start], encounter-start, or action headers.");
-        sb.AppendLine("- Keep urgency, pressure, and table energy high.");
+        if (inCombat)
+        {
+            sb.AppendLine("- Keep urgency, pressure, and table energy high.");
+        }
+        else
+        {
+            sb.AppendLine("- Stay in the location. No generic combat hype.");
+        }
         sb.AppendLine("- Keep it to one short paragraph.");
         if (!string.IsNullOrWhiteSpace(actionLabel))
         {
@@ -11562,7 +11815,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             var seated = session.SeatedActorIds;
             if (seated is { Count: > 0 })
             {
-                sb.AppendLine("Seated: " + string.Join(", ", seated));
+                sb.AppendLine("Seated: " + string.Join(", ", seated.Select(id => ActorPublicName(id, snap))));
             }
         }
         else if (!string.IsNullOrWhiteSpace(session.CurrentSceneSummary) &&
@@ -11592,13 +11845,28 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
                 DndTurnResult.BuildNextRequest(snap.ActiveEncounterState, Array.Empty<DndPendingRoll>()),
                 snap.ActiveEncounterState));
             sb.AppendLine(RenderTargets(snap.ActiveEncounterState));
-            sb.AppendLine(RenderTableRoundFooter(snap.ActiveEncounterState.ActedThisRoundActorIds, snap.ActiveEncounterState.ReadyActorIds, snap.ActiveEncounterState.ReadyQuorumNeeded, snap.ActiveEncounterState.CurrentActorId));
+            sb.AppendLine(RenderTableRoundFooter(
+                    snap.ActiveEncounterState.ActedThisRoundActorIds,
+                    snap.ActiveEncounterState.ReadyActorIds,
+                    snap.ActiveEncounterState.ReadyQuorumNeeded,
+                    snap.ActiveEncounterState.CurrentActorId,
+                    snap,
+                    snap.ActiveEncounterState));
         }
         else if (session.Phase != DndGamePhase.PartyFormation && session.Options is { Count: > 0 })
         {
             sb.AppendLine("**Options:**");
             sb.AppendLine(DndCampaignRunner.FormatOptionList(session.Options));
-            sb.AppendLine(RenderTableRoundFooter(session.ActedThisRoundActorIds, session.ReadyActorIds, session.ReadyQuorumNeeded, session.TableCurrentActorId));
+            if (session.Phase != DndGamePhase.SessionStart)
+            {
+                sb.AppendLine(RenderTableRoundFooter(
+                    session.ActedThisRoundActorIds,
+                    session.ReadyActorIds,
+                    session.ReadyQuorumNeeded,
+                    session.TableCurrentActorId,
+                    snap,
+                    snap.ActiveEncounterState));
+            }
         }
 
         return TrimToLimit(sb.ToString().Trim(), 1800);
@@ -11613,6 +11881,10 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 
         var raw = text.Trim();
         var lower = raw.ToLowerInvariant();
+        if (LooksLikeInformationalAsk(raw))
+        {
+            return null;
+        }
 
         if (int.TryParse(raw, out var index) && index >= 1 && index <= options.Count)
         {
@@ -11635,7 +11907,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
             (new[] { "search", "investigate", "look around", "inspect" }, "check:search"),
             (new[] { "persuade", "convince", "bargain" }, "check:persuade"),
             (new[] { "navigate", "find the way" }, "check:navigate"),
-            (new[] { "talk", "speak", "ask", "converse", "social" }, "social"),
+            (new[] { "talk", "speak", "converse", "social" }, "social"),
             (new[] { "travel", "hit the road", "move on" }, "travel"),
             (new[] { "make camp", "camp" }, "rest"),
             (new[] { "fight", "combat", "ambush", "charge" }, "combat"),
@@ -11704,7 +11976,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
     private static string RenderEncounterSnapshot(DndEncounterSnapshot enc)
     {
         var sb = new StringBuilder();
-        sb.AppendLine($"Encounter: phase={enc.Phase}, round={enc.RoundNumber}, current={enc.CurrentActorId}");
+        sb.AppendLine($"Encounter: phase={enc.Phase}, round={enc.RoundNumber}, current={ActorPublicName(enc.CurrentActorId, encounter: enc)}");
         sb.AppendLine(RenderTargets(enc));
         return TrimToLimit(sb.ToString().Trim(), 1700);
     }
@@ -11721,7 +11993,8 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         foreach (var e in enemies)
         {
             var alive = e.IsAlive ? "" : " (down)";
-            lines.Add($"- {e.ActorId} | {e.Name}{alive} | HP {e.Hp}/{e.MaxHp} MP {e.Mp}/{e.MaxMp}");
+            var name = string.IsNullOrWhiteSpace(e.Name) ? ActorPublicName(e.ActorId, encounter: enc) : e.Name.Trim();
+            lines.Add($"- {name}{alive} | HP {e.Hp}/{e.MaxHp} MP {e.Mp}/{e.MaxMp}");
         }
 
         return TrimToLimit(string.Join("\n", lines), 1700);
@@ -11731,12 +12004,21 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         IReadOnlyList<string> acted,
         IReadOnlyList<string> ready,
         int quorumNeeded,
-        string currentActorId)
+        string currentActorId,
+        DndCampaignSnapshot snap = null,
+        DndEncounterSnapshot encounter = null)
     {
-        var actedText = acted == null || acted.Count == 0 ? "(none)" : string.Join(", ", acted);
+        var actedText = acted == null || acted.Count == 0
+            ? "(none)"
+            : string.Join(", ", acted.Select(id => ActorPublicName(id, snap, encounter)));
         var readyText = ready == null || ready.Count == 0 ? "0" : ready.Count.ToString();
-        var lockText = string.IsNullOrWhiteSpace(currentActorId) ? "open floor" : $"{currentActorId} resolving";
-        return $"**Table:** {lockText}. Acted: {actedText}. Done votes: {readyText}/{Math.Max(1, quorumNeeded)}. Say `done` after you act.";
+        var lockText = string.IsNullOrWhiteSpace(currentActorId)
+            ? "open floor"
+            : $"{ActorPublicName(currentActorId, snap, encounter)} resolving";
+        var hint = (acted != null && acted.Count > 0)
+            ? "You can keep talking. Say `done` when the table is finished with this beat."
+            : "Talk is free. Search, travel, rest, or fight spends your beat; say `done` after that if others are waiting.";
+        return $"**Table:** {lockText}. Acted: {actedText}. Done votes: {readyText}/{Math.Max(1, quorumNeeded)}. {hint}";
     }
 
     private static string RenderNextRequest(DndNextRequest next, DndEncounterSnapshot encounter = null)
@@ -11776,35 +12058,38 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
     }
 
     private static string RenderActorReference(string actorId, DndEncounterSnapshot encounter)
+        => ActorPublicName(actorId, encounter: encounter);
+
+    internal static string ActorPublicName(
+        string actorId,
+        DndCampaignSnapshot snap = null,
+        DndEncounterSnapshot encounter = null)
     {
-        if (string.IsNullOrWhiteSpace(actorId))
+        string known = null;
+        if (!string.IsNullOrWhiteSpace(actorId) &&
+            snap?.Party != null &&
+            snap.Party.TryGetValue(actorId, out var member) &&
+            member != null &&
+            !string.IsNullOrWhiteSpace(member.Name))
         {
-            return "unknown";
+            known = member.Name;
+        }
+        else
+        {
+            known = ResolveActorDisplayName(encounter ?? snap?.ActiveEncounterState, actorId);
         }
 
-        var trimmed = actorId.Trim();
-        var name = ResolveActorDisplayName(encounter, trimmed);
+        return FormatPublicActorLabel(actorId, known);
+    }
 
-        if (IsPcActorId(trimmed))
+    internal static string FormatPublicActorLabel(string actorId, string knownName)
+    {
+        if (!string.IsNullOrWhiteSpace(knownName) && !LooksLikeInternalActorId(knownName))
         {
-            var token = trimmed[2..].Trim();
-            if (ulong.TryParse(token, out var userId))
-            {
-                var mention = $"<@{userId}>";
-                if (!string.IsNullOrWhiteSpace(name) && !string.Equals(name, trimmed, StringComparison.OrdinalIgnoreCase))
-                {
-                    return $"{name} ({mention})";
-                }
-
-                return mention;
-            }
+            return knownName.Trim();
         }
 
-        if (!string.IsNullOrWhiteSpace(name) && !string.Equals(name, trimmed, StringComparison.OrdinalIgnoreCase))
-        {
-            return name;
-        }
-
+        var trimmed = (actorId ?? string.Empty).Trim();
         if (string.Equals(trimmed, "default:default", StringComparison.OrdinalIgnoreCase))
         {
             return "Boss";
@@ -11812,12 +12097,33 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
 
         if (IsNpcActorId(trimmed))
         {
-            var slug = trimmed[4..].Trim();
-            var humanized = HumanizeSlug(slug);
+            var humanized = HumanizeSlug(trimmed[4..]);
             return string.IsNullOrWhiteSpace(humanized) ? "NPC" : humanized;
         }
 
-        return trimmed;
+        if (IsPcActorId(trimmed) || LooksLikeInternalActorId(trimmed))
+        {
+            return "a player";
+        }
+
+        return string.IsNullOrWhiteSpace(trimmed) ? "someone" : trimmed;
+    }
+
+    internal static bool LooksLikeInternalActorId(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        var s = value.Trim();
+        if (s.StartsWith("u:", StringComparison.OrdinalIgnoreCase) ||
+            s.StartsWith("npc:", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return ulong.TryParse(s, out var n) && n >= 1_000_000_000_000UL;
     }
 
     private static string HumanizeSlug(string value)
@@ -15331,7 +15637,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         {
             var pc = await LoadPcProfileAsync(channelState, uid, ct);
             var name = pc?.Name;
-            userCtx.AppendLine($"- {ToActorId(uid)} | <@{uid}> | {(string.IsNullOrWhiteSpace(name) ? "(no sheet)" : name.Trim())}");
+            userCtx.AppendLine($"- {(string.IsNullOrWhiteSpace(name) ? "a player" : name.Trim())}");
         }
 
         foreach (var id in party.NpcActorIds
@@ -15342,7 +15648,7 @@ public sealed class DndGameMasterModule : FeatureModuleBase, IModuleEnablementHo
         {
             var npc = await LoadNpcProfileAsync(channelState, id.Trim(), ct);
             var name = npc?.Name;
-            userCtx.AppendLine($"- {id.Trim()} | {(string.IsNullOrWhiteSpace(name) ? "(no sheet)" : name.Trim())}");
+            userCtx.AppendLine($"- {(string.IsNullOrWhiteSpace(name) ? FormatPublicActorLabel(id.Trim(), null) : name.Trim())}");
         }
     }
 

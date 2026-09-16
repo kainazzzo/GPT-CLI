@@ -25,7 +25,7 @@ Started with `StartSession()` (idempotent). Scenes are synthesized if empty.
 | `PartyFormation` | Empty table / everyone sat out | `party` only; sit down via `JoinParty`, start via `Ready` |
 | `SessionStart` | Intro/recap | `begin`, `recap`, `party` |
 | `Exploration` | Location play | `check:search`, `social`, `travel`, `rest`, `combat:{templateId}`, `continue` |
-| `Social` | Overlay talk | `check:persuade`, `return`, combat, `continue` |
+| `Social` | Overlay talk (free to enter) | `check:persuade`, `return`, combat, `continue` |
 | `Travel` | Overlay travel | `continue`, `check:navigate`, `rest`, combat, `return` |
 | `Check` | Pending ability check | `roll`, `cancel` |
 | `Rest` | Camp | `rest:short`, `rest:long`, `return` |
@@ -35,6 +35,8 @@ Started with `StartSession()` (idempotent). Scenes are synthesized if empty.
 | `Complete` | Finale | none |
 
 Overlays (`Social`, `Travel`, `Rest`, `Check`) remember `PreviousPhase` and do not change `CurrentSceneId`. `ChooseOption` accepts option id, 1-based index, unique label, or unique substring.
+
+Session table rounds (exploration/social/travel): `begin` / `continue` / `travel` / `rest` / `combat` consume one action. `social`, `recap`, `party`, and `return` are free. Failed options release the current-actor lock. Questions are adapter-side and must not call `ChooseOption`.
 
 `begin` / `continue` call `MoveToScene(NextSceneId)`. Entering a `Combat` scene starts that template via `StartEncounter`. Victory → aftermath scene. Defeat → `Failed` (and campaign `IsFailed`).
 
@@ -67,7 +69,6 @@ Actors have `DndStats`, `MaxHp`/`Hp`, `MaxMp`/`Mp`. Sides: Party vs Enemy (one b
 Phases: `NotStarted → InCombat → Completed` (initiative is no longer an action gate).
 
 - Start: open **party round**. `CurrentActorId` empty means anyone who has not acted may declare.
-- One attack/cast/pass per living party actor per round. Declaring locks `CurrentActorId` until rolls resolve.
 - Enemies do **not** act after each PC. `Ready(actorId)` (must have acted) or `EndPartyRound()` / `TimeoutIdle()` closes the round: unacted PCs sit out, then all enemies act vs **participating** PCs (acted or joined this round).
 - Done quorum is `max(1, ceil(activePcCount / 3))` (1 of 2). `npc:` actors do not vote.
 - `AddPartyActor` / campaign `JoinParty` seats a late joiner mid-fight (targetable this enemy phase).
